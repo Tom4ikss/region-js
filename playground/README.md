@@ -10,6 +10,9 @@
 - **Запуск** — Cmd+Shift+B запускает открытый файл через d8 из настройки
   `regions.d8Path` в `.vscode/settings.json`.
 
+`.npmrc` здесь включает `omit-lockfile-registry-resolved`: в `package-lock.json` нет адресов
+архивов, только версии и хеши, а пакеты берутся из того registry, который настроен у вас.
+
 Из терминала:
 
 ```sh
