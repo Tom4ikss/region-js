@@ -27,6 +27,8 @@ print('payload items:', await worker); // 3
 
 Работает только в тестовой оболочке движка `d8`, в браузер и Node это не попадает.
 
+**Документация:** https://tom4ikss.github.io/region-js/ · **Релиз:** [v0.1.0-alpha](https://github.com/Tom4ikss/region-js/releases/tag/v0.1.0-alpha)
+
 ## Что умеет
 
 - **Регионы.** `new Region()`, `region.run(fn)` копирует простые объекты, массивы, строки и типизированные массивы в общую кучу. Читать и писать может только владелец, остальные получают `OwnershipError`.
@@ -48,7 +50,7 @@ scripts/setup.sh                     # depot_tools, V8 на нужном ком�
 v8-src/v8/out/release/d8 --harmony-regions --module tests/channels.js
 ```
 
-Документация — `docs/index.html`, её можно открыть прямо из файла. Пересобрать с выводом примеров: `python3 docs/_build/build.py`.
+Документация — на [сайте](https://tom4ikss.github.io/region-js/) или в `docs/index.html`, её можно открыть прямо из файла. Пересобрать с выводом примеров: `python3 docs/_build/build.py`.
 
 Песочница: откройте папку `playground/` в VSCode, выполните `npm install`, запуск открытого файла — Cmd+Shift+B. Подробнее в `playground/README.md`.
 
