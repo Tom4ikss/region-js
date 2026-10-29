@@ -1,0 +1,10 @@
+language js
+
+`spawn($callback, $...)` where {
+  $callback <: contains or { `eval($...)`, `with ($_) $_` },
+  register_diagnostic(
+    span = $callback,
+    message = "spawn() callbacks cannot use eval or with: the variables they need cannot be known in advance.",
+    severity = "error"
+  )
+}

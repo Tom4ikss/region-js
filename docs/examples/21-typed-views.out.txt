@@ -1,0 +1,7 @@
+старый view, регион в воркере: 0 undefined
+старый view после возврата: 0
+поле прочитано заново: 100 3
+view до freeze: 0
+запись в замороженный view: 2
+fill: Cannot perform %TypedArray%.prototype.fill on a detached or out-of-bounds or immutable ArrayBuffer
+после thaw: 20

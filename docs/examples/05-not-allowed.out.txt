@@ -1,0 +1,12 @@
+функция: TypeError: onClick() {} cannot be moved into a region
+Map: TypeError: #<Map> cannot be moved into a region
+Date: TypeError: [object Date] cannot be moved into a region
+BigInt: TypeError: 10 cannot be shared
+объект другого региона: TypeError: OwnershipError: a region object cannot reference objects outside its region
+Uint8Array: ok
+ArrayBuffer: TypeError: #<ArrayBuffer> cannot be moved into a region
+DataView: TypeError: #<DataView> cannot be moved into a region
+Int32Array на SharedArrayBuffer: TypeError: [object Int32Array] cannot be moved into a region
+экземпляр класса: TypeError: #<Point> cannot be moved into a region
+наследник Array: TypeError: [object Array] cannot be moved into a region
+объект без прототипа: ok

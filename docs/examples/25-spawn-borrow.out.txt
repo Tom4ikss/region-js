@@ -1,0 +1,5 @@
+console.warn: spawn() task ended while still borrowing region 0; the borrow was released. Use region.borrowWhile() to keep a borrow across async work.
+readers после задачи: 0
+главный поток разморозил и записал: 55
+задача читает позже: OwnershipError: region 0 is owned by isolate 0, not by isolate 1
+borrowWhile: 55 (readers: 2) | readers после задачи: 0

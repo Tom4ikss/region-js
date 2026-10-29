@@ -1,0 +1,2 @@
+>> неделя: 3 строки, аргументов 2
+TypeError: spawn() cannot send this: it contains a function, a class instance or another value that cannot be moved into a region

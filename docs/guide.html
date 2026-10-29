@@ -1,0 +1,689 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="description" content="Region, region.run, правила чтения и записи, переезд через postMessage, Region.of, freeze, borrow, рассылка и типизированные массивы. Каждый шаг с запущенным примером.">
+<title>API шаг за шагом · Регионы владения в V8</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="index.html"><svg width="26" height="26" viewBox="0 0 26 26" aria-hidden="true"><rect x="1" y="1" width="24" height="24" rx="7" fill="var(--series-1)"/><rect x="6" y="6" width="14" height="14" rx="4" fill="none" stroke="#fff" stroke-width="2"/><circle cx="13" cy="13" r="2.6" fill="#fff"/></svg><span>Регионы владения</span></a>
+  <span class="badge">эксперимент · форк V8</span>
+  <span class="spacer"></span>
+  <span class="meta">работает только в d8</span>
+</header>
+<div class="layout">
+<nav class="sidebar" aria-label="Разделы">
+<ol>
+<li><a href="index.html">Что это такое</a></li>
+<li><a href="problem.html">Зачем это нужно</a></li>
+<li><a href="ideas.html">Идея владения</a></li>
+<li><a href="guide.html" aria-current="page">API шаг за шагом</a></li>
+<li><a href="spawn.html">spawn: задачи в потоках</a></li>
+<li><a href="channels.html">Каналы</a></li>
+<li><a href="practices.html">Как делать и как не делать</a></li>
+<li><a href="tooling.html">Редактор и линтеры</a></li>
+<li><a href="inside.html">Как это устроено</a></li>
+<li><a href="numbers.html">Цифры</a></li>
+<li><a href="limits.html">Ограничения и планы</a></li>
+</ol>
+<p class="side-note">Исследовательский прототип. Все примеры на сайте запущены в собранном d8, вывод настоящий.</p>
+</nav>
+<main>
+<article class="content">
+<p class="eyebrow">Глава 3</p>
+<h1>API шаг за шагом</h1>
+<p class="lead">Здесь всё, что есть в прототипе, кроме <code>spawn</code> (ему отдана <a href="spawn.html">отдельная страница</a>). Каждый пример — файл из папки <code>examples/</code>, запущенный в собранном d8. Под кодом — его настоящий вывод.</p>
+
+<div class="callout aside">
+<span class="callout-title">Как читать примеры</span>
+<p>Примеры запускаются так: <code>d8 --harmony-regions файл.js</code> (полная команда — на странице <a href="limits.html#run">«Ограничения и планы»</a>). Вместо <code>console.log</code> в d8 используется <code>print</code>. Строку-предупреждение «V8 is running with experimental features enabled», которую d8 печатает первой, мы из вывода убрали.</p>
+<p>Некоторые примеры запускаются с флагом <code>--module</code>, чтобы писать <code>await</code> прямо на верхнем уровне файла. Такие файлы начинаются со строки <code>// d8-flags: --module</code>.</p>
+<p>Ещё одна особенность d8: <code>worker.getMessage()</code> останавливает поток, пока не придёт ответ от воркера. Так короче писать примеры. В браузере то же самое делается через <code>worker.onmessage</code> или промис, который ждут через <code>await</code>.</p>
+</div>
+
+<h2 id="region">1. Создать регион</h2>
+<p><code>new Region()</code> создаёт пустой регион, владелец — текущий поток. Положить в него данные можно через <code>region.run(fn)</code>: функция выполняется как обычно, а то, что она вернула, копируется в регион вместе со всем, на что ссылается. <code>run</code> возвращает уже копию, которая лежит в регионе.</p>
+
+<figure class="example"><div class="ex-head"><span class="file"><a href="examples/01-first-region.js">examples/01-first-region.js</a></span><button class="copy" type="button">Копировать</button></div><pre class="code"><code><span class="tok-comment">// Первый регион: создать, прочитать, изменить.</span>
+<span class="tok-keyword">const</span> region = <span class="tok-keyword">new</span> <span class="tok-api">Region</span>();
+
+<span class="tok-keyword">const</span> user = region.<span class="tok-api">run</span>(() =&gt; ({
+  name: <span class="tok-string">'Аня'</span>,
+  tags: [<span class="tok-string">'admin'</span>, <span class="tok-string">'beta'</span>],
+  settings: { theme: <span class="tok-string">'dark'</span> },
+}));
+
+<span class="tok-fn">print</span>(<span class="tok-string">'имя:'</span>, user.name);
+<span class="tok-fn">print</span>(<span class="tok-string">'тема:'</span>, user.settings.theme);
+<span class="tok-fn">print</span>(<span class="tok-string">'тегов:'</span>, user.tags.length);
+
+user.name = <span class="tok-string">'Анна'</span>;            <span class="tok-comment">// владелец может писать</span>
+user.settings.theme = <span class="tok-string">'light'</span>;
+<span class="tok-fn">print</span>(<span class="tok-string">'после записи:'</span>, user.name, user.settings.theme);
+
+<span class="tok-fn">print</span>(<span class="tok-string">'id региона:'</span>, region.<span class="tok-api">id</span>, <span class="tok-string">'| владелец (isolate):'</span>, region.<span class="tok-api">owner</span>);</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8</span></div><pre class="out">имя: Аня
+тема: dark
+тегов: 2
+после записи: Анна light
+id региона: 0 | владелец (isolate): 0</pre></figure>
+
+<p>Копирование внутрь происходит один раз, при создании. Дальше объекты можно передавать сколько угодно раз без копий. <code>region.id</code> — номер региона, <code>region.owner</code> — номер потока-владельца (в терминах V8 — isolate; у главного потока номер 0). Номера освободившихся регионов движок раздаёт заново, так что <code>id</code> уникален только среди живых регионов.</p>
+<div class="callout limit">
+<span class="callout-title">Важно</span>
+<p>Объекты, которые вы создали внутри <code>fn</code>, и объекты в регионе — разные. Если внутри функции вы сохранили ссылку на свой объект где-то снаружи, она будет указывать на обычный объект, а не на копию в регионе. Работайте с тем, что вернул <code>run</code>.</p>
+</div>
+
+<h2 id="rules">2. Чтение и запись</h2>
+<p>Владелец читает и пишет поля как обычно. Но есть три правила:</p>
+<ul>
+  <li>в поле можно записать число, строку, <code>true</code>/<code>false</code>, <code>null</code>, <code>undefined</code> или объект <em>из того же региона</em>;</li>
+  <li>обычный объект из своего потока записать нельзя: он живёт вне региона, и другой поток не смог бы его прочитать. Исключение — типизированный массив: он копируется в регион (<a href="#typed">раздел 9</a>);</li>
+  <li>набор полей фиксирован: добавить новое свойство нельзя. Отсутствующее поле читается как <code>undefined</code>.</li>
+</ul>
+
+<figure class="example"><div class="ex-head"><span class="file"><a href="examples/03-read-write.js">examples/03-read-write.js</a></span><button class="copy" type="button">Копировать</button></div><pre class="code"><code><span class="tok-comment">// Правила чтения и записи для владельца.</span>
+<span class="tok-keyword">const</span> tryIt = (label, fn) =&gt; {
+  <span class="tok-keyword">try</span> {
+    <span class="tok-fn">print</span>(label + <span class="tok-string">':'</span>, <span class="tok-fn">fn</span>());
+  } <span class="tok-keyword">catch</span> (e) {
+    <span class="tok-fn">print</span>(label + <span class="tok-string">': '</span> + e.name + <span class="tok-string">': '</span> + e.message);
+  }
+};
+
+<span class="tok-keyword">const</span> region = <span class="tok-keyword">new</span> <span class="tok-api">Region</span>();
+<span class="tok-keyword">const</span> cart = region.<span class="tok-api">run</span>(() =&gt; ({ total: <span class="tok-number">0</span>, items: [{ id: <span class="tok-number">1</span>, qty: <span class="tok-number">2</span> }], note: <span class="tok-keyword">null</span> }));
+
+<span class="tok-fn">tryIt</span>(<span class="tok-string">'число'</span>, () =&gt; (cart.total = <span class="tok-number">42</span>));
+<span class="tok-fn">tryIt</span>(<span class="tok-string">'строка'</span>, () =&gt; (cart.note = <span class="tok-string">'позвонить '</span> + <span class="tok-string">'до 18:00'</span>));
+<span class="tok-fn">tryIt</span>(<span class="tok-string">'объект из того же региона'</span>, () =&gt; {
+  cart.note = cart.items[<span class="tok-number">0</span>];
+  <span class="tok-keyword">return</span> cart.note.qty;
+});
+<span class="tok-fn">tryIt</span>(<span class="tok-string">'обычный локальный объект'</span>, () =&gt; (cart.note = { text: <span class="tok-string">'привет'</span> }));
+<span class="tok-fn">tryIt</span>(<span class="tok-string">'новое свойство'</span>, () =&gt; (cart.discount = <span class="tok-number">10</span>));
+<span class="tok-fn">tryIt</span>(<span class="tok-string">'чтение несуществующего'</span>, () =&gt; cart.discount);
+
+<span class="tok-comment">// Циклы и общие части графа сохраняются.</span>
+<span class="tok-keyword">const</span> graph = region.<span class="tok-api">run</span>(() =&gt; {
+  <span class="tok-keyword">const</span> a = { name: <span class="tok-string">'a'</span> };
+  <span class="tok-keyword">const</span> b = { name: <span class="tok-string">'b'</span>, peer: a };
+  a.peer = b;
+  <span class="tok-keyword">return</span> { a, b };
+});
+<span class="tok-fn">tryIt</span>(<span class="tok-string">'цикл сохранился'</span>, () =&gt; graph.a.peer.peer === graph.a);</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8</span></div><pre class="out">число: 42
+строка: позвонить до 18:00
+объект из того же региона: 2
+<span class="err">обычный локальный объект: TypeError: OwnershipError: a region object cannot reference objects outside its region</span>
+<span class="err">новое свойство: TypeError: Cannot add property discount, region objects have a fixed shape</span>
+чтение несуществующего: undefined
+цикл сохранился: true</pre></figure>
+
+<p>Циклы и общие куски графа при копировании сохраняются: если два поля указывали на один объект, в регионе они тоже указывают на одну копию.</p>
+
+<div class="callout analogy">
+<span class="callout-title">Почему форма фиксирована</span>
+<p>Регион — как квартира с уже расставленной мебелью. Переставлять вещи внутри (менять значения полей) можно, а пристраивать новую комнату (добавлять свойство) нельзя. Благодаря этому другой поток, получив регион, видит объекты точно такой формы, какой их создали, и движку не нужно согласовывать изменения структуры между потоками.</p>
+</div>
+
+<h2 id="arrays">3. Массивы и методы</h2>
+<p>У объектов региона нет своего прототипа. Когда вы обращаетесь к полю, которого нет в самом объекте, движок ищет его в <code>Array.prototype</code> или <code>Object.prototype</code> того потока, который сейчас читает. Поэтому работают <code>for...of</code>, spread, <code>map</code>, <code>filter</code>, <code>slice</code>, <code>includes</code> и другие методы, которые ничего не меняют в исходном массиве. А методы, меняющие длину (<code>push</code>, <code>pop</code>, <code>splice</code>), бросают ошибку: длина массива тоже часть формы.</p>
+
+<figure class="example"><div class="ex-head"><span class="file"><a href="examples/04-arrays.js">examples/04-arrays.js</a></span><button class="copy" type="button">Копировать</button></div><pre class="code"><code><span class="tok-comment">// Массивы в регионе: что работает, что нет.</span>
+<span class="tok-keyword">const</span> tryIt = (label, fn) =&gt; {
+  <span class="tok-keyword">try</span> {
+    <span class="tok-fn">print</span>(label + <span class="tok-string">':'</span>, <span class="tok-fn">fn</span>());
+  } <span class="tok-keyword">catch</span> (e) {
+    <span class="tok-fn">print</span>(label + <span class="tok-string">': '</span> + e.name + <span class="tok-string">': '</span> + e.message);
+  }
+};
+
+<span class="tok-keyword">const</span> region = <span class="tok-keyword">new</span> <span class="tok-api">Region</span>();
+<span class="tok-keyword">const</span> scores = region.<span class="tok-api">run</span>(() =&gt; [<span class="tok-number">3</span>, <span class="tok-number">1</span>, <span class="tok-number">4</span>, <span class="tok-number">1</span>, <span class="tok-number">5</span>]);
+
+<span class="tok-fn">tryIt</span>(<span class="tok-string">'for...of'</span>, () =&gt; {
+  <span class="tok-keyword">let</span> sum = <span class="tok-number">0</span>;
+  <span class="tok-keyword">for</span> (<span class="tok-keyword">const</span> x <span class="tok-keyword">of</span> scores) sum += x;
+  <span class="tok-keyword">return</span> sum;
+});
+<span class="tok-fn">tryIt</span>(<span class="tok-string">'spread'</span>, () =&gt; Math.<span class="tok-fn">max</span>(...scores));
+<span class="tok-fn">tryIt</span>(<span class="tok-string">'map/filter'</span>, () =&gt; scores.<span class="tok-fn">map</span>((x) =&gt; x * <span class="tok-number">10</span>).<span class="tok-fn">filter</span>((x) =&gt; x &gt; <span class="tok-number">10</span>).<span class="tok-api">join</span>(<span class="tok-string">','</span>));
+<span class="tok-fn">tryIt</span>(<span class="tok-string">'slice'</span>, () =&gt; scores.<span class="tok-fn">slice</span>(<span class="tok-number">1</span>, <span class="tok-number">3</span>).<span class="tok-api">join</span>(<span class="tok-string">','</span>));
+<span class="tok-fn">tryIt</span>(<span class="tok-string">'includes'</span>, () =&gt; scores.<span class="tok-fn">includes</span>(<span class="tok-number">4</span>));
+<span class="tok-fn">tryIt</span>(<span class="tok-string">'запись по индексу'</span>, () =&gt; {
+  scores[<span class="tok-number">0</span>] = <span class="tok-number">9</span>;
+  <span class="tok-keyword">return</span> scores[<span class="tok-number">0</span>];
+});
+<span class="tok-fn">tryIt</span>(<span class="tok-string">'push'</span>, () =&gt; scores.<span class="tok-fn">push</span>(<span class="tok-number">2</span>));
+
+<span class="tok-comment">// Перечисление ключей и JSON работают как у обычных объектов.</span>
+<span class="tok-keyword">const</span> point = region.<span class="tok-api">run</span>(() =&gt; ({ x: <span class="tok-number">1</span>, y: <span class="tok-number">2</span> }));
+<span class="tok-fn">tryIt</span>(<span class="tok-string">'Array.isArray'</span>, () =&gt; Array.<span class="tok-fn">isArray</span>(scores));
+<span class="tok-fn">tryIt</span>(<span class="tok-string">'Object.keys'</span>, () =&gt; JSON.<span class="tok-fn">stringify</span>(Object.<span class="tok-fn">keys</span>(point)));
+<span class="tok-fn">tryIt</span>(<span class="tok-string">'Object.entries'</span>, () =&gt; JSON.<span class="tok-fn">stringify</span>(Object.<span class="tok-fn">entries</span>(point)));
+<span class="tok-fn">tryIt</span>(<span class="tok-string">'for...in'</span>, () =&gt; {
+  <span class="tok-keyword">const</span> keys = [];
+  <span class="tok-keyword">for</span> (<span class="tok-keyword">const</span> key <span class="tok-keyword">in</span> point) keys.<span class="tok-fn">push</span>(key);
+  <span class="tok-keyword">return</span> keys.<span class="tok-api">join</span>(<span class="tok-string">','</span>);
+});
+<span class="tok-fn">tryIt</span>(<span class="tok-string">'JSON.stringify'</span>, () =&gt; JSON.<span class="tok-fn">stringify</span>({ point, scores }));
+<span class="tok-fn">tryIt</span>(<span class="tok-string">'flat'</span>, () =&gt; region.<span class="tok-api">run</span>(() =&gt; [[<span class="tok-number">1</span>, <span class="tok-number">2</span>], [<span class="tok-number">3</span>]]).<span class="tok-fn">flat</span>().<span class="tok-api">join</span>(<span class="tok-string">','</span>));
+<span class="tok-fn">tryIt</span>(<span class="tok-string">'spread объекта'</span>, () =&gt; {
+  <span class="tok-keyword">const</span> copy = { ...point, z: <span class="tok-number">3</span> }; <span class="tok-comment">// обычный объект, в него можно добавлять поля</span>
+  <span class="tok-keyword">return</span> JSON.<span class="tok-fn">stringify</span>(copy);
+});
+<span class="tok-fn">tryIt</span>(<span class="tok-string">'деструктуризация'</span>, () =&gt; {
+  <span class="tok-keyword">const</span> { x, y } = point;
+  <span class="tok-keyword">return</span> x + y;
+});</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8</span></div><pre class="out">for...of: 14
+spread: 5
+map/filter: 30,40,50
+slice: 1,4
+includes: true
+запись по индексу: 9
+<span class="err">push: TypeError: Cannot add property 5, region objects have a fixed shape</span>
+Array.isArray: true
+Object.keys: ["x","y"]
+Object.entries: [["x",1],["y",2]]
+for...in: x,y
+JSON.stringify: {"point":{"x":1,"y":2},"scores":[9,1,4,1,5]}
+flat: 1,2,3
+spread объекта: {"x":1,"y":2,"z":3}
+деструктуризация: 3</pre></figure>
+
+<p>Перечисление ключей тоже работает как у обычных объектов: <code>Object.keys</code>, <code>Object.values</code>, <code>Object.entries</code>, <code>for...in</code>, <code>JSON.stringify</code> (массив региона превращается в JSON-массив), <code>Array.isArray</code>, <code>flat</code>, spread объекта <code>{ ...obj }</code> и деструктуризация. Spread даёт обычный объект, в который уже можно добавлять поля. Копия при этом поверхностная: вложенные объекты остаются в регионе.</p>
+<p>Для потока, который не владеет регионом, всё это бросает <code>OwnershipError</code>, как и обычное чтение поля (пример в <a href="#move">разделе 5</a>).</p>
+
+<div class="callout limit">
+<span class="callout-title">Про скорость</span>
+<p>Методы из <code>Array.prototype</code> (<code>map</code>, <code>filter</code>, <code>Array.from</code>, spread массива, <code>for...of</code>) на массиве региона пока заметно медленнее простого цикла <code>for</code> по индексу. Цифры — на странице <a href="practices.html#methods">«Как делать и как не делать»</a>.</p>
+</div>
+
+<h2 id="not-allowed">4. Что нельзя положить в регион</h2>
+<p>В регион попадают только простые объекты (их прототип — <code>Object.prototype</code> или <code>null</code>), обычные массивы, типизированные массивы и примитивы. Функции, <code>Map</code>, <code>Set</code>, <code>Date</code>, <code>BigInt</code>, <code>Symbol</code>, сам <code>ArrayBuffer</code>, <code>DataView</code>, экземпляры классов, наследники <code>Array</code> и объекты из другого региона вызовут ошибку. Типизированным массивам отдан <a href="#typed">раздел 9</a>.</p>
+
+<figure class="example"><div class="ex-head"><span class="file"><a href="examples/05-not-allowed.js">examples/05-not-allowed.js</a></span><button class="copy" type="button">Копировать</button></div><pre class="code"><code><span class="tok-comment">// Что нельзя положить в регион.</span>
+<span class="tok-keyword">const</span> region = <span class="tok-keyword">new</span> <span class="tok-api">Region</span>();
+<span class="tok-keyword">const</span> tryRun = (label, make) =&gt; {
+  <span class="tok-keyword">try</span> {
+    region.<span class="tok-api">run</span>(make);
+    <span class="tok-fn">print</span>(label + <span class="tok-string">': ok'</span>);
+  } <span class="tok-keyword">catch</span> (e) {
+    <span class="tok-fn">print</span>(label + <span class="tok-string">': '</span> + e.name + <span class="tok-string">': '</span> + e.message);
+  }
+};
+
+<span class="tok-fn">tryRun</span>(<span class="tok-string">'функция'</span>, () =&gt; ({ <span class="tok-fn">onClick</span>() {} }));
+<span class="tok-fn">tryRun</span>(<span class="tok-string">'Map'</span>, () =&gt; ({ cache: <span class="tok-keyword">new</span> <span class="tok-fn">Map</span>() }));
+<span class="tok-fn">tryRun</span>(<span class="tok-string">'Date'</span>, () =&gt; ({ when: <span class="tok-keyword">new</span> <span class="tok-fn">Date</span>(<span class="tok-number">0</span>) }));
+<span class="tok-fn">tryRun</span>(<span class="tok-string">'BigInt'</span>, () =&gt; ({ big: <span class="tok-number">10n</span> }));
+<span class="tok-fn">tryRun</span>(<span class="tok-string">'объект другого региона'</span>, () =&gt; ({ other: <span class="tok-keyword">new</span> <span class="tok-api">Region</span>().<span class="tok-api">run</span>(() =&gt; ({})) }));
+
+<span class="tok-comment">// Типизированные массивы можно (раздел 9), а сам ArrayBuffer, DataView</span>
+<span class="tok-comment">// и массивы поверх SharedArrayBuffer нельзя.</span>
+<span class="tok-fn">tryRun</span>(<span class="tok-string">'Uint8Array'</span>, () =&gt; ({ bytes: <span class="tok-keyword">new</span> <span class="tok-fn">Uint8Array</span>(<span class="tok-number">4</span>) }));
+<span class="tok-fn">tryRun</span>(<span class="tok-string">'ArrayBuffer'</span>, () =&gt; ({ buf: <span class="tok-keyword">new</span> <span class="tok-fn">ArrayBuffer</span>(<span class="tok-number">4</span>) }));
+<span class="tok-fn">tryRun</span>(<span class="tok-string">'DataView'</span>, () =&gt; ({ dv: <span class="tok-keyword">new</span> <span class="tok-fn">DataView</span>(<span class="tok-keyword">new</span> <span class="tok-fn">ArrayBuffer</span>(<span class="tok-number">4</span>)) }));
+<span class="tok-fn">tryRun</span>(<span class="tok-string">'Int32Array на SharedArrayBuffer'</span>, () =&gt; ({ a: <span class="tok-keyword">new</span> <span class="tok-fn">Int32Array</span>(<span class="tok-keyword">new</span> <span class="tok-api">SharedArrayBuffer</span>(<span class="tok-number">8</span>)) }));
+
+<span class="tok-comment">// В регион попадают только простые объекты и массивы. Экземпляр класса и</span>
+<span class="tok-comment">// наследник Array тоже ошибка: без класса они потеряли бы методы.</span>
+<span class="tok-keyword">class</span> Point {
+  <span class="tok-fn">constructor</span>(x) { <span class="tok-keyword">this</span>.x = x; }
+}
+<span class="tok-keyword">class</span> List <span class="tok-keyword">extends</span> Array {}
+<span class="tok-fn">tryRun</span>(<span class="tok-string">'экземпляр класса'</span>, () =&gt; ({ p: <span class="tok-keyword">new</span> <span class="tok-fn">Point</span>(<span class="tok-number">7</span>) }));
+<span class="tok-fn">tryRun</span>(<span class="tok-string">'наследник Array'</span>, () =&gt; List.<span class="tok-fn">from</span>([<span class="tok-number">1</span>, <span class="tok-number">2</span>]));
+<span class="tok-fn">tryRun</span>(<span class="tok-string">'объект без прототипа'</span>, () =&gt; Object.<span class="tok-fn">assign</span>(Object.<span class="tok-fn">create</span>(<span class="tok-keyword">null</span>), { x: <span class="tok-number">1</span> }));</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8</span></div><pre class="out"><span class="err">функция: TypeError: onClick() {} cannot be moved into a region</span>
+<span class="err">Map: TypeError: #&lt;Map&gt; cannot be moved into a region</span>
+<span class="err">Date: TypeError: [object Date] cannot be moved into a region</span>
+<span class="err">BigInt: TypeError: 10 cannot be shared</span>
+<span class="err">объект другого региона: TypeError: OwnershipError: a region object cannot reference objects outside its region</span>
+Uint8Array: ok
+<span class="err">ArrayBuffer: TypeError: #&lt;ArrayBuffer&gt; cannot be moved into a region</span>
+<span class="err">DataView: TypeError: #&lt;DataView&gt; cannot be moved into a region</span>
+<span class="err">Int32Array на SharedArrayBuffer: TypeError: [object Int32Array] cannot be moved into a region</span>
+<span class="err">экземпляр класса: TypeError: #&lt;Point&gt; cannot be moved into a region</span>
+<span class="err">наследник Array: TypeError: [object Array] cannot be moved into a region</span>
+объект без прототипа: ok</pre></figure>
+
+<p>Экземпляр класса раньше молча копировался как обычный объект и терял класс. Теперь это ошибка: у объекта в регионе нет своего прототипа, поэтому методы класса до него всё равно бы не дошли. Если нужны данные из экземпляра, переложите их в простой объект: <code>region.run(() =&gt; ({ x: point.x }))</code>.</p>
+
+<h2 id="move">5. Переезд в воркер</h2>
+<p>Чтобы передать регион воркеру, отправьте его объекты через <code>postMessage</code> и укажите сам регион в списке transfer. Воркер получит те же объекты, а не копию, и станет их владельцем. Главный поток доступ потеряет.</p>
+
+<figure class="example"><div class="ex-head"><span class="file"><a href="examples/06-move.js">examples/06-move.js</a></span><button class="copy" type="button">Копировать</button></div><pre class="code"><code><span class="tok-comment">// Переезд региона в воркер: отправитель теряет доступ, получатель становится владельцем.</span>
+<span class="tok-comment">// В d8 worker.getMessage() блокирует поток до ответа. В браузере здесь был бы onmessage.</span>
+<span class="tok-keyword">const</span> region = <span class="tok-keyword">new</span> <span class="tok-api">Region</span>();
+<span class="tok-keyword">const</span> order = region.<span class="tok-api">run</span>(() =&gt; ({ id: <span class="tok-number">17</span>, status: <span class="tok-string">'new'</span>, lines: [<span class="tok-number">120</span>, <span class="tok-number">80</span>] }));
+
+<span class="tok-keyword">const</span> worker = <span class="tok-keyword">new</span> <span class="tok-api">Worker</span>(
+  <span class="tok-string">`
+  onmessage = ({ data: { order } }) =&gt; {
+    order.status = 'paid';                       // воркер теперь владелец и может писать
+    const total = order.lines[0] + order.lines[1];
+    postMessage('воркер: ' + order.status + ', сумма ' + total);
+  };
+  `</span>,
+  { type: <span class="tok-string">'string'</span> },
+);
+
+worker.<span class="tok-api">postMessage</span>({ order }, [region]); <span class="tok-comment">// регион в transfer list = переезд</span>
+
+<span class="tok-keyword">try</span> {
+  <span class="tok-fn">print</span>(order.status);
+} <span class="tok-keyword">catch</span> (e) {
+  <span class="tok-fn">print</span>(<span class="tok-string">'главный поток:'</span>, e.message);
+}
+<span class="tok-fn">print</span>(worker.<span class="tok-api">getMessage</span>());
+
+<span class="tok-keyword">try</span> {
+  order.status = <span class="tok-string">'cancelled'</span>;
+} <span class="tok-keyword">catch</span> (e) {
+  <span class="tok-fn">print</span>(<span class="tok-string">'главный поток пишет:'</span>, e.message);
+}
+<span class="tok-keyword">try</span> {
+  Object.<span class="tok-fn">keys</span>(order); <span class="tok-comment">// перечисление ключей и JSON.stringify проверяют владельца так же</span>
+} <span class="tok-keyword">catch</span> (e) {
+  <span class="tok-fn">print</span>(<span class="tok-string">'главный поток, Object.keys:'</span>, e.message);
+}
+<span class="tok-fn">print</span>(<span class="tok-string">'владелец региона теперь isolate'</span>, region.<span class="tok-api">owner</span>);
+worker.<span class="tok-api">terminate</span>();</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8</span></div><pre class="out"><span class="err">главный поток: OwnershipError: region 0 is being moved between isolates</span>
+воркер: paid, сумма 200
+<span class="err">главный поток пишет: OwnershipError: region 0 is owned by isolate 1, not by isolate 0</span>
+<span class="err">главный поток, Object.keys: OwnershipError: region 0 is owned by isolate 1, not by isolate 0</span>
+владелец региона теперь isolate 1</pre></figure>
+
+<p>Видно два разных текста ошибки. Сразу после отправки регион ещё в пути: «is being moved between isolates». Когда воркер получил сообщение, владелец уже он: «is owned by isolate 1, not by isolate 0». <code>Object.keys</code>, <code>JSON.stringify</code> и прочее перечисление ключей проверяют владельца так же, как чтение поля.</p>
+<p>Сам объект <code>region</code> в данные сообщения класть не нужно, достаточно объектов из него. Объекты региона всегда передаются по ссылке. Если отправить их без списка transfer, воркер получит ссылку, но прочитать по ней ничего не сможет, пока регион к нему не переедет: владелец остаётся прежним.</p>
+
+<h2 id="of">6. Вернуть регион обратно: <code>Region.of</code></h2>
+<p>В воркере нет переменной <code>region</code>, есть только полученные объекты. <code>Region.of(obj)</code> находит регион по любому его объекту. С ним воркер может вернуть данные тем же способом.</p>
+
+<figure class="example"><div class="ex-head"><span class="file"><a href="examples/07-ping-pong.js">examples/07-ping-pong.js</a></span><button class="copy" type="button">Копировать</button></div><pre class="code"><code><span class="tok-comment">// Отправить объект туда и обратно. Region.of(obj) находит регион объекта.</span>
+<span class="tok-keyword">const</span> region = <span class="tok-keyword">new</span> <span class="tok-api">Region</span>();
+<span class="tok-keyword">const</span> state = region.<span class="tok-api">run</span>(() =&gt; ({ turns: <span class="tok-number">0</span>, last: <span class="tok-string">''</span> }));
+
+<span class="tok-keyword">const</span> worker = <span class="tok-keyword">new</span> <span class="tok-api">Worker</span>(
+  <span class="tok-string">`
+  onmessage = ({ data: { state } }) =&gt; {
+    state.turns += 1;
+    state.last = 'воркер';
+    postMessage({ state }, [Region.of(state)]); // вернуть владение
+  };
+  `</span>,
+  { type: <span class="tok-string">'string'</span> },
+);
+
+<span class="tok-keyword">let</span> current = state;
+<span class="tok-keyword">const</span> rounds = <span class="tok-number">1000</span>;
+<span class="tok-keyword">const</span> start = performance.<span class="tok-fn">now</span>();
+<span class="tok-keyword">for</span> (<span class="tok-keyword">let</span> i = <span class="tok-number">0</span>; i &lt; rounds; i++) {
+  worker.<span class="tok-api">postMessage</span>({ state: current }, [<span class="tok-api">Region</span>.<span class="tok-keyword">of</span>(current)]);
+  current = worker.<span class="tok-api">getMessage</span>().state;
+  current.turns += <span class="tok-number">1</span>; <span class="tok-comment">// мы снова владельцы</span>
+}
+<span class="tok-keyword">const</span> us = ((performance.<span class="tok-fn">now</span>() - start) / rounds) * <span class="tok-number">1000</span>;
+
+<span class="tok-fn">print</span>(<span class="tok-string">'тот же самый объект:'</span>, current === state);
+<span class="tok-fn">print</span>(<span class="tok-string">'ходов:'</span>, state.turns, <span class="tok-string">'| последний писал:'</span>, state.last);
+<span class="tok-fn">print</span>(<span class="tok-string">`один круг туда-обратно: ${</span>us.<span class="tok-fn">toFixed</span>(<span class="tok-number">1</span>)<span class="tok-string">} µs`</span>);
+
+<span class="tok-keyword">try</span> {
+  <span class="tok-api">Region</span>.<span class="tok-keyword">of</span>({ plain: <span class="tok-keyword">true</span> });
+} <span class="tok-keyword">catch</span> (e) {
+  <span class="tok-fn">print</span>(<span class="tok-string">'Region.of для обычного объекта:'</span>, e.message);
+}
+worker.<span class="tok-api">terminate</span>();</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8; время у вас будет другим</span></div><pre class="out">тот же самый объект: true
+ходов: 2000 | последний писал: воркер
+один круг туда-обратно: 10.7 µs
+Region.of для обычного объекта: Region.of() expects an object from a region</pre></figure>
+
+<p>Тысяча кругов «туда и обратно», и в конце в руках тот же самый объект: <code>current === state</code>. Один круг — два переезда и две пересылки сообщения — занимает около 10–11 микросекунд, от запуска к запуску по-разному.</p>
+
+<h2 id="freeze">7. Заморозка и рассылка</h2>
+<p><code>region.freeze()</code> делает регион доступным только для чтения, причём всем потокам. Замороженный регион отправляют без списка transfer: каждый получатель видит те же объекты. <code>region.frozen</code> показывает, заморожен ли регион. <code>region.thaw()</code> возвращает владельцу право писать.</p>
+
+<figure class="example"><div class="ex-head"><span class="file"><a href="examples/08-freeze-broadcast.js">examples/08-freeze-broadcast.js</a></span><button class="copy" type="button">Копировать</button></div><pre class="code"><code><span class="tok-comment">// Заморозка: читать могут все, писать никто. Рассылка одного объекта трём воркерам.</span>
+<span class="tok-keyword">const</span> region = <span class="tok-keyword">new</span> <span class="tok-api">Region</span>();
+<span class="tok-keyword">const</span> config = region.<span class="tok-api">run</span>(() =&gt; ({ api: <span class="tok-string">'https://example.test'</span>, retries: <span class="tok-number">3</span>, flags: [<span class="tok-string">'a'</span>, <span class="tok-string">'b'</span>, <span class="tok-string">'c'</span>] }));
+
+region.<span class="tok-api">freeze</span>();
+<span class="tok-fn">print</span>(<span class="tok-string">'frozen:'</span>, region.<span class="tok-api">frozen</span>);
+
+<span class="tok-keyword">try</span> {
+  config.retries = <span class="tok-number">5</span>;
+} <span class="tok-keyword">catch</span> (e) {
+  <span class="tok-fn">print</span>(<span class="tok-string">'владелец пишет:'</span>, e.message);
+}
+
+<span class="tok-keyword">const</span> workers = [<span class="tok-number">0</span>, <span class="tok-number">1</span>, <span class="tok-number">2</span>].<span class="tok-fn">map</span>(
+  (i) =&gt;
+    <span class="tok-keyword">new</span> <span class="tok-api">Worker</span>(
+      <span class="tok-string">`
+      onmessage = ({ data: { config } }) =&gt; {
+        let write;
+        try { config.retries = 0; write = 'записал'; } catch (e) { write = 'запись запрещена'; }
+        postMessage('воркер ${</span>i<span class="tok-string">}: ' + config.api + ', флаг ' + config.flags[${</span>i<span class="tok-string">}] + ', ' + write);
+      };
+      `</span>,
+      { type: <span class="tok-string">'string'</span> },
+    ),
+);
+
+<span class="tok-comment">// Без transfer list: замороженный регион не переезжает, а становится общим.</span>
+<span class="tok-keyword">for</span> (<span class="tok-keyword">const</span> w <span class="tok-keyword">of</span> workers) w.<span class="tok-api">postMessage</span>({ config });
+<span class="tok-keyword">for</span> (<span class="tok-keyword">const</span> w <span class="tok-keyword">of</span> workers) <span class="tok-fn">print</span>(w.<span class="tok-api">getMessage</span>());
+<span class="tok-fn">print</span>(<span class="tok-string">'главный поток тоже читает:'</span>, config.retries);
+
+region.<span class="tok-api">thaw</span>();
+config.retries = <span class="tok-number">5</span>;
+<span class="tok-fn">print</span>(<span class="tok-string">'после thaw владелец пишет:'</span>, config.retries);
+<span class="tok-keyword">for</span> (<span class="tok-keyword">const</span> w <span class="tok-keyword">of</span> workers) w.<span class="tok-api">terminate</span>();</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8</span></div><pre class="out">frozen: true
+<span class="err">владелец пишет: OwnershipError: region 0 is frozen; thaw it before writing</span>
+воркер 0: https://example.test, флаг a, запись запрещена
+воркер 1: https://example.test, флаг b, запись запрещена
+воркер 2: https://example.test, флаг c, запись запрещена
+главный поток тоже читает: 3
+после thaw владелец пишет: 5</pre></figure>
+
+<h3 id="thaw-right">Кто может разморозить</h3>
+<p>Разморозить регион может только тот поток, который его заморозил. Остальные получат ошибку «Region is not frozen by this isolate», даже если читают регион. Есть ли это право у текущего потока, показывает <code>region.frozenHere</code>.</p>
+<p>Право можно передать. Если положить замороженный регион в список transfer, данные никуда не едут (они и так общие), а получатель получает право разморозить. Отправитель его теряет, но читать регион может, как и все.</p>
+
+<figure class="example"><div class="ex-head"><span class="file"><a href="examples/22-freeze-handover.js">examples/22-freeze-handover.js</a></span><button class="copy" type="button">Копировать</button></div><pre class="code"><code><span class="tok-comment">// Разморозить регион может только тот поток, который его заморозил.</span>
+<span class="tok-keyword">const</span> region = <span class="tok-keyword">new</span> <span class="tok-api">Region</span>();
+<span class="tok-keyword">const</span> config = region.<span class="tok-api">run</span>(() =&gt; ({ theme: <span class="tok-string">'dark'</span> }));
+region.<span class="tok-api">freeze</span>();
+<span class="tok-fn">print</span>(<span class="tok-string">'главный поток: frozenHere ='</span>, region.<span class="tok-api">frozenHere</span>);
+
+<span class="tok-keyword">const</span> worker = <span class="tok-keyword">new</span> <span class="tok-api">Worker</span>(
+  <span class="tok-string">`onmessage = ({ data: { config } }) =&gt; {
+     const region = Region.of(config);
+     const right = region.frozenHere;
+     let thaw;
+     try {
+       region.thaw();
+       config.theme = 'light';
+       thaw = 'разморозил, theme = ' + config.theme;
+     } catch (e) {
+       thaw = 'thaw: ' + e.message;
+     }
+     postMessage('frozenHere = ' + right + ', ' + thaw);
+   };`</span>,
+  { type: <span class="tok-string">'string'</span> },
+);
+
+<span class="tok-comment">// Без transfer list воркер может читать, но разморозить не может.</span>
+worker.<span class="tok-api">postMessage</span>({ config });
+<span class="tok-fn">print</span>(<span class="tok-string">'воркер без права:'</span>, worker.<span class="tok-api">getMessage</span>());
+
+<span class="tok-comment">// Замороженный регион в transfer list: данные остаются общими,</span>
+<span class="tok-comment">// а воркеру переходит право разморозить.</span>
+worker.<span class="tok-api">postMessage</span>({ config }, [region]);
+<span class="tok-fn">print</span>(<span class="tok-string">'главный поток: frozenHere ='</span>, region.<span class="tok-api">frozenHere</span>);
+<span class="tok-keyword">try</span> {
+  region.<span class="tok-api">thaw</span>();
+} <span class="tok-keyword">catch</span> (e) {
+  <span class="tok-fn">print</span>(<span class="tok-string">'главный поток, thaw:'</span>, e.message);
+}
+<span class="tok-fn">print</span>(<span class="tok-string">'воркер с правом:'</span>, worker.<span class="tok-api">getMessage</span>());
+<span class="tok-keyword">try</span> {
+  <span class="tok-fn">print</span>(config.theme);
+} <span class="tok-keyword">catch</span> (e) {
+  <span class="tok-fn">print</span>(<span class="tok-string">'главный поток читает:'</span>, e.message);
+}
+worker.<span class="tok-api">terminate</span>();</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8</span></div><pre class="out">главный поток: frozenHere = true
+воркер без права: frozenHere = false, thaw: Region is not frozen by this isolate
+главный поток: frozenHere = false
+главный поток, thaw: Region is not frozen by this isolate
+воркер с правом: frozenHere = true, разморозил, theme = light
+<span class="err">главный поток читает: OwnershipError: region 0 is owned by isolate 1, not by isolate 0</span></pre></figure>
+
+<p>Отдать право может только тот, у кого оно есть: если другой поток положит регион в transfer list, будет ошибка «Region was frozen by another isolate». Задача <code>spawn</code>, которая заморозила регион, возвращает право вызывающему вместе с результатом (<a href="spawn.html#frozen">пример на странице про spawn</a>).</p>
+
+<h2 id="borrow">8. Билеты читателя: <code>borrow</code></h2>
+<p><code>region.borrow()</code> выдаёт билет и увеличивает счётчик <code>region.readers</code>. Пока есть хотя бы один билет, <code>thaw()</code> не сработает. <code>ticket.release()</code> сдаёт билет. Если объявить билет через <code>using</code>, он сдастся сам при выходе из блока, даже если внутри случилось исключение.</p>
+
+<figure class="example"><div class="ex-head"><span class="file"><a href="examples/09-borrow.js">examples/09-borrow.js</a></span><button class="copy" type="button">Копировать</button></div><pre class="code"><code><span class="tok-comment">// borrow(): «билет читателя». Пока билеты не сданы, регион нельзя разморозить.</span>
+<span class="tok-keyword">const</span> region = <span class="tok-keyword">new</span> <span class="tok-api">Region</span>();
+<span class="tok-keyword">const</span> prices = region.<span class="tok-api">run</span>(() =&gt; ({ apple: <span class="tok-number">50</span>, pear: <span class="tok-number">70</span> }));
+region.<span class="tok-api">freeze</span>();
+
+<span class="tok-keyword">const</span> ticket = region.<span class="tok-api">borrow</span>();
+<span class="tok-fn">print</span>(<span class="tok-string">'readers:'</span>, region.<span class="tok-api">readers</span>);
+
+<span class="tok-keyword">try</span> {
+  region.<span class="tok-api">thaw</span>();
+} <span class="tok-keyword">catch</span> (e) {
+  <span class="tok-fn">print</span>(<span class="tok-string">'thaw с читателем:'</span>, e.message);
+}
+
+ticket.<span class="tok-api">release</span>();
+<span class="tok-fn">print</span>(<span class="tok-string">'после release, readers:'</span>, region.<span class="tok-api">readers</span>);
+
+{
+  <span class="tok-keyword">using</span> scoped = region.<span class="tok-api">borrow</span>(); <span class="tok-comment">// сдаётся сам при выходе из блока</span>
+  <span class="tok-fn">print</span>(<span class="tok-string">'внутри блока, readers:'</span>, region.<span class="tok-api">readers</span>, <span class="tok-string">'| apple ='</span>, prices.apple);
+}
+<span class="tok-fn">print</span>(<span class="tok-string">'после блока, readers:'</span>, region.<span class="tok-api">readers</span>);
+
+region.<span class="tok-api">thaw</span>();
+prices.apple = <span class="tok-number">55</span>;
+<span class="tok-fn">print</span>(<span class="tok-string">'разморожено, apple ='</span>, prices.apple);
+
+<span class="tok-keyword">try</span> {
+  <span class="tok-keyword">new</span> <span class="tok-api">Region</span>().<span class="tok-api">borrow</span>();
+} <span class="tok-keyword">catch</span> (e) {
+  <span class="tok-fn">print</span>(<span class="tok-string">'borrow незамороженного:'</span>, e.message);
+}</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8</span></div><pre class="out">readers: 1
+thaw с читателем: Region is still borrowed by 1 reader(s)
+после release, readers: 0
+внутри блока, readers: 1 | apple = 50
+после блока, readers: 0
+разморожено, apple = 55
+borrow незамороженного: Region must be frozen to borrow it</pre></figure>
+
+<p>Брать билет можно в любом потоке, в том числе в воркере: <code>Region.of(obj).borrow()</code>. Читать замороженный регион можно и без билета. Билет нужен как гарантия, что регион не разморозят посреди вашего чтения.</p>
+<p><code>region.borrowWhile(fn)</code> берёт билет, вызывает <code>fn</code> и сдаёт билет, когда <code>fn</code> закончилась. Если <code>fn</code> вернула промис, билет сдаётся, когда промис выполнится или отклонится. <code>borrowWhile</code> возвращает то, что вернула <code>fn</code> (для асинхронной функции — промис с её результатом). Внутри задач <code>spawn</code> для асинхронной работы нужен именно он, потому что обычный билет живёт не дольше задачи (<a href="spawn.html#borrow">подробнее на странице про spawn</a>).</p>
+
+<h2 id="typed">9. Типизированные массивы</h2>
+<p>В регион можно положить <code>Uint8Array</code>, <code>Float64Array</code> и остальные типизированные массивы, включая <code>BigInt64Array</code> и <code>Float16Array</code>. Они устроены иначе, чем объекты региона: регион хранит сам блок памяти, а при чтении поля вы получаете обычный локальный типизированный массив, который смотрит на эту память (view). Поэтому работа с ним идёт на полной скорости, как с любым типизированным массивом, без проверки владельца на каждом элементе.</p>
+
+<figure class="example"><div class="ex-head"><span class="file"><a href="examples/20-typed-arrays.js">examples/20-typed-arrays.js</a></span><button class="copy" type="button">Копировать</button></div><pre class="code"><code><span class="tok-comment">// Типизированные массивы в регионе.</span>
+<span class="tok-keyword">const</span> pixels = <span class="tok-keyword">new</span> <span class="tok-fn">Uint8Array</span>([<span class="tok-number">10</span>, <span class="tok-number">20</span>, <span class="tok-number">30</span>, <span class="tok-number">40</span>]);
+<span class="tok-keyword">const</span> region = <span class="tok-keyword">new</span> <span class="tok-api">Region</span>();
+<span class="tok-keyword">const</span> image = region.<span class="tok-api">run</span>(() =&gt; ({ width: <span class="tok-number">2</span>, height: <span class="tok-number">2</span>, pixels }));
+
+<span class="tok-comment">// По умолчанию массив копируется в регион, исходный остаётся нашим.</span>
+image.pixels[<span class="tok-number">0</span>] = <span class="tok-number">99</span>;
+<span class="tok-fn">print</span>(<span class="tok-string">'в регионе:'</span>, image.pixels[<span class="tok-number">0</span>], <span class="tok-string">'| исходный:'</span>, pixels[<span class="tok-number">0</span>]);
+
+<span class="tok-comment">// Каждое чтение поля даёт новый view над той же памятью региона.</span>
+<span class="tok-keyword">const</span> view = image.pixels;
+<span class="tok-fn">print</span>(<span class="tok-string">'тот же объект?'</span>, image.pixels === view, <span class="tok-string">'| те же байты?'</span>, image.pixels[<span class="tok-number">0</span>] === view[<span class="tok-number">0</span>]);
+<span class="tok-fn">print</span>(<span class="tok-string">'это обычный Uint8Array:'</span>, view <span class="tok-keyword">instanceof</span> Uint8Array, view.length);
+
+<span class="tok-comment">// Поле можно заменить другим массивом, даже другой длины: он тоже копируется.</span>
+image.pixels = <span class="tok-keyword">new</span> <span class="tok-fn">Uint8Array</span>(<span class="tok-number">16</span>);
+<span class="tok-fn">print</span>(<span class="tok-string">'новая длина:'</span>, image.pixels.length);
+
+<span class="tok-comment">// transfer: буфер переезжает в регион без копии, исходный отсоединяется.</span>
+<span class="tok-keyword">const</span> copySource = <span class="tok-keyword">new</span> <span class="tok-fn">Float64Array</span>(<span class="tok-number">1_000_000</span>).<span class="tok-fn">fill</span>(<span class="tok-number">0.5</span>);
+<span class="tok-keyword">let</span> start = performance.<span class="tok-fn">now</span>();
+<span class="tok-keyword">const</span> copied = <span class="tok-keyword">new</span> <span class="tok-api">Region</span>().<span class="tok-api">run</span>(() =&gt; ({ samples: copySource }));
+<span class="tok-keyword">const</span> copyMs = performance.<span class="tok-fn">now</span>() - start;
+
+<span class="tok-keyword">const</span> big = <span class="tok-keyword">new</span> <span class="tok-fn">Float64Array</span>(<span class="tok-number">1_000_000</span>).<span class="tok-fn">fill</span>(<span class="tok-number">0.5</span>);
+start = performance.<span class="tok-fn">now</span>();
+<span class="tok-keyword">const</span> moved = <span class="tok-keyword">new</span> <span class="tok-api">Region</span>().<span class="tok-api">run</span>(() =&gt; ({ samples: big }), [big.buffer]);
+<span class="tok-keyword">const</span> transferMs = performance.<span class="tok-fn">now</span>() - start;
+
+<span class="tok-fn">print</span>(<span class="tok-string">`8 МБ копией: ${</span>copyMs.<span class="tok-fn">toFixed</span>(<span class="tok-number">2</span>)<span class="tok-string">} ms, через transfer: ${</span>transferMs.<span class="tok-fn">toFixed</span>(<span class="tok-number">2</span>)<span class="tok-string">} ms`</span>);
+<span class="tok-fn">print</span>(<span class="tok-string">'исходный после transfer:'</span>, big.length, <span class="tok-string">'| в регионе:'</span>, moved.samples.length, copied.samples.length);</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8; время у вас будет другим</span></div><pre class="out">в регионе: 99 | исходный: 10
+тот же объект? false | те же байты? true
+это обычный Uint8Array: true 4
+новая длина: 16
+8 МБ копией: 0.49 ms, через transfer: 0.04 ms
+исходный после transfer: 0 | в регионе: 1000000 1000000</pre></figure>
+
+<ul>
+  <li><strong>По умолчанию массив копируется</strong> в регион, исходный остаётся у вас и с регионом не связан. Если массив был частью большого буфера (<code>subarray</code>), копируются только его байты.</li>
+  <li><strong>Без копии</strong> — через второй аргумент <code>run</code>: <code>region.run(fn, [buffer])</code>. Память массивов, чей <code>ArrayBuffer</code> есть в этом списке, переезжает в регион, а исходный буфер отсоединяется, как после transfer в <code>postMessage</code>: его длина становится 0.</li>
+  <li><strong>Каждое чтение поля даёт новый view</strong>: <code>state.pixels === state.pixels</code> — <code>false</code>, но байты те же. Сохранить view в переменную перед циклом можно и нужно.</li>
+  <li><strong>Записать в поле</strong> новый типизированный массив можно, даже другой длины: он копируется, как в <code>run</code>.</li>
+  <li><strong>Нельзя:</strong> массивы поверх <code>SharedArrayBuffer</code> и буферов с изменяемым размером, сам <code>ArrayBuffer</code> и <code>DataView</code>.</li>
+</ul>
+
+<h3 id="typed-detach">Когда view отсоединяются</h3>
+<p>Пока регион у вас, view над его памятью работают как обычно. Когда регион уезжает в другой поток или замораживается, все view владельца отсоединяются: длина становится 0, элементы читаются как <code>undefined</code>. Так же ведёт себя <code>ArrayBuffer</code> после transfer. Ошибки <code>OwnershipError</code> здесь нет, потому что проверки владельца на каждом элементе нет. После возврата региона старые view так и остаются пустыми: прочитайте поле заново и получите новый.</p>
+<p>Читатели замороженного региона получают view только для чтения. Запись в него вне strict mode молча не проходит, в strict mode и у методов вроде <code>fill</code> и <code>set</code> бросает <code>TypeError</code>.</p>
+<p id="typed-borrow">С view замороженного региона есть ещё одно правило. Обычное поле проверяется при каждом чтении, а view читает память напрямую. Если бы view жил дольше права читать, поток видел бы регион и после разморозки, когда в него уже пишет новый владелец. Поэтому view замороженного региона получают только два потока: тот, кто его заморозил, и тот, кто держит билет <code>borrow()</code>. Остальным чтение такого поля бросает <code>OwnershipError</code>, обычные поля при этом читаются как раньше. Когда поток сдаёт последний билет, его view отсоединяются. View того, кто заморозил, отсоединяются при <code>thaw()</code> или когда он передаёт право разморозки. Внутри <code>spawn</code> билет на замороженные регионы задача берёт сама, на всё время работы (<a href="spawn.html#frozen">подробнее</a>).</p>
+
+<figure class="example"><div class="ex-head"><span class="file"><a href="examples/21-typed-views.js">examples/21-typed-views.js</a></span><button class="copy" type="button">Копировать</button></div><pre class="code"><code><span class="tok-comment">// View отсоединяются, когда регион переезжает или замораживается.</span>
+<span class="tok-keyword">const</span> region = <span class="tok-keyword">new</span> <span class="tok-api">Region</span>();
+<span class="tok-keyword">const</span> state = region.<span class="tok-api">run</span>(() =&gt; ({ samples: <span class="tok-keyword">new</span> <span class="tok-fn">Float64Array</span>([<span class="tok-number">1</span>, <span class="tok-number">2</span>, <span class="tok-number">3</span>]) }));
+<span class="tok-keyword">const</span> view = state.samples;
+
+<span class="tok-keyword">const</span> worker = <span class="tok-keyword">new</span> <span class="tok-api">Worker</span>(
+  <span class="tok-string">`onmessage = ({ data: { state } }) =&gt; {
+     state.samples[0] = 100; // у воркера свой view над той же памятью
+     postMessage({ state }, [Region.of(state)]);
+   };`</span>,
+  { type: <span class="tok-string">'string'</span> },
+);
+worker.<span class="tok-api">postMessage</span>({ state }, [region]);
+<span class="tok-fn">print</span>(<span class="tok-string">'старый view, регион в воркере:'</span>, view.length, view[<span class="tok-number">0</span>]);
+worker.<span class="tok-api">getMessage</span>();
+<span class="tok-fn">print</span>(<span class="tok-string">'старый view после возврата:'</span>, view.length);
+<span class="tok-fn">print</span>(<span class="tok-string">'поле прочитано заново:'</span>, state.samples[<span class="tok-number">0</span>], state.samples.length);
+worker.<span class="tok-api">terminate</span>();
+
+<span class="tok-comment">// Заморозка: view владельца отсоединяются, новые view только для чтения.</span>
+<span class="tok-keyword">const</span> before = state.samples;
+region.<span class="tok-api">freeze</span>();
+<span class="tok-fn">print</span>(<span class="tok-string">'view до freeze:'</span>, before.length);
+<span class="tok-keyword">const</span> frozen = state.samples;
+frozen[<span class="tok-number">1</span>] = -<span class="tok-number">1</span>; <span class="tok-comment">// вне strict mode запись молча не проходит</span>
+<span class="tok-fn">print</span>(<span class="tok-string">'запись в замороженный view:'</span>, frozen[<span class="tok-number">1</span>]);
+<span class="tok-keyword">try</span> {
+  frozen.<span class="tok-fn">fill</span>(<span class="tok-number">0</span>);
+} <span class="tok-keyword">catch</span> (e) {
+  <span class="tok-fn">print</span>(<span class="tok-string">'fill:'</span>, e.message);
+}
+region.<span class="tok-api">thaw</span>();
+state.samples[<span class="tok-number">1</span>] = <span class="tok-number">20</span>;
+<span class="tok-fn">print</span>(<span class="tok-string">'после thaw:'</span>, state.samples[<span class="tok-number">1</span>]);</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8</span></div><pre class="out">старый view, регион в воркере: 0 undefined
+старый view после возврата: 0
+поле прочитано заново: 100 3
+view до freeze: 0
+запись в замороженный view: 2
+fill: Cannot perform %TypedArray%.prototype.fill on a detached or out-of-bounds or immutable ArrayBuffer
+после thaw: 20</pre></figure>
+
+<p>Отсюда правило: не держите view дольше, чем нужно. Прочитали поле, поработали, отпустили. После <code>await</code> задачи, переезда или <code>freeze</code> читайте поле заново. Почему для больших массивов чисел это ещё и быстрее, показано в <a href="practices.html#typed">практике 9</a>.</p>
+
+<h2 id="free">10. Освободить регион: <code>free</code></h2>
+<p>Обычно память регионов, как и любых объектов JS, освобождает сборщик мусора: когда на объекты не осталось ссылок, они исчезают. Но иногда ссылки остаются там, где их не ждёшь: в кэше, в замыкании, в забытой переменной. Тогда большие данные висят в памяти, пока на них кто-то смотрит.</p>
+<p><code>region.free()</code> отдаёт регион сразу, не дожидаясь, пока пропадут ссылки. После этого любое обращение к его объектам бросает <code>OwnershipError: region N was freed</code>, из любого потока и из любого кода, в том числе из уже скомпилированного. Память типизированных массивов освобождается в момент вызова, а view владельца отсоединяются. Сами объекты опустошаются при ближайшей сборке общей кучи: всё, что они держали, уходит, даже если на них ещё есть ссылки. В C такая операция оставила бы висячий указатель, а здесь она безопасна: доступ к региону и так проверяется при каждом обращении, а освобождённый регион — просто ещё одно его состояние.</p>
+<p>Освободить можно только свой регион. Замороженный регион освобождает тот, кто его заморозил, и только когда не осталось билетов, как при <code>thaw()</code>. Регион в пути или чужой освободить нельзя. Объявленный через <code>using</code>, регион освобождается в конце блока. Если к этому времени он уехал в другой поток, <code>using</code> ничего не делает: уехавшее значение не освобождают, как в Rust.</p>
+
+<figure class="example"><div class="ex-head"><span class="file"><a href="examples/34-free.js">examples/34-free.js</a></span><button class="copy" type="button">Копировать</button></div><pre class="code"><code><span class="tok-comment">// d8-flags: --module --expose-gc</span>
+<span class="tok-comment">// free(): регион больше никто не тронет, память отдаётся сразу.</span>
+<span class="tok-keyword">const</span> region = <span class="tok-keyword">new</span> <span class="tok-api">Region</span>();
+<span class="tok-keyword">const</span> tree = region.<span class="tok-api">run</span>(() =&gt; ({
+  name: <span class="tok-string">'дерево'</span>,
+  samples: <span class="tok-keyword">new</span> <span class="tok-fn">Float64Array</span>(<span class="tok-number">1</span> &lt;&lt; <span class="tok-number">20</span>),
+  nodes: Array.<span class="tok-fn">from</span>({ length: <span class="tok-number">10000</span> }, (_, i) =&gt; ({ i })),
+}));
+<span class="tok-fn">print</span>(<span class="tok-string">'байт в регионе:'</span>, region.<span class="tok-api">byteSize</span>);
+<span class="tok-keyword">const</span> samples = tree.samples;
+
+region.<span class="tok-api">free</span>();
+<span class="tok-fn">print</span>(<span class="tok-string">'освобождён:'</span>, region.<span class="tok-api">freed</span>, <span class="tok-string">'| байт после:'</span>, region.<span class="tok-api">byteSize</span>);
+<span class="tok-fn">print</span>(<span class="tok-string">'view после free:'</span>, samples.length);
+<span class="tok-keyword">try</span> {
+  <span class="tok-fn">print</span>(tree.name);
+} <span class="tok-keyword">catch</span> (e) {
+  <span class="tok-fn">print</span>(<span class="tok-string">'обращение после free:'</span>, e.message);
+}
+
+<span class="tok-comment">// using освобождает регион в конце блока.</span>
+<span class="tok-keyword">let</span> leaked;
+{
+  <span class="tok-keyword">using</span> temp = <span class="tok-keyword">new</span> <span class="tok-api">Region</span>();
+  leaked = temp.<span class="tok-api">run</span>(() =&gt; ({ draft: <span class="tok-keyword">true</span> }));
+}
+<span class="tok-keyword">try</span> {
+  leaked.draft;
+} <span class="tok-keyword">catch</span> (e) {
+  <span class="tok-fn">print</span>(<span class="tok-string">'после блока using:'</span>, e.message);
+}
+<span class="tok-fn">print</span>(<span class="tok-string">'живых регионов:'</span>, <span class="tok-api">Region</span>.<span class="tok-api">stats</span>().regions, <span class="tok-string">'| освобождённых:'</span>, <span class="tok-api">Region</span>.<span class="tok-api">stats</span>().<span class="tok-api">freed</span>);</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8 --module --expose-gc</span></div><pre class="out">байт в регионе: 8828792
+освобождён: true | байт после: 0
+view после free: 0
+<span class="err">обращение после free: OwnershipError: region 0 was freed</span>
+<span class="err">после блока using: OwnershipError: region 1 was freed</span>
+живых регионов: 0 | освобождённых: 2</pre></figure>
+
+<p><code>region.byteSize</code> показывает, сколько байт региону досталось при копировании: объекты, их массивы, строки и память типизированных массивов. Это приблизительная цифра, она не учитывает то, что записали в регион позже. <code>Region.stats()</code> показывает, сколько регионов живо, сколько освобождено, но ещё не собрано, и сколько байт держат живые.</p>
+
+<h2 id="reference">Всё API на одной странице</h2>
+<div class="table-wrap">
+<table>
+<thead><tr><th>Что</th><th>Что делает</th></tr></thead>
+<tbody>
+<tr><td><code>new Region()</code></td><td>Пустой регион, владелец — текущий поток.</td></tr>
+<tr><td><code>region.run(fn)</code></td><td>Вызывает <code>fn</code>, копирует результат в регион и возвращает копию.</td></tr>
+<tr><td><code>region.run(fn, [buffer])</code></td><td>То же, но память типизированных массивов с этими <code>ArrayBuffer</code> переезжает без копии, а исходные буферы отсоединяются.</td></tr>
+<tr><td><code>region.id</code>, <code>region.owner</code></td><td>Номер региона и номер потока-владельца.</td></tr>
+<tr><td><code>Region.of(obj)</code></td><td>Регион, в котором лежит <code>obj</code>. Для обычного объекта — ошибка.</td></tr>
+<tr><td><code>worker.postMessage(msg, [region])</code></td><td>Переезд: получатель становится владельцем, отправитель теряет доступ.</td></tr>
+<tr><td><code>worker.postMessage(msg)</code></td><td>Для объектов замороженного региона — рассылка без копии.</td></tr>
+<tr><td><code>worker.postMessage(msg, [frozenRegion])</code></td><td>Для замороженного региона — передать право разморозить.</td></tr>
+<tr><td><code>region.freeze()</code>, <code>region.thaw()</code></td><td>Заморозить (читают все, не пишет никто) и разморозить (только тот, кто заморозил или получил право, и только без читателей).</td></tr>
+<tr><td><code>region.frozen</code>, <code>region.readers</code></td><td>Заморожен ли регион и сколько билетов сейчас выдано.</td></tr>
+<tr><td><code>region.frozenHere</code></td><td>Есть ли у текущего потока право разморозить регион.</td></tr>
+<tr><td><code>region.borrow()</code></td><td>Билет читателя. У билета есть <code>release()</code>, и его можно объявить через <code>using</code>.</td></tr>
+<tr><td><code>region.borrowWhile(fn)</code></td><td>Держит билет, пока выполняется <code>fn</code> или пока не выполнится её промис. Возвращает результат <code>fn</code>.</td></tr>
+<tr><td><code>region.free()</code>, <code>using region = new Region()</code></td><td>Освободить регион: обращения к нему запрещены навсегда, память типизированных массивов отдаётся сразу, объекты опустошаются при сборке.</td></tr>
+<tr><td><code>region.freed</code>, <code>region.byteSize</code>, <code>Region.stats()</code></td><td>Освобождён ли регион, сколько байт в него скопировано, и сводка по всем регионам процесса.</td></tr>
+<tr><td><code>spawn(fn, ...args)</code></td><td>Запустить функцию в отдельном потоке. См. <a href="spawn.html">следующую страницу</a>.</td></tr>
+<tr><td><code>spawn.poolSize</code></td><td>Сколько воркеров в пуле <code>spawn</code>, по умолчанию 4.</td></tr>
+<tr><td><code>spawn.idle()</code></td><td>Промис, который выполнится, когда закончатся все задачи, запущенные этим потоком.</td></tr>
+</tbody>
+</table>
+</div>
+
+<h3 id="errors">Тексты ошибок</h3>
+<p>Ошибки доступа — это <code>TypeError</code>, текст которых начинается с <code>OwnershipError:</code>. Отдельного класса ошибки в прототипе пока нет.</p>
+<div class="table-wrap">
+<table>
+<thead><tr><th>Текст</th><th>Когда бывает</th></tr></thead>
+<tbody>
+<tr><td><code>OwnershipError: region N is owned by isolate X, not by isolate Y</code></td><td>Обращение к региону, которым владеет другой поток.</td></tr>
+<tr><td><code>OwnershipError: region N was freed</code></td><td>Обращение к освобождённому региону.</td></tr>
+<tr><td><code>OwnershipError: region N is being moved between isolates</code></td><td>Регион отправлен, но ещё не получен.</td></tr>
+<tr><td><code>OwnershipError: region N is frozen; thaw it before writing</code></td><td>Запись в замороженный регион, в том числе владельцем.</td></tr>
+<tr><td><code>OwnershipError: a region object cannot reference objects outside its region</code></td><td>Запись в поле обычного объекта или объекта из другого региона.</td></tr>
+<tr><td><code>Cannot add property X, region objects have a fixed shape</code></td><td>Новое свойство, <code>push</code>, запись за концом массива, изменение <code>length</code>.</td></tr>
+<tr><td><code>… cannot be moved into a region</code></td><td>В <code>run</code> попала функция, <code>Map</code>, <code>Date</code>, <code>DataView</code>, массив поверх <code>SharedArrayBuffer</code>, экземпляр класса, наследник <code>Array</code> и т. п.</td></tr>
+<tr><td><code>Region is not frozen by this isolate</code></td><td><code>thaw()</code> в потоке, у которого нет права разморозить.</td></tr>
+<tr><td><code>Region was frozen by another isolate</code></td><td>Замороженный регион в списке transfer у потока без права разморозить.</td></tr>
+<tr><td><code>Region is still borrowed by N reader(s)</code></td><td><code>thaw()</code>, пока не сданы билеты.</td></tr>
+<tr><td><code>Region must be frozen to borrow it</code></td><td><code>borrow()</code> у незамороженного региона.</td></tr>
+<tr><td><code>Region.of() expects an object from a region</code></td><td><code>Region.of</code> для обычного объекта.</td></tr>
+</tbody>
+</table>
+</div>
+<nav class="pager" aria-label="Соседние страницы"><a class="prev" href="ideas.html"><span>← Назад</span>Идея владения</a><a class="next" href="spawn.html"><span>Дальше →</span>spawn: задачи в потоках</a></nav>
+<p class="footer">Регионы владения в V8 — исследовательский прототип, не продукт. Цифры получены на сборке с включёнными проверками (dcheck), Apple Silicon.</p>
+</article>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

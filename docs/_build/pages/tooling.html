@@ -1,0 +1,152 @@
+<!-- title: Редактор и линтеры -->
+<!-- description: Песочница playground: типы для Region и spawn, правила Biome и ESLint. Что ловит каждый слой, как настроить VS Code и что видно только при запуске. -->
+<p class="eyebrow">Глава 7</p>
+<h1>Редактор и линтеры</h1>
+<p class="lead">Большую часть ошибок с регионами и <code>spawn</code> d8 покажет только при запуске. Часть из них можно увидеть раньше, прямо в редакторе. Для этого есть песочница <code>playground/</code>: типы, правила Biome и небольшой плагин ESLint. На этой странице — что ловит каждый из них и как их подключить.</p>
+
+<h2 id="layers">Кто что ловит</h2>
+<p>Проверок три слоя, и у каждого свои возможности. Типы знают, что можно положить в регион и какие у него методы. Biome находит шаблоны в коде, например <code>class</code> внутри колбэка <code>spawn</code>. ESLint умеет следить за порядком выполнения: что задача запущена, а регион трогают до её конца. Остальное видно только при запуске.</p>
+<div class="table-wrap">
+<table>
+<thead><tr><th>Ошибка</th><th>Чем ловится</th></tr></thead>
+<tbody>
+<tr><td>Функция, <code>Map</code>, экземпляр класса, <code>DataView</code> в <code>region.run</code> или в аргументе <code>spawn</code></td><td>типы</td></tr>
+<tr><td>Опечатка в методе региона, новое поле у объекта региона</td><td>типы</td></tr>
+<tr><td><code>class</code>, <code>eval</code> или <code>with</code> в колбэке <code>spawn</code></td><td>Biome, ошибка</td></tr>
+<tr><td>Метод объекта как колбэк: <code>spawn(Math.max)</code></td><td>Biome, ошибка</td></tr>
+<tr><td><code>spawn(...).join()</code></td><td>Biome, предупреждение</td></tr>
+<tr><td>Ручку задачи никто не ждёт, в том числе в колбэке <code>map</code></td><td>ESLint, <a href="#no-floating-spawn"><code>no-floating-spawn</code></a>, предупреждение</td></tr>
+<tr><td>Захваченный регион трогают, пока задача идёт; задачи в цикле хотят один регион; задача пишет в замороженный регион</td><td>ESLint, <a href="#no-region-use-while-spawned"><code>no-region-use-while-spawned</code></a></td></tr>
+<tr><td><code>borrowWhile(async ...)</code>, промис которого никто не ждёт</td><td>ESLint, <a href="#no-floating-borrow-while"><code>no-floating-borrow-while</code></a></td></tr>
+<tr><td>Захваченная переменная с <code>Map</code> или функцией внутри, захваченный <code>this</code> с методами, захват до инициализации, чужой регион, голый <code>borrow()</code> в асинхронной задаче, массив поверх <code>SharedArrayBuffer</code></td><td>только при запуске</td></tr>
+</tbody>
+</table>
+</div>
+
+<h2 id="setup">Как подключить</h2>
+<ol>
+  <li>Откройте папку <code>playground</code> в VS Code целиком (File → Open Folder). Типы и правила подключаются из её настроек, отдельный файл они не увидят.</li>
+  <li>Выполните <code>npm install</code>: он ставит Biome, ESLint и TypeScript.</li>
+  <li>Поставьте расширения Biome и ESLint. VS Code сам предложит их, они записаны в <code>.vscode/extensions.json</code>.</li>
+  <li>Укажите путь к своему d8 в <code>.vscode/settings.json</code>, настройка <code>regions.d8Path</code>. Тогда Cmd+Shift+B запускает открытый файл командой <code>d8 --harmony-regions --module --expose-gc --max-serializer-memory=4000 файл.js</code>.</li>
+</ol>
+<p>То же можно проверить из терминала, в папке песочницы:</p>
+<pre class="shell"><span class="prompt">$ </span>npm run typecheck      # типы, tsc
+<span class="prompt">$ </span>npm run lint           # правила Biome
+<span class="prompt">$ </span>npm run lint:regions   # правила ESLint для папки examples
+<span class="prompt">$ </span>npm run test:rules     # тесты самих правил ESLint</pre>
+<p>В <code>examples/mistakes.js</code> собраны типичные ошибки, и каждая должна подсветиться. Если подсветки нет, начните с этого файла.</p>
+<div class="callout aside">
+<span class="callout-title">Если поменяли плагин</span>
+<p>Сервер ESLint в VS Code загружает плагин один раз. После правки файлов в <code>eslint-plugin-regions/</code> перезапустите его: палитра команд → «ESLint: Restart ESLint Server». Иначе редактор будет показывать старые сообщения или не покажет новые.</p>
+</div>
+
+<h2 id="types">Типы</h2>
+<p>Файл <code>types/regions.d.ts</code> описывает <code>Region</code>, <code>spawn</code> и глобальные функции d8 (<code>print</code>, <code>Worker</code> с его <code>getMessage</code>). Встроенный в VS Code TypeScript читает его через <code>jsconfig.json</code>, ставить ничего не нужно. Это даёт автодополнение и проверку того, что кладётся в регион: результат <code>run</code> и аргументы <code>spawn</code> должны быть данными (примитивы, простые объекты, массивы, типизированные массивы).</p>
+<div class="versus">
+<js-bad>
+region.run(() => new Map());
+region.frezee();
+const state = region.run(() => ({ count: 0 }));
+state.total = 1;
+</js-bad>
+</div>
+<pre class="shell wrap">error TS2322: Type 'Map&lt;any, any&gt;' is not assignable to type 'RegionData'.
+error TS2551: Property 'frezee' does not exist on type 'Region'. Did you mean 'freeze'?
+error TS2339: Property 'total' does not exist on type '{ count: number; }'.</pre>
+<p>Последняя ошибка — та же фиксированная форма, что и в d8 (<a href="guide.html#rules">раздел 2 про API</a>): тип результата <code>run</code> знает только поля, которые были при создании.</p>
+<p>Чего типы не знают. Типизированный массив поверх <code>SharedArrayBuffer</code> для них такой же, как любой другой, а d8 его отклонит. В текущей версии <code>regions.d.ts</code> ещё нет <code>region.frozenHere</code> и <code>spawn.idle()</code>: редактор подчеркнёт их как несуществующие, хотя в d8 они работают.</p>
+
+<h2 id="biome">Biome</h2>
+<p>Правила Biome лежат в <code>rules/*.grit</code> и подключены в <code>biome.json</code>. Они ищут шаблоны в коде и не следят за порядком выполнения. Четыре правила повторяют проверки, которые <code>spawn</code> делает при вызове, только раньше, в редакторе.</p>
+<div class="versus">
+<js-bad>
+spawn(() => { class Local {} return Local.name; });
+spawn(() => eval('1 + 1'));
+spawn(Math.max, 1, 2);
+const value = spawn(() => 42).join();
+</js-bad>
+</div>
+<pre class="shell wrap">× spawn() callbacks cannot declare classes: their methods cannot be checked and sent to the worker. Use plain objects and functions.
+× spawn() callbacks cannot use eval or with: the variables they need cannot be known in advance.
+× spawn() needs an arrow function or a function expression; methods cannot be sent to a worker. Wrap it: spawn(() => ...).
+! join() blocks this thread until the task ends; on the main thread prefer `await spawn(...)`.</pre>
+<p>Правило про <code>join()</code> срабатывает только на цепочку <code>spawn(...).join()</code> и не знает, в каком потоке код. В воркере или в коротком скрипте d8 <code>join()</code> уместен, и предупреждение можно игнорировать. Почему в главном потоке лучше <code>await</code>, показано в <a href="practices.html#await">практике 7</a>.</p>
+
+<h2 id="eslint">ESLint</h2>
+<p>Плагин <code>eslint-plugin-regions/</code> подключён в <code>eslint.config.mjs</code> набором <code>recommended</code>. В нём три правила. ESLint видит области видимости переменных и порядок выражений, поэтому может сказать «регион уехал в задачу на строке 3, а на строке 4 его читают».</p>
+
+<h3 id="no-floating-spawn"><code>regions/no-floating-spawn</code></h3>
+<p>Ручку задачи никто не ждёт: ни <code>await</code>, ни <code>join()</code>, ни возврата из функции. Результат и ошибка такой задачи теряются (ошибку d8 всё же покажет, см. <a href="spawn.html#unhandled">«Ошибки не теряются»</a>). Это предупреждение, а не ошибка.</p>
+<div class="versus">
+<js-bad>
+spawn(() => 1);
+
+await Promise.all([0, 1].map((i) => {
+  spawn(() => i * 2);
+  return i;
+}));
+</js-bad>
+</div>
+<pre class="shell wrap">warning  The result of spawn() is neither awaited nor joined, so its value and errors are lost. Use `await spawn(...)`, `.join()`, or return the handle, e.g. to Promise.all()
+warning  This callback returns `i`, not the handle of this spawn(), so whoever waits for the callback (e.g. Promise.all over map()) does not wait for the task. Return the handle: `return spawn(...)`, or `return spawn(...).then(() =&gt; i)` to keep the value</pre>
+<p>Второй случай — колбэк <code>map</code>, который запускает задачу, но возвращает другое значение. <code>Promise.all</code> тогда ждёт это значение, а не задачу (<a href="practices.html#map">практика 10</a>). Задачи, запущенные внутри другой задачи без <code>await</code>, правило тоже отметит, хотя внешняя задача их дождётся (<a href="spawn.html#nested">задачи внутри задач</a>).</p>
+
+<h3 id="no-region-use-while-spawned"><code>regions/no-region-use-while-spawned</code></h3>
+<p>Регион, захваченный задачей или переданный ей аргументом, уезжает в воркер и возвращается, когда задача закончилась. Правило находит три ошибки вокруг этого. Все три в d8 закончились бы <code>OwnershipError</code>.</p>
+<div class="versus">
+<js-bad>
+// 1. Регион трогают, пока задача идёт.
+const cart = new Region().run(() => ({ total: 0 }));
+const task = spawn(() => { cart.total += 50; });
+print(cart.total);
+await task;
+
+// 2. Задачи в цикле хотят один и тот же регион.
+const counter = new Region().run(() => ({ n: 0 }));
+await Promise.all([0, 1, 2].map(() => spawn(() => counter.n++)));
+
+// 3. Задача пишет в замороженный регион.
+const cfgRegion = new Region();
+const config = cfgRegion.run(() => ({ retries: 3 }));
+cfgRegion.freeze();
+await spawn(() => { config.retries = 5; });
+</js-bad>
+</div>
+<pre class="shell wrap">error  'cart' was moved into the spawn() task on line 3 and comes back only when it finishes: using it here throws OwnershipError. Wait for the task first (await it or call join())
+error  This spawn() runs repeatedly and every task wants to move 'counter': only the first one gets it, the next ones throw OwnershipError. Await each task, freeze the region to share it read-only, or give every task its own data
+error  'config' is in a frozen region: tasks can read it but writing throws OwnershipError. Thaw it first, or let one task own it instead of freezing</pre>
+<p>Правило понимает, что задача закончилась, если её ждут через <code>await</code> (в том числе в <code>Promise.all</code>) или <code>join()</code>, и что замороженный регион не уезжает, а становится общим. Заморозку оно отслеживает по вызовам <code>freeze()</code> и <code>thaw()</code> до <code>spawn</code>.</p>
+<p>Анализ простой, и у него есть границы. Регионом правило считает переменную, созданную через <code>что-то.run(...)</code>. Объекты региона, полученные иначе (результат задачи, поле другого объекта), оно не отслеживает. С опцией <code>checkAllCaptures</code> оно проверяет все захваченные переменные, но тогда будет ругаться и на обычные данные, которые просто копируются. Обращения из колбэков, которые выполнятся позже (таймеры, обработчики), правило не отмечает: оно не знает, закончится ли задача к тому времени.</p>
+
+<h3 id="no-floating-borrow-while"><code>regions/no-floating-borrow-while</code></h3>
+<p><code>borrowWhile</code> с асинхронной функцией держит билет, пока не выполнится её промис. Если этот промис не вернуть из задачи и не дождаться, задача закончится раньше, и билет сдадут посреди работы (<a href="spawn.html#borrow">подробнее</a>).</p>
+<div class="versus">
+<js-bad>
+await spawn(() => {
+  Region.of(config).borrowWhile(async () => {
+    await null;
+    print(config.retries);
+  });
+});
+</js-bad>
+<js-good>
+await spawn(() =>
+  Region.of(config).borrowWhile(async () => {
+    await null;
+    print(config.retries);
+  }));
+</js-good>
+</div>
+<pre class="shell wrap">error  borrowWhile() returns a promise here and nobody waits for it: a spawn() task ends without waiting, and its borrow is released before this work is done. Return or await it</pre>
+<p>Голый <code>borrow()</code> с отложенным чтением правило не видит. Такой билет d8 сдаёт в конце задачи сам и печатает предупреждение в воркере.</p>
+
+<h2 id="runtime">Что видно только при запуске</h2>
+<p>Некоторые ошибки нельзя найти, не выполняя код:</p>
+<ul>
+  <li>захваченная переменная, в которой лежит <code>Map</code>, функция или экземпляр класса: типы проверяют аргументы <code>spawn</code>, но не захваты. Сюда же захваченный <code>this</code> с методами (<a href="spawn.html#this">this и arguments</a>);</li>
+  <li>переменная, захваченная до инициализации, и одно имя с разными значениями в разных функциях (<a href="spawn.html#errors">что spawn отклоняет сразу</a>);</li>
+  <li>обращение к региону, которым сейчас владеет другой поток, если регион пришёл не из <code>run</code> в этой же функции;</li>
+  <li>голый <code>borrow()</code>, переживший задачу, и view типизированного массива, прочитанный до переезда или заморозки.</li>
+</ul>
+<p>Линтер здесь только помогает. Защищает от гонок данных сам движок: он проверяет владельца при каждом обращении, сработало правило в редакторе или нет.</p>

@@ -1,0 +1,9 @@
+language js
+
+`spawn($object.$method, $...)` where {
+  register_diagnostic(
+    span = $object,
+    message = "spawn() needs an arrow function or a function expression; methods cannot be sent to a worker. Wrap it: spawn(() => ...).",
+    severity = "error"
+  )
+}

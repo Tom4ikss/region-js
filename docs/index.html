@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="description" content="Регионы владения: экспериментальный форк V8, в котором объекты переезжают между потоками без копирования.">
+<title>Что это такое · Регионы владения в V8</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="index.html"><svg width="26" height="26" viewBox="0 0 26 26" aria-hidden="true"><rect x="1" y="1" width="24" height="24" rx="7" fill="var(--series-1)"/><rect x="6" y="6" width="14" height="14" rx="4" fill="none" stroke="#fff" stroke-width="2"/><circle cx="13" cy="13" r="2.6" fill="#fff"/></svg><span>Регионы владения</span></a>
+  <span class="badge">эксперимент · форк V8</span>
+  <span class="spacer"></span>
+  <span class="meta">работает только в d8</span>
+</header>
+<div class="layout">
+<nav class="sidebar" aria-label="Разделы">
+<ol>
+<li><a href="index.html" aria-current="page">Что это такое</a></li>
+<li><a href="problem.html">Зачем это нужно</a></li>
+<li><a href="ideas.html">Идея владения</a></li>
+<li><a href="guide.html">API шаг за шагом</a></li>
+<li><a href="spawn.html">spawn: задачи в потоках</a></li>
+<li><a href="channels.html">Каналы</a></li>
+<li><a href="practices.html">Как делать и как не делать</a></li>
+<li><a href="tooling.html">Редактор и линтеры</a></li>
+<li><a href="inside.html">Как это устроено</a></li>
+<li><a href="numbers.html">Цифры</a></li>
+<li><a href="limits.html">Ограничения и планы</a></li>
+</ol>
+<p class="side-note">Исследовательский прототип. Все примеры на сайте запущены в собранном d8, вывод настоящий.</p>
+</nav>
+<main>
+<article class="content">
+<section class="hero">
+<p class="eyebrow">Эксперимент с движком V8</p>
+<h1>Регионы владения: объекты, которые переезжают между потоками без копирования</h1>
+<p class="lead">Это исследовательский форк V8. В нём обычные объекты и массивы можно сложить в «регион» и отдать воркеру за доли миллисекунды, сколько бы данных там ни было. Взамен у региона в каждый момент только один хозяин, и движок проверяет это при каждом обращении.</p>
+</section>
+
+<div class="callout limit">
+<span class="callout-title">Сразу о границах</span>
+<p>Всё это работает только в d8, тестовой оболочке V8. В браузере и в Node этого нет. Это прототип: его задача — проверить, можно ли так сделать вообще и сколько это стоит. Подробно об ограничениях — на <a href="limits.html">последней странице</a>.</p>
+</div>
+
+<h2>Пример: дерево из 131 тысячи узлов</h2>
+<p>Возьмём обычное дерево объектов и отправим его в воркер двумя способами. Сначала как сегодня: <code>postMessage</code> копирует всё дерево. Потом через регион: дерево лежит в общей памяти, и воркеру передаётся право им пользоваться.</p>
+
+<figure class="example"><div class="ex-head"><span class="file"><a href="examples/02-before-after.js">examples/02-before-after.js</a></span><button class="copy" type="button">Копировать</button></div><pre class="code"><code><span class="tok-comment">// До и после: одно и то же дерево отправляем в воркер копией и «переездом».</span>
+<span class="tok-keyword">const</span> build = (depth) =&gt;
+  depth === <span class="tok-number">0</span>
+    ? { value: <span class="tok-number">1</span>, left: <span class="tok-keyword">null</span>, right: <span class="tok-keyword">null</span> }
+    : { value: <span class="tok-number">1</span>, left: <span class="tok-fn">build</span>(depth - <span class="tok-number">1</span>), right: <span class="tok-fn">build</span>(depth - <span class="tok-number">1</span>) };
+
+<span class="tok-keyword">const</span> worker = <span class="tok-keyword">new</span> <span class="tok-api">Worker</span>(
+  <span class="tok-string">`onmessage = ({ data }) =&gt; postMessage(data.tree.value)`</span>,
+  { type: <span class="tok-string">'string'</span> },
+);
+<span class="tok-keyword">const</span> roundTrip = (message, transfer) =&gt; {
+  <span class="tok-keyword">const</span> start = performance.<span class="tok-fn">now</span>();
+  worker.<span class="tok-api">postMessage</span>(message, transfer);
+  worker.<span class="tok-api">getMessage</span>();
+  <span class="tok-keyword">return</span> performance.<span class="tok-fn">now</span>() - start;
+};
+
+<span class="tok-keyword">const</span> plain = <span class="tok-fn">build</span>(<span class="tok-number">16</span>); <span class="tok-comment">// 131 071 узел</span>
+<span class="tok-fn">print</span>(<span class="tok-string">'узлов в дереве:'</span>, <span class="tok-number">2</span> ** <span class="tok-number">17</span> - <span class="tok-number">1</span>);
+
+<span class="tok-comment">// До: обычный postMessage делает structured clone всего дерева.</span>
+<span class="tok-fn">print</span>(<span class="tok-string">`копия (structured clone): ${</span><span class="tok-fn">roundTrip</span>({ tree: plain }).<span class="tok-fn">toFixed</span>(<span class="tok-number">2</span>)<span class="tok-string">} ms`</span>);
+
+<span class="tok-comment">// После: дерево лежит в регионе, регион передаётся в transfer list.</span>
+<span class="tok-keyword">const</span> region = <span class="tok-keyword">new</span> <span class="tok-api">Region</span>();
+<span class="tok-keyword">const</span> tree = region.<span class="tok-api">run</span>(() =&gt; plain); <span class="tok-comment">// одна копия при создании региона</span>
+<span class="tok-fn">print</span>(<span class="tok-string">`переезд региона:          ${</span><span class="tok-fn">roundTrip</span>({ tree }, [region]).<span class="tok-fn">toFixed</span>(<span class="tok-number">2</span>)<span class="tok-string">} ms`</span>);
+
+<span class="tok-keyword">try</span> {
+  tree.value;
+} <span class="tok-keyword">catch</span> (e) {
+  <span class="tok-fn">print</span>(<span class="tok-string">'главный поток после переезда:'</span>, e.message);
+}
+worker.<span class="tok-api">terminate</span>();</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8; время у вас будет другим</span></div><pre class="out">узлов в дереве: 131071
+копия (structured clone): 121.94 ms
+переезд региона:          0.06 ms
+<span class="err">главный поток после переезда: OwnershipError: region 0 is owned by isolate 1, not by isolate 0</span></pre></figure>
+
+<p>Копия заняла больше сотни миллисекунд, переезд — сотые доли миллисекунды. И время переезда почти не растёт с размером: для дерева из миллиона узлов оно около 0,12 мс, а копия такого дерева идёт почти секунду.</p>
+<p>Посмотрите на последнюю строку. После переезда главный поток больше не может читать дерево, и движок выдаёт <code>OwnershipError</code>. Так и задумано: данные никто не копировал, и два потока не должны трогать их одновременно. Владелец один, и проверяет это сам движок, а не договорённость в команде.</p>
+
+<h2>Главные цифры</h2>
+<div class="stats">
+  <div class="stat"><span class="label">Переезд дерева из 1 млн узлов</span><span class="value">0,12 мс</span><span class="detail">копия через postMessage — 928 мс</span></div>
+  <div class="stat"><span class="label">Чтение одного дерева в 8 потоках</span><span class="value">×5,9</span><span class="detail">быстрее одного потока; быстрых ядер 6</span></div>
+  <div class="stat"><span class="label">Объект в воркер и обратно</span><span class="value">≈11 мкс</span><span class="detail">возвращается тот же самый объект</span></div>
+  <div class="stat"><span class="label">Запуск задачи spawn</span><span class="value">≈3,5 мкс</span><span class="detail">пул воркеров; без пула было ≈2,5 мс</span></div>
+</div>
+<p>Цифры сняты на сборке с включёнными внутренними проверками, на Apple Silicon. Абсолютные значения на другой машине будут другими, смотреть стоит на соотношения. Подробности и графики — на странице <a href="numbers.html">«Цифры»</a>. Там же честно сказано, что пока медленнее обычного JS: запись в объекты региона дольше примерно в 6 раз.</p>
+
+<h2>Что умеет прототип</h2>
+<ul>
+  <li><strong>Регион</strong> (<code>new Region()</code>, <code>region.run(fn)</code>) — группа обычных объектов, массивов, строк, чисел и типизированных массивов в общей памяти. Читать и писать может только владелец.</li>
+  <li><strong>Переезд</strong> (<code>worker.postMessage(msg, [region])</code>) — отдать регион другому потоку без копирования. Отправитель теряет доступ.</li>
+  <li><strong>Заморозка</strong> (<code>region.freeze()</code>, <code>region.borrow()</code>) — регион только для чтения, зато его могут читать все потоки сразу. Разморозить может тот, кто заморозил, и это право можно передать.</li>
+  <li><strong><code>spawn(fn)</code></strong> — запустить функцию в отдельном потоке одной строкой. Задачи идут в пул долгоживущих воркеров. Нужные функции переменные <code>spawn</code> находит сам, результат возвращается через регион. Ручку задачи ждут как промис, вложенные задачи заканчиваются раньше внешней, ошибки не теряются.</li>
+  <li><strong>Каналы</strong> (<code>new Channel()</code>, <code>send</code>, <code>recv</code>, <code>select</code>) — очереди между потоками, как в Go. Регион, отправленный в канал, переезжает без копии.</li>
+  <li><strong>Песочница для редактора</strong> — типы и правила Biome и ESLint, которые подсвечивают типичные ошибки до запуска.</li>
+</ul>
+
+<h2>С чего начать</h2>
+<ul class="cards">
+  <li><a href="problem.html"><strong>Зачем это нужно</strong>Почему JS однопоточный, что дают воркеры сегодня и где они неудобны.</a></li>
+  <li><a href="ideas.html"><strong>Идея владения</strong>Ключи от квартиры, музейный экспонат и почему так не бывает гонок данных.</a></li>
+  <li><a href="guide.html"><strong>API шаг за шагом</strong>Каждая функция с примером и настоящим выводом.</a></li>
+  <li><a href="spawn.html"><strong>spawn</strong>Функция в отдельном потоке без ручной возни с воркером.</a></li>
+  <li><a href="channels.html"><strong>Каналы</strong>Конвейеры и обмен данными между потоками по ходу работы.</a></li>
+  <li><a href="practices.html"><strong>Как делать и как не делать</strong>Одиннадцать приёмов, у большинства замер «плохо» против «хорошо».</a></li>
+  <li><a href="tooling.html"><strong>Редактор и линтеры</strong>Типы, Biome и ESLint: что из ошибок видно до запуска.</a></li>
+  <li><a href="inside.html"><strong>Как это устроено</strong>Общая куча, таблица владельцев и inline caches, без лишних подробностей.</a></li>
+  <li><a href="limits.html"><strong>Ограничения и запуск</strong>Чего нет, что в планах и как попробовать самому.</a></li>
+</ul>
+<nav class="pager" aria-label="Соседние страницы"><a class="next" href="problem.html"><span>Дальше →</span>Зачем это нужно</a></nav>
+<p class="footer">Регионы владения в V8 — исследовательский прототип, не продукт. Цифры получены на сборке с включёнными проверками (dcheck), Apple Silicon.</p>
+</article>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

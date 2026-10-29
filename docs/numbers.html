@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="description" content="Замеры прототипа: переезд против structured clone, скорость чтения и записи, параллельное чтение, spawn, проверки безопасности.">
+<title>Цифры · Регионы владения в V8</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="index.html"><svg width="26" height="26" viewBox="0 0 26 26" aria-hidden="true"><rect x="1" y="1" width="24" height="24" rx="7" fill="var(--series-1)"/><rect x="6" y="6" width="14" height="14" rx="4" fill="none" stroke="#fff" stroke-width="2"/><circle cx="13" cy="13" r="2.6" fill="#fff"/></svg><span>Регионы владения</span></a>
+  <span class="badge">эксперимент · форк V8</span>
+  <span class="spacer"></span>
+  <span class="meta">работает только в d8</span>
+</header>
+<div class="layout">
+<nav class="sidebar" aria-label="Разделы">
+<ol>
+<li><a href="index.html">Что это такое</a></li>
+<li><a href="problem.html">Зачем это нужно</a></li>
+<li><a href="ideas.html">Идея владения</a></li>
+<li><a href="guide.html">API шаг за шагом</a></li>
+<li><a href="spawn.html">spawn: задачи в потоках</a></li>
+<li><a href="channels.html">Каналы</a></li>
+<li><a href="practices.html">Как делать и как не делать</a></li>
+<li><a href="tooling.html">Редактор и линтеры</a></li>
+<li><a href="inside.html">Как это устроено</a></li>
+<li><a href="numbers.html" aria-current="page">Цифры</a></li>
+<li><a href="limits.html">Ограничения и планы</a></li>
+</ol>
+<p class="side-note">Исследовательский прототип. Все примеры на сайте запущены в собранном d8, вывод настоящий.</p>
+</nav>
+<main>
+<article class="content">
+<p class="eyebrow">Глава 9</p>
+<h1>Цифры</h1>
+<p class="lead">Что получилось быстрее, что медленнее и насколько. Здесь и хорошие результаты, и плохие: прототип нужен как раз для того, чтобы узнать цену.</p>
+
+<div class="callout limit">
+<span class="callout-title">Условия замеров</span>
+<p>Сборка V8 с включёнными внутренними проверками (<code>dcheck_always_on</code>, без отладочной информации). Apple Silicon: 6 производительных и 6 энергоэффективных ядер. В сборке без проверок и на другой машине абсолютные значения будут другими. Смотреть стоит на соотношения: во сколько раз одно быстрее другого.</p>
+<p>Скрипты замеров лежат в <code>tests/</code>: <code>bench.js</code>, <code>bench-writes.js</code>, <code>bench-frozen.js</code>, <code>bench-plain-js.js</code>, <code>ping-pong.js</code>, <code>spawn.js</code>, <code>fuzz.js</code>. Графики на этой странице — медианы пяти запусков на текущей сборке. Замеры отдельных приёмов — на странице <a href="practices.html">«Как делать и как не делать»</a>.</p>
+</div>
+
+<h2 id="move">Переезд вместо копии</h2>
+<p>Главная проверка идеи: сколько стоит отдать воркеру дерево объектов. Дерево — обычные объекты <code>{ value, left, right }</code>.</p>
+
+<figure class="chart"><h4>Отправить дерево из 1 млн узлов в воркер</h4><p class="sub">Время одной операции, мс. Короче значит лучше.</p><ul class="legend"><li><span class="sw s2"></span>обычный postMessage</li><li><span class="sw s1"></span>регионы</li></ul><svg viewBox="0 0 700 202" role="img" aria-labelledby="ch-move-t"><title id="ch-move-t">Отправить дерево из 1 млн узлов в воркер</title><line class="c-grid" x1="200.0" x2="200.0" y1="0" y2="158"/><text class="c-tick" x="200.0" y="174" text-anchor="middle">0</text><line class="c-grid" x1="280.8" x2="280.8" y1="0" y2="158"/><text class="c-tick" x="280.8" y="174" text-anchor="middle">250</text><line class="c-grid" x1="361.6" x2="361.6" y1="0" y2="158"/><text class="c-tick" x="361.6" y="174" text-anchor="middle">500</text><line class="c-grid" x1="442.4" x2="442.4" y1="0" y2="158"/><text class="c-tick" x="442.4" y="174" text-anchor="middle">750</text><line class="c-grid" x1="523.2" x2="523.2" y1="0" y2="158"/><text class="c-tick" x="523.2" y="174" text-anchor="middle">1000</text><line class="c-grid" x1="604.0" x2="604.0" y1="0" y2="158"/><text class="c-tick" x="604.0" y="174" text-anchor="middle">1250</text><line class="c-base" x1="200" x2="200" y1="0" y2="158"/><text class="c-axis" x="402.0" y="196" text-anchor="middle">миллисекунды</text><g class="bar" tabindex="0" role="img" aria-label="Копия (structured clone): 928 мс" data-value="928 мс" data-label="Копия, structured clone" data-note=""><rect class="c-hit" x="0" y="8.0" width="700" height="42" rx="6"/><text class="c-cat" x="188" y="27.0" text-anchor="end">Копия</text><text class="c-cat-s" x="188" y="42.0" text-anchor="end">structured clone</text><path d="M200.0,18.0 h295.9 a4,4 0 0 1 4,4 v14.0 a4,4 0 0 1 -4,4 h-295.9 z" class="c-s2"/><text class="c-val" x="506.9" y="33.5">928 мс</text></g><g class="bar" tabindex="0" role="img" aria-label="Создание региона (копия внутрь, один раз): ≈1 160 мс" data-value="≈1 160 мс" data-label="Создание региона, копия внутрь, один раз" data-note=""><rect class="c-hit" x="0" y="58.0" width="700" height="42" rx="6"/><text class="c-cat" x="188" y="77.0" text-anchor="end">Создание региона</text><text class="c-cat-s" x="188" y="92.0" text-anchor="end">копия внутрь, один раз</text><path d="M200.0,68.0 h369.3 a4,4 0 0 1 4,4 v14.0 a4,4 0 0 1 -4,4 h-369.3 z" class="c-s1"/><text class="c-val" x="580.3" y="83.5">≈1 160 мс</text></g><g class="bar" tabindex="0" role="img" aria-label="Переезд региона (transfer list): 0,12 мс" data-value="0,12 мс" data-label="Переезд региона, transfer list" data-note="столбик слишком короткий, чтобы его увидеть"><rect class="c-hit" x="0" y="108.0" width="700" height="42" rx="6"/><text class="c-cat" x="188" y="127.0" text-anchor="end">Переезд региона</text><text class="c-cat-s" x="188" y="142.0" text-anchor="end">transfer list</text><rect x="200.0" y="118.0" width="2.0" height="22.0" rx="1" class="c-s1"/><text class="c-val" x="209.0" y="133.5">0,12 мс</text></g></svg><details class="table-view"><summary>Показать таблицей</summary><div class="table-wrap"><table><thead><tr><th>Операция</th><th class="num">1 тыс. узлов</th><th class="num">1 млн узлов</th></tr></thead><tbody><tr><td>postMessage, structured clone</td><td class="num">0,92 мс</td><td class="num">928 мс</td></tr><tr><td>region.run (создание региона)</td><td class="num">0,78 мс</td><td class="num">≈1 160 мс</td></tr><tr><td>postMessage, переезд региона</td><td class="num">0,02 мс</td><td class="num">0,12 мс</td></tr></tbody></table></div></details></figure>
+
+<p>Копия через structured clone растёт вместе с размером: 0,9 мс для тысячи узлов и 928 мс для миллиона. Переезд почти не зависит от размера: 0,02 мс и 0,12 мс. Дерево выросло в тысячу раз, а время переезда — примерно в пять, и это уже накладные расходы самой пересылки сообщения, а не работа с данными.</p>
+<p>Создать регион из готового дерева стоит примерно как одна копия (≈1 160 мс для миллиона узлов): <code>run</code> копирует граф внутрь. Но платите вы за это один раз. Дальше дерево можно гонять между потоками сколько угодно. Если данные один раз отправить в воркер и забыть, выигрыша не будет. Он появляется, когда данные ходят туда-обратно или достаются нескольким потокам.</p>
+
+<h3>Туда и обратно</h3>
+<p>Объект, который ходит между главным потоком и воркером (два переезда и два сообщения за круг), делает круг примерно за 11 микросекунд (от 10 до 11 в разных запусках). Большая часть этого времени — пересылка двух сообщений, от размера региона оно не зависит. И в конце это тот же самый объект: <code>===</code> вернёт <code>true</code>.</p>
+
+<h2 id="access">Чтение и запись</h2>
+<p>Объекты региона медленнее обычных там, где оптимизирующий компилятор пока не может встроить доступ к ним (подробнее на странице <a href="inside.html#ic">«Как это устроено»</a>).</p>
+
+<figure class="chart"><h4>Доступ к объектам региона по сравнению с обычными</h4><p class="sub">Во сколько раз дольше, чем с обычными объектами. 1 — одинаково, меньше 1 — быстрее. Дерево и массив по 1 млн элементов.</p><ul class="legend"><li><span class="sw ref"></span>вертикальная линия: обычный JS = 1</li></ul><svg viewBox="0 0 700 202" role="img" aria-labelledby="ch-access-t"><title id="ch-access-t">Доступ к объектам региона по сравнению с обычными</title><line class="c-grid" x1="200.0" x2="200.0" y1="0" y2="158"/><text class="c-tick" x="200.0" y="174" text-anchor="middle">0</text><line class="c-grid" x1="280.8" x2="280.8" y1="0" y2="158"/><text class="c-tick" x="280.8" y="174" text-anchor="middle">2</text><line class="c-grid" x1="361.6" x2="361.6" y1="0" y2="158"/><text class="c-tick" x="361.6" y="174" text-anchor="middle">5</text><line class="c-grid" x1="442.4" x2="442.4" y1="0" y2="158"/><text class="c-tick" x="442.4" y="174" text-anchor="middle">8</text><line class="c-grid" x1="523.2" x2="523.2" y1="0" y2="158"/><text class="c-tick" x="523.2" y="174" text-anchor="middle">10</text><line class="c-grid" x1="604.0" x2="604.0" y1="0" y2="158"/><text class="c-tick" x="604.0" y="174" text-anchor="middle">12</text><line class="c-base" x1="200" x2="200" y1="0" y2="158"/><text class="c-axis" x="402.0" y="196" text-anchor="middle">во сколько раз дольше обычного JS</text><line class="c-ref" x1="232.3" x2="232.3" y1="0" y2="158"/><g class="bar" tabindex="0" role="img" aria-label="Чтение полей (сумма по дереву): ×1,0" data-value="×1,0" data-label="Чтение полей, сумма по дереву" data-note="обычные 21,2 мс, регион 21,9 мс"><rect class="c-hit" x="0" y="8.0" width="700" height="42" rx="6"/><text class="c-cat" x="188" y="27.0" text-anchor="end">Чтение полей</text><text class="c-cat-s" x="188" y="42.0" text-anchor="end">сумма по дереву</text><path d="M200.0,18.0 h29.4 a4,4 0 0 1 4,4 v14.0 a4,4 0 0 1 -4,4 h-29.4 z" class="c-s1"/><text class="c-val" x="240.4" y="33.5">×1,0</text></g><g class="bar" tabindex="0" role="img" aria-label="Запись полей (в каждый узел): ×6,0" data-value="×6,0" data-label="Запись полей, в каждый узел" data-note="обычные 4,7 мс, регион 28,4 мс"><rect class="c-hit" x="0" y="58.0" width="700" height="42" rx="6"/><text class="c-cat" x="188" y="77.0" text-anchor="end">Запись полей</text><text class="c-cat-s" x="188" y="92.0" text-anchor="end">в каждый узел</text><path d="M200.0,68.0 h190.5 a4,4 0 0 1 4,4 v14.0 a4,4 0 0 1 -4,4 h-190.5 z" class="c-s1"/><text class="c-val" x="401.5" y="83.5">×6,0</text></g><g class="bar" tabindex="0" role="img" aria-label="Доступ по индексу (сумма массива): ×11,0" data-value="×11,0" data-label="Доступ по индексу, сумма массива" data-note="обычный массив 0,70 мс, регион 7,7 мс"><rect class="c-hit" x="0" y="108.0" width="700" height="42" rx="6"/><text class="c-cat" x="188" y="127.0" text-anchor="end">Доступ по индексу</text><text class="c-cat-s" x="188" y="142.0" text-anchor="end">сумма массива</text><path d="M200.0,118.0 h351.5 a4,4 0 0 1 4,4 v14.0 a4,4 0 0 1 -4,4 h-351.5 z" class="c-s1"/><text class="c-val" x="562.5" y="133.5">×11,0</text></g></svg><details class="table-view"><summary>Показать таблицей</summary><div class="table-wrap"><table><thead><tr><th>Операция</th><th class="num">Обычные объекты</th><th class="num">Регион</th><th class="num">Отношение</th></tr></thead><tbody><tr><td>Сумма по дереву (чтение)</td><td class="num">21,2 мс</td><td class="num">21,9 мс</td><td class="num">×1,0</td></tr><tr><td>Запись в каждый узел дерева</td><td class="num">4,7 мс</td><td class="num">28,4 мс</td><td class="num">×6,0</td></tr><tr><td>Сумма массива по индексу</td><td class="num">0,70 мс</td><td class="num">7,7 мс</td><td class="num">×11,0</td></tr></tbody></table></div></details></figure>
+
+<p>Чтение полей по дереву идёт наравне с обычными объектами. В самой первой версии оно было в 26 раз медленнее, пока проверку владельца не встроили в inline caches. Запись в каждый узел медленнее в 6 раз, сумма массива по индексу — в 11 раз. Причина одна: Maglev и Turbofan не встраивают доступ к регионам в машинный код. Это главная известная задача по скорости.</p>
+<p>Типизированные массивы в регионе этого отставания не имеют. При чтении поля поток получает обычный типизированный массив над памятью региона, и сумма миллиона чисел по нему занимает те же 0,60 мс, что и по обычному <code>Float64Array</code>. По массиву чисел в регионе она занимает 6,7 мс (замер в <a href="practices.html#typed">практике 9</a>).</p>
+
+<h2 id="parallel">Параллельное чтение</h2>
+<p>Замороженное дерево из миллиона узлов один раз рассылается воркерам. Потом 8 полных обходов делятся между ними поровну.</p>
+
+<figure class="chart"><h4>Параллельное чтение одного замороженного дерева</h4><p class="sub">8 проходов по дереву из 1 млн узлов делятся поровну между потоками. Время всей работы, мс.</p><ul class="legend"><li><span class="sw s1"></span>фактическое время</li><li><span class="sw tick"></span>идеальное ускорение (время / число потоков)</li></ul><svg viewBox="0 0 700 252" role="img" aria-labelledby="ch-scale-t"><title id="ch-scale-t">Параллельное чтение одного замороженного дерева</title><line class="c-grid" x1="200.0" x2="200.0" y1="0" y2="208"/><text class="c-tick" x="200.0" y="224" text-anchor="middle">0</text><line class="c-grid" x1="334.7" x2="334.7" y1="0" y2="208"/><text class="c-tick" x="334.7" y="224" text-anchor="middle">50</text><line class="c-grid" x1="469.3" x2="469.3" y1="0" y2="208"/><text class="c-tick" x="469.3" y="224" text-anchor="middle">100</text><line class="c-grid" x1="604.0" x2="604.0" y1="0" y2="208"/><text class="c-tick" x="604.0" y="224" text-anchor="middle">150</text><line class="c-base" x1="200" x2="200" y1="0" y2="208"/><text class="c-axis" x="402.0" y="246" text-anchor="middle">миллисекунды</text><g class="bar" tabindex="0" role="img" aria-label="1 поток (только главный): 146,9 мс" data-value="146,9 мс" data-label="1 поток, только главный" data-note=""><rect class="c-hit" x="0" y="8.0" width="700" height="42" rx="6"/><text class="c-cat" x="188" y="27.0" text-anchor="end">1 поток</text><text class="c-cat-s" x="188" y="42.0" text-anchor="end">только главный</text><path d="M200.0,18.0 h391.7 a4,4 0 0 1 4,4 v14.0 a4,4 0 0 1 -4,4 h-391.7 z" class="c-s1"/><text class="c-val" x="602.7" y="33.5">146,9 мс</text></g><g class="bar" tabindex="0" role="img" aria-label="2 воркера: 75,7 мс · ×1,9" data-value="75,7 мс · ×1,9" data-label="2 воркера" data-note="идеально было бы 73,5 мс"><rect class="c-hit" x="0" y="58.0" width="700" height="42" rx="6"/><text class="c-cat" x="188" y="83.5" text-anchor="end">2 воркера</text><path d="M200.0,68.0 h199.9 a4,4 0 0 1 4,4 v14.0 a4,4 0 0 1 -4,4 h-199.9 z" class="c-s1"/><rect class="c-ideal" x="396.3" y="64.0" width="3" height="30" rx="1"/><text class="c-val" x="410.9" y="83.5">75,7 мс · ×1,9</text></g><g class="bar" tabindex="0" role="img" aria-label="4 воркера: 38,3 мс · ×3,8" data-value="38,3 мс · ×3,8" data-label="4 воркера" data-note="идеально было бы 36,7 мс"><rect class="c-hit" x="0" y="108.0" width="700" height="42" rx="6"/><text class="c-cat" x="188" y="133.5" text-anchor="end">4 воркера</text><path d="M200.0,118.0 h99.2 a4,4 0 0 1 4,4 v14.0 a4,4 0 0 1 -4,4 h-99.2 z" class="c-s1"/><rect class="c-ideal" x="297.4" y="114.0" width="3" height="30" rx="1"/><text class="c-val" x="310.2" y="133.5">38,3 мс · ×3,8</text></g><g class="bar" tabindex="0" role="img" aria-label="8 воркеров (а быстрых ядер 6): 25,1 мс · ×5,9" data-value="25,1 мс · ×5,9" data-label="8 воркеров, а быстрых ядер 6" data-note="идеально было бы 18,4 мс"><rect class="c-hit" x="0" y="158.0" width="700" height="42" rx="6"/><text class="c-cat" x="188" y="177.0" text-anchor="end">8 воркеров</text><text class="c-cat-s" x="188" y="192.0" text-anchor="end">а быстрых ядер 6</text><path d="M200.0,168.0 h63.6 a4,4 0 0 1 4,4 v14.0 a4,4 0 0 1 -4,4 h-63.6 z" class="c-s1"/><rect class="c-ideal" x="248.0" y="164.0" width="3" height="30" rx="1"/><text class="c-val" x="274.6" y="183.5">25,1 мс · ×5,9</text></g></svg><details class="table-view"><summary>Показать таблицей</summary><div class="table-wrap"><table><thead><tr><th>Потоки</th><th class="num">Время</th><th class="num">Ускорение</th><th class="num">Идеально</th></tr></thead><tbody><tr><td>1 поток</td><td class="num">146,9 мс</td><td class="num">×1,0</td><td class="num">×1</td></tr><tr><td>2 воркера</td><td class="num">75,7 мс</td><td class="num">×1,9</td><td class="num">×2</td></tr><tr><td>4 воркера</td><td class="num">38,3 мс</td><td class="num">×3,8</td><td class="num">×4</td></tr><tr><td>8 воркеров</td><td class="num">25,1 мс</td><td class="num">×5,9</td><td class="num">×8</td></tr></tbody></table></div></details></figure>
+
+<p>До четырёх воркеров ускорение почти идеальное: ×1,9 и ×3,8. На восьми — ×5,9 вместо ×8. Скорее всего, упираемся в железо: быстрых ядер в этой машине шесть, остальные заметно медленнее. Копий дерева нет ни одной: все восемь воркеров читают одни и те же объекты.</p>
+
+<h2 id="spawn">spawn</h2>
+
+<figure class="chart"><h4>Четыре тяжёлые задачи через spawn</h4><p class="sub">Одна и та же вычислительная задача четыре раза. Общее время, мс.</p><svg viewBox="0 0 700 152" role="img" aria-labelledby="ch-spawn-t"><title id="ch-spawn-t">Четыре тяжёлые задачи через spawn</title><line class="c-grid" x1="200.0" x2="200.0" y1="0" y2="108"/><text class="c-tick" x="200.0" y="124" text-anchor="middle">0</text><line class="c-grid" x1="301.0" x2="301.0" y1="0" y2="108"/><text class="c-tick" x="301.0" y="124" text-anchor="middle">200</text><line class="c-grid" x1="402.0" x2="402.0" y1="0" y2="108"/><text class="c-tick" x="402.0" y="124" text-anchor="middle">400</text><line class="c-grid" x1="503.0" x2="503.0" y1="0" y2="108"/><text class="c-tick" x="503.0" y="124" text-anchor="middle">600</text><line class="c-grid" x1="604.0" x2="604.0" y1="0" y2="108"/><text class="c-tick" x="604.0" y="124" text-anchor="middle">800</text><line class="c-base" x1="200" x2="200" y1="0" y2="108"/><text class="c-axis" x="402.0" y="146" text-anchor="middle">миллисекунды</text><g class="bar" tabindex="0" role="img" aria-label="По очереди (join сразу после spawn): 738 мс" data-value="738 мс" data-label="По очереди, join сразу после spawn" data-note=""><rect class="c-hit" x="0" y="8.0" width="700" height="42" rx="6"/><text class="c-cat" x="188" y="27.0" text-anchor="end">По очереди</text><text class="c-cat-s" x="188" y="42.0" text-anchor="end">join сразу после spawn</text><path d="M200.0,18.0 h368.7 a4,4 0 0 1 4,4 v14.0 a4,4 0 0 1 -4,4 h-368.7 z" class="c-s1"/><text class="c-val" x="579.7" y="33.5">738 мс</text></g><g class="bar" tabindex="0" role="img" aria-label="Все сразу (4 × spawn, потом 4 × join): 201 мс · ×3,7" data-value="201 мс · ×3,7" data-label="Все сразу, 4 × spawn, потом 4 × join" data-note=""><rect class="c-hit" x="0" y="58.0" width="700" height="42" rx="6"/><text class="c-cat" x="188" y="77.0" text-anchor="end">Все сразу</text><text class="c-cat-s" x="188" y="92.0" text-anchor="end">4 × spawn, потом 4 × join</text><path d="M200.0,68.0 h97.5 a4,4 0 0 1 4,4 v14.0 a4,4 0 0 1 -4,4 h-97.5 z" class="c-s1"/><text class="c-val" x="308.5" y="83.5">201 мс · ×3,7</text></g></svg><details class="table-view"><summary>Показать таблицей</summary><div class="table-wrap"><table><thead><tr><th>Способ</th><th class="num">Время</th></tr></thead><tbody><tr><td>По очереди</td><td class="num">738 мс</td></tr><tr><td>Все сразу</td><td class="num">201 мс (×3,7)</td></tr></tbody></table></div></details></figure>
+
+<p>Четыре одинаковые тяжёлые задачи: по очереди 738 мс, все сразу 201 мс, то есть в 3,7 раза быстрее.</p>
+<p>Задачи <code>spawn</code> идут в пул долгоживущих воркеров (по умолчанию четыре, <code>spawn.poolSize</code>). Запуск задачи стоит около 3,5 микросекунды: 100 000 задач по очереди через <code>join()</code> заняли около 0,34 секунды, а 20 000 задач, запущенных сразу и дождавшихся через <code>await</code>, — около 75 мс (пример на странице <a href="spawn.html#how">про spawn</a>). Ещё недавно запуск стоил около 40 микросекунд, а до пула, когда каждый <code>spawn</code> создавал новый воркер, — около 2,5 мс. Откуда взялась разница, рассказано на странице <a href="inside.html#fast-spawn">«Как это устроено»</a>.</p>
+<p>Сообщение воркеру и ответ от него (<code>postMessage</code> и <code>getMessage</code>, в сообщении одно число) занимают около 3 микросекунд, круг через два канала без буфера — около 5 (пример на странице <a href="channels.html#cost">про каналы</a>).</p>
+
+<h2 id="safety">Безопасность и влияние на обычный JS</h2>
+<div class="stats">
+  <div class="stat"><span class="label">mjsunit, основной набор тестов V8</span><span class="value">9 255 тестов</span><span class="detail">0 падений на текущей сборке, как у V8 без изменений</span></div>
+  <div class="stat"><span class="label">Обычный JS в оптимизированном коде</span><span class="value">±3%</span><span class="detail">в пределах шума замера</span></div>
+  <div class="stat"><span class="label">Только интерпретатор</span><span class="value">≈+1%</span><span class="detail">дольше, чем у V8 без изменений</span></div>
+  <div class="stat"><span class="label">Фаззер: 4 воркера, нагрузка на GC</span><span class="value">0</span><span class="detail">успешных незаконных обращений, без падений</span></div>
+</div>
+<p>Код, который регионы не использует, по скорости не изменился: разница в оптимизированном коде в пределах ±3%, то есть в пределах шума. В режиме только интерпретатора она около +1%. Это проверено отдельным набором замеров (<code>bench-plain-js.js</code>: чтение и запись полей с одной формой, разными формами, классы, массивы).</p>
+<p>На текущей сборке mjsunit проходит целиком, 9 255 из 9 255. Сравнение скорости с V8 без изменений сделано на прошлой сборке, до пула воркеров и переиспользования номеров регионов: для нового сравнения нужна ещё и свежая сборка V8 без изменений. Фаззер на текущей сборке перезапущен (по 300 раундов с пятью разными начальными значениями), и результат тот же.</p>
+<p>Фаззер (<code>fuzz.js</code>) в цикле передаёт регион случайному воркеру, а остальные в это время пытаются его читать и писать. Ещё он замораживает регион и размораживает его прямо посреди чтения, а сборку мусора вызывает в случайные моменты. Ни одно обращение не-владельца не прошло, процесс ни разу не упал. Но фаззинг короткий и самодельный. Это не та круглосуточная проверка на кластере, через которую проходит настоящий V8.</p>
+
+<h2 id="prototype">Сравнение с прототипом на SharedArrayBuffer</h2>
+<p>До форка движка была версия на чистом JS для Node (папка <code>js-ownership/</code>): узлы дерева раскладывались по <code>SharedArrayBuffer</code> вручную, а поля читались через обёртки. Переезд был такой же дешёвый, но за всё остальное приходилось платить.</p>
+<div class="table-wrap">
+<table>
+<thead><tr><th>Что</th><th class="num">Прототип на SharedArrayBuffer</th><th class="num">Форк V8</th></tr></thead>
+<tbody>
+<tr><td>Переезд против копии</td><td class="num">0,029 мс против 351 мс</td><td class="num">0,12 мс против 928 мс</td></tr>
+<tr><td>Чтение полей относительно обычных объектов</td><td class="num">в 6,4 раза медленнее</td><td class="num">×1,0, наравне</td></tr>
+<tr><td>8 воркеров читают параллельно</td><td class="num">×3,5</td><td class="num">×5,9</td></tr>
+<tr><td>Какие данные</td><td class="num">заранее описанные структуры</td><td class="num">обычные объекты и массивы</td></tr>
+</tbody>
+</table>
+</div>
+<p>Дерево в обоих случаях из миллиона узлов, но условия разные: тот прототип работал в Node, а не в d8 со включёнными проверками, и в параллельном замере каждый воркер читал своё дерево, а не одно общее. Поэтому абсолютные числа между столбцами сравнивать не стоит, только соотношения внутри каждого.</p>
+
+<h2 id="criteria">Итог по целям</h2>
+<p>В начале работы были записаны критерии. Эксперимент считается успешным, если выполнена хотя бы половина:</p>
+<div class="table-wrap">
+<table>
+<thead><tr><th>Цель</th><th>Результат</th></tr></thead>
+<tbody>
+<tr><td>Переезд за O(1): время не зависит от размера</td><td>Выполнено: 0,02 мс на тысячу узлов, 0,12 мс на миллион.</td></tr>
+<tr><td>Доступ к полю в оптимизированном коде не больше чем в 1,5 раза медленнее</td><td>Для чтения выполнено (×1,0). Для записи (×6,0) и доступа по индексу (×11,0) нет.</td></tr>
+<tr><td>Почти линейное ускорение параллельного чтения</td><td>До 4 воркеров да (×3,8). На 8 — ×5,9, скорее всего упор в 6 быстрых ядер.</td></tr>
+<tr><td>Обычный JS не замедляется, гонки дают исключения, а не падения</td><td>Выполнено: ±3%, 0 падений в mjsunit и в фаззере.</td></tr>
+</tbody>
+</table>
+</div>
+<nav class="pager" aria-label="Соседние страницы"><a class="prev" href="inside.html"><span>← Назад</span>Как это устроено</a><a class="next" href="limits.html"><span>Дальше →</span>Ограничения и планы</a></nav>
+<p class="footer">Регионы владения в V8 — исследовательский прототип, не продукт. Цифры получены на сборке с включёнными проверками (dcheck), Apple Silicon.</p>
+</article>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

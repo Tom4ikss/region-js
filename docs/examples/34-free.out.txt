@@ -1,0 +1,6 @@
+байт в регионе: 8828792
+освобождён: true | байт после: 0
+view после free: 0
+обращение после free: OwnershipError: region 0 was freed
+после блока using: OwnershipError: region 1 was freed
+живых регионов: 0 | освобождённых: 2

@@ -1,0 +1,15 @@
+{
+  "name": "regions-playground",
+  "private": true,
+  "scripts": {
+    "typecheck": "tsc -p jsconfig.json",
+    "lint": "biome lint",
+    "lint:regions": "eslint examples",
+    "test:rules": "node eslint-plugin-regions/tests/no-region-use-while-spawned.test.mjs"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.6.2",
+    "eslint": "^10.13.0",
+    "typescript": "^7.0.2"
+  }
+}

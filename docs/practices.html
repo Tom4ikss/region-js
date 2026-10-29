@@ -1,0 +1,760 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="description" content="Одиннадцать практик работы с регионами и spawn: что делать, чего избегать, и замер «плохо» против «хорошо» там, где он имеет смысл.">
+<title>Как делать и как не делать · Регионы владения в V8</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="index.html"><svg width="26" height="26" viewBox="0 0 26 26" aria-hidden="true"><rect x="1" y="1" width="24" height="24" rx="7" fill="var(--series-1)"/><rect x="6" y="6" width="14" height="14" rx="4" fill="none" stroke="#fff" stroke-width="2"/><circle cx="13" cy="13" r="2.6" fill="#fff"/></svg><span>Регионы владения</span></a>
+  <span class="badge">эксперимент · форк V8</span>
+  <span class="spacer"></span>
+  <span class="meta">работает только в d8</span>
+</header>
+<div class="layout">
+<nav class="sidebar" aria-label="Разделы">
+<ol>
+<li><a href="index.html">Что это такое</a></li>
+<li><a href="problem.html">Зачем это нужно</a></li>
+<li><a href="ideas.html">Идея владения</a></li>
+<li><a href="guide.html">API шаг за шагом</a></li>
+<li><a href="spawn.html">spawn: задачи в потоках</a></li>
+<li><a href="channels.html">Каналы</a></li>
+<li><a href="practices.html" aria-current="page">Как делать и как не делать</a></li>
+<li><a href="tooling.html">Редактор и линтеры</a></li>
+<li><a href="inside.html">Как это устроено</a></li>
+<li><a href="numbers.html">Цифры</a></li>
+<li><a href="limits.html">Ограничения и планы</a></li>
+</ol>
+<p class="side-note">Исследовательский прототип. Все примеры на сайте запущены в собранном d8, вывод настоящий.</p>
+</nav>
+<main>
+<article class="content">
+<p class="eyebrow">Глава 6</p>
+<h1>Как делать и как не делать</h1>
+<p class="lead">У регионов и <code>spawn</code> есть свои дорогие и дешёвые операции, и они не всегда совпадают с привычками из обычного JS. Здесь одиннадцать практик. У каждой есть короткое объяснение, код «плохо» и «хорошо» и замер, где он имеет смысл.</p>
+
+<div class="callout limit">
+<span class="callout-title">Как читать цифры</span>
+<p>Все замеры сделаны на сборке <code>out/docs/d8</code> с включёнными внутренними проверками (<code>dcheck_always_on</code>), на Apple Silicon с 6 производительными и 6 энергоэффективными ядрами. В обычной сборке и на другой машине абсолютные значения будут другими, поэтому смотрите на соотношения. Каждый скрипт замера лежит в <code>docs/examples/</code> и запускался пять раз. Внутри запуска берётся лучшее из нескольких повторов, на графиках — медиана пяти запусков. Под каждым графиком можно раскрыть код замера и вывод одного запуска, сделанного при сборке сайта.</p>
+</div>
+
+<h2 id="cheatsheet">Шпаргалка</h2>
+<div class="table-wrap">
+<table>
+<thead><tr><th>Ситуация</th><th>Плохо</th><th>Хорошо</th><th class="num">Замер: плохо → хорошо</th></tr></thead>
+<tbody>
+<tr><td><a href="#frozen">1. Большие данные для многих задач</a></td><td>захватить обычный массив</td><td>заморозить регион и захватить его</td><td class="num">1 705 мс → 0,7 мс</td></tr>
+<tr><td><a href="#move">2. Данные ходят туда-обратно</a></td><td>каждый раз <code>region.run</code></td><td>один регион, переезд через <code>Region.of</code></td><td class="num">6 034 → 8,6 мкс за круг</td></tr>
+<tr><td><a href="#batch">3. Много мелкой работы</a></td><td>тысячи маленьких <code>spawn</code></td><td>десятки задач по нескольку миллисекунд</td><td class="num">57 мс → 52 мс</td></tr>
+<tr><td><a href="#local">4а. Горячий цикл с записью</a></td><td>писать в объект региона на каждом шаге</td><td>считать в локальных переменных, записать один раз</td><td class="num">14,3 мс → 0,75 мс</td></tr>
+<tr><td><a href="#local-read">4б. Много проходов по массиву региона</a></td><td>читать <code>arr[i]</code> из региона каждый раз</td><td>один раз скопировать циклом в обычный массив</td><td class="num">34,6 мс → 3,9 мс</td></tr>
+<tr><td><a href="#methods">5. Обработка массива региона</a></td><td><code>filter</code> / <code>map</code> / <code>reduce</code></td><td>цикл <code>for</code> по индексу</td><td class="num">223 мс → 7,8 мс</td></tr>
+<tr><td><a href="#shapes">6. Много объектов одного вида</a></td><td>ключи в разном порядке</td><td>одни и те же ключи в одном порядке</td><td class="num">26,5 мс → 20,2 мс</td></tr>
+<tr><td><a href="#await">7. Ждать задачу в главном потоке</a></td><td><code>task.join()</code></td><td><code>await task</code></td><td class="num">пауза 192,5 мс → 0,3 мс</td></tr>
+<tr><td><a href="#after-move">8. Объект после переезда</a></td><td>читать сразу после отправки</td><td>дождаться, пока регион вернётся</td><td class="num">OwnershipError → работает</td></tr>
+<tr><td><a href="#typed">9. Много чисел</a></td><td>обычный массив чисел в регионе</td><td>типизированный массив в регионе</td><td class="num">6,7 мс → 0,60 мс</td></tr>
+<tr><td><a href="#map">10. Задачи в <code>map</code></a></td><td>колбэк запускает задачу и возвращает другое</td><td>колбэк возвращает ручку задачи</td><td class="num">задачи не дождались → дождались</td></tr>
+<tr><td><a href="#borrow-while">11. Билет в асинхронной задаче</a></td><td><code>borrow()</code> и отложенное чтение</td><td><code>return region.borrowWhile(async ...)</code></td><td class="num">OwnershipError → работает</td></tr>
+</tbody>
+</table>
+</div>
+<p>Три замера разошлись с тем, что мы ожидали, и советы под них поправлены. «По одной задаче на ядро» оказалось не лучшим делением работы: десятки задач поменьше выровняли нагрузку и вышли быстрее (<a href="#batch">3</a>). Копировать массив региона через <code>Array.from</code> или spread медленно, быстрее простой цикл (<a href="#local-read">4б</a>). Разная форма объектов у регионов почти не мешает, если форм много (<a href="#shapes">6</a>).</p>
+
+<h2 id="frozen"><span class="practice-num">1</span>Большие данные только для чтения — в замороженный регион</h2>
+<p>Когда задача <code>spawn</code> захватывает обычный массив или объект, он копируется. Каждая задача получает свою копию, и копирует её главный поток в момент вызова. Тридцать две задачи над одним каталогом — это тридцать две копии каталога.</p>
+<p>Замороженный регион не копируется вообще. Все задачи и главный поток читают одни и те же объекты. Платите вы один раз, когда кладёте данные в регион.</p>
+<div class="versus">
+<figure class="snippet bad"><div class="snippet-head"><span class="mark" aria-hidden="true"></span>Плохо</div><pre class="code"><code><span class="tok-keyword">const</span> catalog = <span class="tok-keyword">await</span> <span class="tok-fn">loadCatalog</span>();      <span class="tok-comment">// обычный массив, 100 000 товаров</span>
+<span class="tok-keyword">const</span> sums = <span class="tok-keyword">await</span> Promise.<span class="tok-fn">all</span>(parts.<span class="tok-fn">map</span>((k) =&gt;
+  <span class="tok-api">spawn</span>(() =&gt; <span class="tok-fn">sumPart</span>(catalog, k))));     <span class="tok-comment">// catalog копируется в каждую задачу</span></code></pre></figure>
+<figure class="snippet good"><div class="snippet-head"><span class="mark" aria-hidden="true"></span>Хорошо</div><pre class="code"><code><span class="tok-keyword">const</span> data = <span class="tok-keyword">await</span> <span class="tok-fn">loadCatalog</span>();
+<span class="tok-keyword">const</span> region = <span class="tok-keyword">new</span> <span class="tok-api">Region</span>();
+<span class="tok-keyword">const</span> catalog = region.<span class="tok-api">run</span>(() =&gt; data);   <span class="tok-comment">// одна копия, в регион</span>
+region.<span class="tok-api">freeze</span>();                          <span class="tok-comment">// читать могут все потоки сразу</span>
+<span class="tok-keyword">const</span> sums = <span class="tok-keyword">await</span> Promise.<span class="tok-fn">all</span>(parts.<span class="tok-fn">map</span>((k) =&gt;
+  <span class="tok-api">spawn</span>(() =&gt; <span class="tok-fn">sumPart</span>(catalog, k))));     <span class="tok-comment">// копий нет</span></code></pre></figure>
+</div>
+
+<figure class="chart"><h4>32 задачи читают каталог из 100 000 товаров</h4><p class="sub">Время всех задач вместе, мс. Короче значит лучше.</p><ul class="legend"><li><span class="sw s2"></span>плохо</li><li><span class="sw s1"></span>хорошо</li></ul><svg viewBox="0 0 700 152" role="img" aria-labelledby="ch-p1-t"><title id="ch-p1-t">32 задачи читают каталог из 100 000 товаров</title><line class="c-grid" x1="200.0" x2="200.0" y1="0" y2="108"/><text class="c-tick" x="200.0" y="124" text-anchor="middle">0</text><line class="c-grid" x1="301.0" x2="301.0" y1="0" y2="108"/><text class="c-tick" x="301.0" y="124" text-anchor="middle">500</text><line class="c-grid" x1="402.0" x2="402.0" y1="0" y2="108"/><text class="c-tick" x="402.0" y="124" text-anchor="middle">1000</text><line class="c-grid" x1="503.0" x2="503.0" y1="0" y2="108"/><text class="c-tick" x="503.0" y="124" text-anchor="middle">1500</text><line class="c-grid" x1="604.0" x2="604.0" y1="0" y2="108"/><text class="c-tick" x="604.0" y="124" text-anchor="middle">2000</text><line class="c-base" x1="200" x2="200" y1="0" y2="108"/><text class="c-axis" x="402.0" y="146" text-anchor="middle">миллисекунды</text><g class="bar" tabindex="0" role="img" aria-label="Обычный массив (копия в каждую задачу): 1 705 мс" data-value="1 705 мс" data-label="Обычный массив, копия в каждую задачу" data-note=""><rect class="c-hit" x="0" y="8.0" width="700" height="42" rx="6"/><text class="c-cat" x="188" y="27.0" text-anchor="end">Обычный массив</text><text class="c-cat-s" x="188" y="42.0" text-anchor="end">копия в каждую задачу</text><path d="M200.0,18.0 h340.4 a4,4 0 0 1 4,4 v14.0 a4,4 0 0 1 -4,4 h-340.4 z" class="c-s2"/><text class="c-val" x="551.4" y="33.5">1 705 мс</text></g><g class="bar" tabindex="0" role="img" aria-label="Замороженный регион (общий, без копий): 0,7 мс" data-value="0,7 мс" data-label="Замороженный регион, общий, без копий" data-note="примерно в 2 400 раз быстрее; столбик слишком короткий, чтобы его увидеть"><rect class="c-hit" x="0" y="58.0" width="700" height="42" rx="6"/><text class="c-cat" x="188" y="77.0" text-anchor="end">Замороженный регион</text><text class="c-cat-s" x="188" y="92.0" text-anchor="end">общий, без копий</text><rect x="200.0" y="68.0" width="2.0" height="22.0" rx="1" class="c-s1"/><text class="c-val" x="209.0" y="83.5">0,7 мс</text></g></svg><details class="table-view"><summary>Показать таблицей</summary><div class="table-wrap"><table><thead><tr><th>Способ</th><th class="num">Медиана</th><th class="num">Пять запусков</th></tr></thead><tbody><tr><td>Захват обычного массива</td><td class="num">1 705 мс</td><td class="num">1 729 · 1 694 · 1 706 · 1 705 · 1 693</td></tr><tr><td>Захват замороженного региона</td><td class="num">0,7 мс</td><td class="num">0,9 · 0,7 · 0,7 · 0,4 · 0,7</td></tr></tbody></table></div></details></figure>
+
+<details class="ex-details"><summary>Код замера и вывод одного запуска <span class="file">examples/practice-01-frozen-shared.js</span></summary><figure class="example"><div class="ex-head"><span class="file"><a href="examples/practice-01-frozen-shared.js">examples/practice-01-frozen-shared.js</a></span><button class="copy" type="button">Копировать</button></div><pre class="code"><code><span class="tok-comment">// Практика 1. Большие данные только для чтения: замороженный регион вместо обычного массива.</span>
+<span class="tok-comment">// 32 задачи читают каталог из 100 000 товаров, каждая свою часть.</span>
+<span class="tok-keyword">const</span> N = <span class="tok-number">100_000</span>;
+<span class="tok-keyword">const</span> TASKS = <span class="tok-number">32</span>;
+<span class="tok-keyword">const</span> makeCatalog = () =&gt; Array.<span class="tok-fn">from</span>({ length: N }, (_, i) =&gt; ({ id: i, price: i % <span class="tok-number">100</span> }));
+
+<span class="tok-keyword">const</span> plainCatalog = <span class="tok-fn">makeCatalog</span>();
+<span class="tok-keyword">const</span> region = <span class="tok-keyword">new</span> <span class="tok-api">Region</span>();
+<span class="tok-keyword">const</span> frozenCatalog = region.<span class="tok-api">run</span>(makeCatalog);
+region.<span class="tok-api">freeze</span>();
+
+<span class="tok-comment">// Плохо: обычный массив захватывается, и spawn копирует его в каждую задачу.</span>
+<span class="tok-keyword">const</span> sumPlain = (part) =&gt; <span class="tok-api">spawn</span>((k) =&gt; {
+  <span class="tok-keyword">let</span> sum = <span class="tok-number">0</span>;
+  <span class="tok-keyword">for</span> (<span class="tok-keyword">let</span> i = k; i &lt; plainCatalog.length; i += TASKS) sum += plainCatalog[i].price;
+  <span class="tok-keyword">return</span> sum;
+}, part);
+
+<span class="tok-comment">// Хорошо: замороженный регион общий, задачи читают одни и те же объекты.</span>
+<span class="tok-keyword">const</span> sumFrozen = (part) =&gt; <span class="tok-api">spawn</span>((k) =&gt; {
+  <span class="tok-keyword">let</span> sum = <span class="tok-number">0</span>;
+  <span class="tok-keyword">for</span> (<span class="tok-keyword">let</span> i = k; i &lt; frozenCatalog.length; i += TASKS) sum += frozenCatalog[i].price;
+  <span class="tok-keyword">return</span> sum;
+}, part);
+
+<span class="tok-keyword">const</span> parts = Array.<span class="tok-fn">from</span>({ length: TASKS }, (_, k) =&gt; k);
+<span class="tok-keyword">const</span> measure = <span class="tok-keyword">async</span> (label, start) =&gt; {
+  <span class="tok-keyword">let</span> best = Infinity, total = <span class="tok-number">0</span>;
+  <span class="tok-keyword">for</span> (<span class="tok-keyword">let</span> rep = <span class="tok-number">0</span>; rep &lt; <span class="tok-number">3</span>; rep++) {
+    <span class="tok-keyword">const</span> t = performance.<span class="tok-fn">now</span>();
+    total = (<span class="tok-keyword">await</span> Promise.<span class="tok-fn">all</span>(parts.<span class="tok-fn">map</span>(start))).<span class="tok-fn">reduce</span>((a, b) =&gt; a + b, <span class="tok-number">0</span>);
+    best = Math.<span class="tok-fn">min</span>(best, performance.<span class="tok-fn">now</span>() - t);
+  }
+  <span class="tok-fn">print</span>(<span class="tok-string">`${</span>label<span class="tok-string">}: ${</span>best.<span class="tok-fn">toFixed</span>(<span class="tok-number">1</span>)<span class="tok-string">} ms (сумма ${</span>total<span class="tok-string">})`</span>);
+};
+
+(<span class="tok-keyword">async</span> () =&gt; {
+  <span class="tok-keyword">await</span> <span class="tok-fn">measure</span>(<span class="tok-string">'обычный массив, захват'</span>, sumPlain);
+  <span class="tok-keyword">await</span> <span class="tok-fn">measure</span>(<span class="tok-string">'замороженный регион   '</span>, sumFrozen);
+})();</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8; время у вас будет другим</span></div><pre class="out">обычный массив, захват: 1773.7 ms (сумма 4950000)
+замороженный регион   : 0.6 ms (сумма 4950000)</pre></figure></details>
+
+<p>Разница примерно в 2 400 раз, и почти вся она — копирование: около 53 мс на копию каталога, тридцать две копии подряд. Сама работа в задачах тут крошечная. Если данные нужно и читать, и менять, замораживать нельзя. Тогда смотрите следующую практику.</p>
+
+<h2 id="move"><span class="practice-num">2</span>Создать регион один раз и гонять его, а не пересоздавать</h2>
+<p><code>region.run</code> копирует в регион весь граф, который вернула функция: это O(n). Переезд готового региона стоит O(1), сколько бы объектов в нём ни было. Если данные ходят между потоками много раз, создайте регион один раз и дальше только передавайте его. В воркере регион находится через <code>Region.of(obj)</code>. С <code>spawn</code> то же самое: захваченный регион сам уезжает в задачу и возвращается.</p>
+<div class="versus">
+<figure class="snippet bad"><div class="snippet-head"><span class="mark" aria-hidden="true"></span>Плохо</div><pre class="code"><code><span class="tok-keyword">for</span> (<span class="tok-keyword">const</span> step <span class="tok-keyword">of</span> steps) {
+  <span class="tok-keyword">const</span> region = <span class="tok-keyword">new</span> <span class="tok-api">Region</span>();
+  <span class="tok-keyword">const</span> items = region.<span class="tok-api">run</span>(() =&gt; localItems);   <span class="tok-comment">// 10 000 объектов копируются заново</span>
+  worker.<span class="tok-api">postMessage</span>({ items, step }, [region]);
+  <span class="tok-keyword">await</span> <span class="tok-fn">nextMessage</span>(worker);
+}</code></pre></figure>
+<figure class="snippet good"><div class="snippet-head"><span class="mark" aria-hidden="true"></span>Хорошо</div><pre class="code"><code><span class="tok-keyword">const</span> region = <span class="tok-keyword">new</span> <span class="tok-api">Region</span>();
+<span class="tok-keyword">let</span> items = region.<span class="tok-api">run</span>(() =&gt; localItems);       <span class="tok-comment">// копия один раз</span>
+<span class="tok-keyword">for</span> (<span class="tok-keyword">const</span> step <span class="tok-keyword">of</span> steps) {
+  worker.<span class="tok-api">postMessage</span>({ items, step }, [<span class="tok-api">Region</span>.<span class="tok-keyword">of</span>(items)]);
+  items = (<span class="tok-keyword">await</span> <span class="tok-fn">nextMessage</span>(worker)).items;    <span class="tok-comment">// тот же объект вернулся</span>
+}</code></pre></figure>
+</div>
+
+<figure class="chart"><h4>10 000 объектов в воркер и обратно</h4><p class="sub">Время одного круга, микросекунды. Короче значит лучше.</p><ul class="legend"><li><span class="sw s2"></span>плохо</li><li><span class="sw s1"></span>хорошо</li></ul><svg viewBox="0 0 700 152" role="img" aria-labelledby="ch-p2-t"><title id="ch-p2-t">10 000 объектов в воркер и обратно</title><line class="c-grid" x1="200.0" x2="200.0" y1="0" y2="108"/><text class="c-tick" x="200.0" y="124" text-anchor="middle">0</text><line class="c-grid" x1="301.0" x2="301.0" y1="0" y2="108"/><text class="c-tick" x="301.0" y="124" text-anchor="middle">2000</text><line class="c-grid" x1="402.0" x2="402.0" y1="0" y2="108"/><text class="c-tick" x="402.0" y="124" text-anchor="middle">4000</text><line class="c-grid" x1="503.0" x2="503.0" y1="0" y2="108"/><text class="c-tick" x="503.0" y="124" text-anchor="middle">6000</text><line class="c-grid" x1="604.0" x2="604.0" y1="0" y2="108"/><text class="c-tick" x="604.0" y="124" text-anchor="middle">8000</text><line class="c-base" x1="200" x2="200" y1="0" y2="108"/><text class="c-axis" x="402.0" y="146" text-anchor="middle">микросекунды</text><g class="bar" tabindex="0" role="img" aria-label="Новый регион (region.run каждый круг): 6 034 мкс" data-value="6 034 мкс" data-label="Новый регион, region.run каждый круг" data-note=""><rect class="c-hit" x="0" y="8.0" width="700" height="42" rx="6"/><text class="c-cat" x="188" y="27.0" text-anchor="end">Новый регион</text><text class="c-cat-s" x="188" y="42.0" text-anchor="end">region.run каждый круг</text><path d="M200.0,18.0 h300.7 a4,4 0 0 1 4,4 v14.0 a4,4 0 0 1 -4,4 h-300.7 z" class="c-s2"/><text class="c-val" x="511.7" y="33.5">6 034 мкс</text></g><g class="bar" tabindex="0" role="img" aria-label="Один регион (переезд туда-обратно): 8,6 мкс" data-value="8,6 мкс" data-label="Один регион, переезд туда-обратно" data-note="в 700 раз быстрее"><rect class="c-hit" x="0" y="58.0" width="700" height="42" rx="6"/><text class="c-cat" x="188" y="77.0" text-anchor="end">Один регион</text><text class="c-cat-s" x="188" y="92.0" text-anchor="end">переезд туда-обратно</text><rect x="200.0" y="68.0" width="2.0" height="22.0" rx="1" class="c-s1"/><text class="c-val" x="209.0" y="83.5">8,6 мкс</text></g></svg><details class="table-view"><summary>Показать таблицей</summary><div class="table-wrap"><table><thead><tr><th>Способ</th><th class="num">Медиана</th><th class="num">Пять запусков</th></tr></thead><tbody><tr><td>Пересоздавать регион</td><td class="num">6 034 мкс</td><td class="num">5 994 · 6 048 · 6 048 · 6 015 · 6 034</td></tr><tr><td>Переезд туда-обратно</td><td class="num">8,6 мкс</td><td class="num">8,8 · 8,1 · 8,6 · 8,1 · 8,7</td></tr></tbody></table></div></details></figure>
+
+<details class="ex-details"><summary>Код замера и вывод одного запуска <span class="file">examples/practice-02-move-not-rebuild.js</span></summary><figure class="example"><div class="ex-head"><span class="file"><a href="examples/practice-02-move-not-rebuild.js">examples/practice-02-move-not-rebuild.js</a></span><button class="copy" type="button">Копировать</button></div><pre class="code"><code><span class="tok-comment">// Практика 2. Создать регион один раз и гонять его туда-обратно, а не пересоздавать.</span>
+<span class="tok-comment">// 200 раз отправляем воркеру 10 000 объектов, он меняет один и возвращает.</span>
+<span class="tok-keyword">const</span> N = <span class="tok-number">10_000</span>;
+<span class="tok-keyword">const</span> ROUNDS = <span class="tok-number">200</span>;
+<span class="tok-keyword">const</span> worker = <span class="tok-keyword">new</span> <span class="tok-api">Worker</span>(
+  <span class="tok-string">`onmessage = ({ data: { items } }) =&gt; {
+     items[0].x += 1;
+     postMessage({ items }, [Region.of(items)]);
+   };`</span>,
+  { type: <span class="tok-string">'string'</span> },
+);
+<span class="tok-keyword">const</span> local = Array.<span class="tok-fn">from</span>({ length: N }, (_, i) =&gt; ({ x: i, y: -i }));
+
+<span class="tok-comment">// Плохо: каждый раз новый регион. run копирует все 10 000 объектов, O(n).</span>
+<span class="tok-keyword">const</span> rebuild = () =&gt; {
+  <span class="tok-keyword">for</span> (<span class="tok-keyword">let</span> r = <span class="tok-number">0</span>; r &lt; ROUNDS; r++) {
+    <span class="tok-keyword">const</span> region = <span class="tok-keyword">new</span> <span class="tok-api">Region</span>();
+    <span class="tok-keyword">const</span> items = region.<span class="tok-api">run</span>(() =&gt; local);
+    worker.<span class="tok-api">postMessage</span>({ items }, [region]);
+    worker.<span class="tok-api">getMessage</span>();
+  }
+};
+
+<span class="tok-comment">// Хорошо: регион создан один раз, дальше только переезды, O(1).</span>
+<span class="tok-keyword">const</span> region = <span class="tok-keyword">new</span> <span class="tok-api">Region</span>();
+<span class="tok-keyword">let</span> items = region.<span class="tok-api">run</span>(() =&gt; local);
+<span class="tok-keyword">const</span> move = () =&gt; {
+  <span class="tok-keyword">for</span> (<span class="tok-keyword">let</span> r = <span class="tok-number">0</span>; r &lt; ROUNDS; r++) {
+    worker.<span class="tok-api">postMessage</span>({ items }, [<span class="tok-api">Region</span>.<span class="tok-keyword">of</span>(items)]);
+    items = worker.<span class="tok-api">getMessage</span>().items;
+  }
+};
+
+<span class="tok-keyword">const</span> best = (fn) =&gt; {
+  <span class="tok-keyword">let</span> min = Infinity;
+  <span class="tok-keyword">for</span> (<span class="tok-keyword">let</span> rep = <span class="tok-number">0</span>; rep &lt; <span class="tok-number">3</span>; rep++) {
+    <span class="tok-keyword">const</span> t = performance.<span class="tok-fn">now</span>();
+    <span class="tok-fn">fn</span>();
+    min = Math.<span class="tok-fn">min</span>(min, performance.<span class="tok-fn">now</span>() - t);
+  }
+  <span class="tok-keyword">return</span> (min / ROUNDS) * <span class="tok-number">1000</span>;
+};
+<span class="tok-fn">print</span>(<span class="tok-string">`пересоздавать регион: ${</span><span class="tok-fn">best</span>(rebuild).<span class="tok-fn">toFixed</span>(<span class="tok-number">1</span>)<span class="tok-string">} µs за круг`</span>);
+<span class="tok-fn">print</span>(<span class="tok-string">`переезд туда-обратно: ${</span><span class="tok-fn">best</span>(move).<span class="tok-fn">toFixed</span>(<span class="tok-number">1</span>)<span class="tok-string">} µs за круг`</span>);
+<span class="tok-fn">print</span>(<span class="tok-string">'items[0].x после всех кругов:'</span>, items[<span class="tok-number">0</span>].x);
+worker.<span class="tok-api">terminate</span>();</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8; время у вас будет другим</span></div><pre class="out">пересоздавать регион: 6616.5 µs за круг
+переезд туда-обратно: 9.6 µs за круг
+items[0].x после всех кругов: 600</pre></figure></details>
+
+<p>8,6 микросекунды за круг — это два сообщения и два переезда региона, от размера данных время не зависит. 6 мс — почти всё копия 10 000 объектов в новый регион. Чем больше данных, тем больше разница.</p>
+
+<h2 id="batch"><span class="practice-num">3</span>Несколько крупных задач вместо тысяч мелких</h2>
+<p>Задачи <code>spawn</code> идут в пул долгоживущих воркеров, по умолчанию их четыре (<code>spawn.poolSize</code>). Запуск одной задачи стоит около 3,5 микросекунды, а когда задачи запускаются тысячами сразу, около 4: упаковать аргументы, передать в воркер, получить и разобрать ответ. Если работа в задаче сопоставима с этим временем, накладные расходы её съедают. Пусть каждая задача работает хотя бы полмиллисекунды: тогда запуск займёт меньше процента её времени.</p>
+<p>Мы ожидали, что лучше всего будет по одной задаче на воркер. Замер показал другое: если части неравны по работе, несколько задач на воркер выходят быстрее. Освободившийся воркер берёт следующую задачу из очереди и не ждёт самую долгую.</p>
+<div class="versus">
+<figure class="snippet bad"><div class="snippet-head"><span class="mark" aria-hidden="true"></span>Плохо</div><pre class="code"><code><span class="tok-comment">// 10 000 задач по 200 чисел, около 20 мкс работы в каждой</span>
+<span class="tok-keyword">const</span> counts = <span class="tok-keyword">await</span> Promise.<span class="tok-fn">all</span>(ranges.<span class="tok-fn">map</span>(([from, to]) =&gt;
+  <span class="tok-api">spawn</span>(countPrimes, from, to)));</code></pre></figure>
+<figure class="snippet good"><div class="snippet-head"><span class="mark" aria-hidden="true"></span>Хорошо</div><pre class="code"><code><span class="tok-comment">// 100 задач по 20 000 чисел, около 2 мс работы в каждой</span>
+<span class="tok-keyword">const</span> parts = <span class="tok-number">100</span>;
+<span class="tok-keyword">const</span> counts = <span class="tok-keyword">await</span> Promise.<span class="tok-fn">all</span>(Array.<span class="tok-fn">from</span>({ length: parts }, (_, i) =&gt;
+  <span class="tok-api">spawn</span>(countPrimes, Math.<span class="tok-fn">floor</span>((LIMIT * i) / parts), Math.<span class="tok-fn">floor</span>((LIMIT * (i + <span class="tok-number">1</span>)) / parts))));</code></pre></figure>
+</div>
+
+<figure class="chart"><h4>Простые числа до 2 000 000</h4><p class="sub">Общее время, мс. Короче значит лучше. Вертикальная линия — та же работа в главном потоке без spawn.</p><ul class="legend"><li><span class="sw s2"></span>плохо</li><li><span class="sw s1"></span>хорошо</li><li><span class="sw ref"></span>без spawn: 194 мс</li></ul><svg viewBox="0 0 700 202" role="img" aria-labelledby="ch-p3-t"><title id="ch-p3-t">Простые числа до 2 000 000</title><line class="c-grid" x1="200.0" x2="200.0" y1="0" y2="158"/><text class="c-tick" x="200.0" y="174" text-anchor="middle">0</text><line class="c-grid" x1="301.0" x2="301.0" y1="0" y2="158"/><text class="c-tick" x="301.0" y="174" text-anchor="middle">50</text><line class="c-grid" x1="402.0" x2="402.0" y1="0" y2="158"/><text class="c-tick" x="402.0" y="174" text-anchor="middle">100</text><line class="c-grid" x1="503.0" x2="503.0" y1="0" y2="158"/><text class="c-tick" x="503.0" y="174" text-anchor="middle">150</text><line class="c-grid" x1="604.0" x2="604.0" y1="0" y2="158"/><text class="c-tick" x="604.0" y="174" text-anchor="middle">200</text><line class="c-base" x1="200" x2="200" y1="0" y2="158"/><text class="c-axis" x="402.0" y="196" text-anchor="middle">миллисекунды</text><line class="c-ref" x1="591.9" x2="591.9" y1="0" y2="158"/><g class="bar" tabindex="0" role="img" aria-label="10 000 задач (по 200 чисел): 57 мс" data-value="57 мс" data-label="10 000 задач, по 200 чисел" data-note="на 5 мс дольше 100 задач: около 0,5 мкс лишних на задачу"><rect class="c-hit" x="0" y="8.0" width="700" height="42" rx="6"/><text class="c-cat" x="188" y="27.0" text-anchor="end">10 000 задач</text><text class="c-cat-s" x="188" y="42.0" text-anchor="end">по 200 чисел</text><path d="M200.0,18.0 h111.1 a4,4 0 0 1 4,4 v14.0 a4,4 0 0 1 -4,4 h-111.1 z" class="c-s2"/><text class="c-val" x="322.1" y="33.5">57 мс</text></g><g class="bar" tabindex="0" role="img" aria-label="100 задач (по 20 000 чисел): 52 мс" data-value="52 мс" data-label="100 задач, по 20 000 чисел" data-note="в 3,7 раза быстрее главного потока"><rect class="c-hit" x="0" y="58.0" width="700" height="42" rx="6"/><text class="c-cat" x="188" y="77.0" text-anchor="end">100 задач</text><text class="c-cat-s" x="188" y="92.0" text-anchor="end">по 20 000 чисел</text><path d="M200.0,68.0 h101.0 a4,4 0 0 1 4,4 v14.0 a4,4 0 0 1 -4,4 h-101.0 z" class="c-s1"/><text class="c-val" x="312.0" y="83.5">52 мс</text></g><g class="bar" tabindex="0" role="img" aria-label="4 задачи (по одной на воркер): 65 мс" data-value="65 мс" data-label="4 задачи, по одной на воркер" data-note="части неравны по работе, последняя считается дольше всех"><rect class="c-hit" x="0" y="108.0" width="700" height="42" rx="6"/><text class="c-cat" x="188" y="127.0" text-anchor="end">4 задачи</text><text class="c-cat-s" x="188" y="142.0" text-anchor="end">по одной на воркер</text><path d="M200.0,118.0 h127.3 a4,4 0 0 1 4,4 v14.0 a4,4 0 0 1 -4,4 h-127.3 z" class="c-s1"/><text class="c-val" x="338.3" y="133.5">65 мс</text></g></svg><details class="table-view"><summary>Показать таблицей</summary><div class="table-wrap"><table><thead><tr><th>Способ</th><th class="num">Медиана</th><th class="num">Пять запусков</th></tr></thead><tbody><tr><td>Главный поток, без spawn</td><td class="num">194 мс</td><td class="num">194 · 195 · 193 · 194 · 193</td></tr><tr><td>10 000 мелких задач</td><td class="num">57 мс</td><td class="num">56 · 58 · 57 · 56 · 57</td></tr><tr><td>100 средних задач</td><td class="num">52 мс</td><td class="num">52 · 52 · 52 · 52 · 52</td></tr><tr><td>4 крупные задачи</td><td class="num">65 мс</td><td class="num">65 · 65 · 65 · 65 · 66</td></tr></tbody></table></div></details></figure>
+
+<details class="ex-details"><summary>Код замера и вывод одного запуска <span class="file">examples/practice-03-batch.js</span></summary><figure class="example"><div class="ex-head"><span class="file"><a href="examples/practice-03-batch.js">examples/practice-03-batch.js</a></span><button class="copy" type="button">Копировать</button></div><pre class="code"><code><span class="tok-comment">// Практика 3. Несколько крупных задач вместо тысяч мелких.</span>
+<span class="tok-comment">// Считаем простые числа до 2 000 000 четырьмя способами.</span>
+<span class="tok-keyword">const</span> LIMIT = <span class="tok-number">2_000_000</span>;
+<span class="tok-keyword">const</span> isPrime = (n) =&gt; {
+  <span class="tok-keyword">if</span> (n &lt; <span class="tok-number">2</span>) <span class="tok-keyword">return</span> <span class="tok-keyword">false</span>;
+  <span class="tok-keyword">for</span> (<span class="tok-keyword">let</span> d = <span class="tok-number">2</span>; d * d &lt;= n; d++) <span class="tok-keyword">if</span> (n % d === <span class="tok-number">0</span>) <span class="tok-keyword">return</span> <span class="tok-keyword">false</span>;
+  <span class="tok-keyword">return</span> <span class="tok-keyword">true</span>;
+};
+<span class="tok-keyword">const</span> countPrimes = (from, to) =&gt; {
+  <span class="tok-keyword">let</span> count = <span class="tok-number">0</span>;
+  <span class="tok-keyword">for</span> (<span class="tok-keyword">let</span> n = from; n &lt; to; n++) <span class="tok-keyword">if</span> (<span class="tok-fn">isPrime</span>(n)) count++;
+  <span class="tok-keyword">return</span> count;
+};
+
+<span class="tok-keyword">const</span> split = (parts) =&gt;
+  Array.<span class="tok-fn">from</span>({ length: parts }, (_, i) =&gt;
+    <span class="tok-api">spawn</span>(countPrimes, Math.<span class="tok-fn">floor</span>((LIMIT * i) / parts), Math.<span class="tok-fn">floor</span>((LIMIT * (i + <span class="tok-number">1</span>)) / parts)));
+<span class="tok-keyword">const</span> measure = <span class="tok-keyword">async</span> (label, run) =&gt; {
+  <span class="tok-keyword">let</span> best = Infinity, result = <span class="tok-number">0</span>;
+  <span class="tok-keyword">for</span> (<span class="tok-keyword">let</span> rep = <span class="tok-number">0</span>; rep &lt; <span class="tok-number">3</span>; rep++) {
+    <span class="tok-keyword">const</span> t = performance.<span class="tok-fn">now</span>();
+    result = <span class="tok-keyword">await</span> <span class="tok-fn">run</span>();
+    best = Math.<span class="tok-fn">min</span>(best, performance.<span class="tok-fn">now</span>() - t);
+  }
+  <span class="tok-fn">print</span>(<span class="tok-string">`${</span>label<span class="tok-string">}: ${</span>best.<span class="tok-fn">toFixed</span>(<span class="tok-number">0</span>)<span class="tok-string">} ms (простых: ${</span>result<span class="tok-string">})`</span>);
+};
+<span class="tok-keyword">const</span> sum = (list) =&gt; list.<span class="tok-fn">reduce</span>((a, b) =&gt; a + b, <span class="tok-number">0</span>);
+
+(<span class="tok-keyword">async</span> () =&gt; {
+  <span class="tok-fn">print</span>(<span class="tok-string">'воркеров в пуле:'</span>, <span class="tok-api">spawn</span>.<span class="tok-api">poolSize</span>);
+  <span class="tok-keyword">await</span> <span class="tok-fn">measure</span>(<span class="tok-string">'в главном потоке     '</span>, <span class="tok-keyword">async</span> () =&gt; <span class="tok-fn">countPrimes</span>(<span class="tok-number">0</span>, LIMIT));
+  <span class="tok-keyword">await</span> <span class="tok-fn">measure</span>(<span class="tok-string">'10 000 мелких задач  '</span>, <span class="tok-keyword">async</span> () =&gt; <span class="tok-fn">sum</span>(<span class="tok-keyword">await</span> Promise.<span class="tok-fn">all</span>(<span class="tok-fn">split</span>(<span class="tok-number">10_000</span>))));
+  <span class="tok-keyword">await</span> <span class="tok-fn">measure</span>(<span class="tok-string">'100 средних задач    '</span>, <span class="tok-keyword">async</span> () =&gt; <span class="tok-fn">sum</span>(<span class="tok-keyword">await</span> Promise.<span class="tok-fn">all</span>(<span class="tok-fn">split</span>(<span class="tok-number">100</span>))));
+  <span class="tok-keyword">await</span> <span class="tok-fn">measure</span>(<span class="tok-string">`${</span><span class="tok-api">spawn</span>.<span class="tok-api">poolSize</span><span class="tok-string">} крупные задачи     `</span>, <span class="tok-keyword">async</span> () =&gt; <span class="tok-fn">sum</span>(<span class="tok-keyword">await</span> Promise.<span class="tok-fn">all</span>(<span class="tok-fn">split</span>(<span class="tok-api">spawn</span>.<span class="tok-api">poolSize</span>))));
+})();</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8; время у вас будет другим</span></div><pre class="out">воркеров в пуле: 4
+в главном потоке     : 201 ms (простых: 148933)
+10 000 мелких задач  : 66 ms (простых: 148933)
+100 средних задач    : 55 ms (простых: 148933)
+4 крупные задачи     : 68 ms (простых: 148933)</pre></figure></details>
+
+<p>100 задач — в 3,7 раза быстрее главного потока, почти идеал для четырёх воркеров. 10 000 мелких задач заняли 57 мс: на 5 мс дольше, чем 100 задач, то есть около 0,5 мкс лишних на каждую из 10 000. Раньше, когда запуск стоил около 40 мкс, этот вариант шёл 377 мс и был вдвое медленнее той же работы в главном потоке без всякого <code>spawn</code>. Теперь разница с крупными задачами почти пропала, но совсем мелкие задачи всё равно немного проигрывают.</p>
+<p>Четыре крупные задачи дали только ×3: проверить большое число на простоту дольше, чем маленькое, поэтому последняя четверть считается дольше первой, и три воркера в конце простаивают. В отдельной проверке мы перебрали и другие числа частей: 8 частей — около 59 мс, 16 — около 55, от 32 до 1 000 — 52–53 мс, 10 000 — около 57.</p>
+
+<h2 id="local"><span class="practice-num">4</span>Горячие циклы: считать локально, в регион писать один раз</h2>
+<p>Оптимизирующие компиляторы V8 пока не встраивают доступ к объектам региона в машинный код. Каждое обращение к полю в цикле идёт через inline cache с проверкой владельца. Для чтения это почти незаметно, для записи и доступа по индексу — заметно. Обычная локальная переменная компилятору понятна: он держит её в регистре процессора.</p>
+
+<h3 id="local-write">а) Запись</h3>
+<div class="versus">
+<figure class="snippet bad"><div class="snippet-head"><span class="mark" aria-hidden="true"></span>Плохо</div><pre class="code"><code><span class="tok-keyword">for</span> (<span class="tok-keyword">let</span> i = <span class="tok-number">0</span>; i &lt; values.length; i++) {
+  stats.count += <span class="tok-number">1</span>;          <span class="tok-comment">// stats лежит в регионе</span>
+  stats.sum += values[i];
+}</code></pre></figure>
+<figure class="snippet good"><div class="snippet-head"><span class="mark" aria-hidden="true"></span>Хорошо</div><pre class="code"><code><span class="tok-keyword">let</span> count = stats.count, sum = stats.sum;
+<span class="tok-keyword">for</span> (<span class="tok-keyword">let</span> i = <span class="tok-number">0</span>; i &lt; values.length; i++) {
+  count += <span class="tok-number">1</span>;
+  sum += values[i];
+}
+stats.count = count;         <span class="tok-comment">// в регион один раз</span>
+stats.sum = sum;</code></pre></figure>
+</div>
+
+<figure class="chart"><h4>Миллион шагов, на каждом два поля</h4><p class="sub">Время цикла, мс. Короче значит лучше.</p><ul class="legend"><li><span class="sw s2"></span>плохо</li><li><span class="sw s1"></span>хорошо</li></ul><svg viewBox="0 0 700 152" role="img" aria-labelledby="ch-p4a-t"><title id="ch-p4a-t">Миллион шагов, на каждом два поля</title><line class="c-grid" x1="200.0" x2="200.0" y1="0" y2="108"/><text class="c-tick" x="200.0" y="124" text-anchor="middle">0</text><line class="c-grid" x1="334.7" x2="334.7" y1="0" y2="108"/><text class="c-tick" x="334.7" y="124" text-anchor="middle">5</text><line class="c-grid" x1="469.3" x2="469.3" y1="0" y2="108"/><text class="c-tick" x="469.3" y="124" text-anchor="middle">10</text><line class="c-grid" x1="604.0" x2="604.0" y1="0" y2="108"/><text class="c-tick" x="604.0" y="124" text-anchor="middle">15</text><line class="c-base" x1="200" x2="200" y1="0" y2="108"/><text class="c-axis" x="402.0" y="146" text-anchor="middle">миллисекунды</text><g class="bar" tabindex="0" role="img" aria-label="Запись в регион (на каждом шаге): 14,3 мс" data-value="14,3 мс" data-label="Запись в регион, на каждом шаге" data-note=""><rect class="c-hit" x="0" y="8.0" width="700" height="42" rx="6"/><text class="c-cat" x="188" y="27.0" text-anchor="end">Запись в регион</text><text class="c-cat-s" x="188" y="42.0" text-anchor="end">на каждом шаге</text><path d="M200.0,18.0 h380.3 a4,4 0 0 1 4,4 v14.0 a4,4 0 0 1 -4,4 h-380.3 z" class="c-s2"/><text class="c-val" x="591.3" y="33.5">14,3 мс</text></g><g class="bar" tabindex="0" role="img" aria-label="Локальные переменные (в регион один раз): 0,75 мс" data-value="0,75 мс" data-label="Локальные переменные, в регион один раз" data-note="в 19 раз быстрее"><rect class="c-hit" x="0" y="58.0" width="700" height="42" rx="6"/><text class="c-cat" x="188" y="77.0" text-anchor="end">Локальные переменные</text><text class="c-cat-s" x="188" y="92.0" text-anchor="end">в регион один раз</text><path d="M200.0,68.0 h16.2 a4,4 0 0 1 4,4 v14.0 a4,4 0 0 1 -4,4 h-16.2 z" class="c-s1"/><text class="c-val" x="227.2" y="83.5">0,75 мс</text></g></svg><details class="table-view"><summary>Показать таблицей</summary><div class="table-wrap"><table><thead><tr><th>Способ</th><th class="num">Медиана</th><th class="num">Пять запусков</th></tr></thead><tbody><tr><td>Запись в регион на каждом шаге</td><td class="num">14,27 мс</td><td class="num">14,27 · 14,27 · 14,27 · 14,27 · 14,32</td></tr><tr><td>Локально, в регион один раз</td><td class="num">0,75 мс</td><td class="num">0,75 · 0,74 · 0,74 · 0,75 · 0,75</td></tr></tbody></table></div></details></figure>
+
+<p>Мы ожидали разницу около 6 раз, как у записи в узлы дерева на странице <a href="numbers.html#access">«Цифры»</a>. Вышло в 19 раз. В том замере обычные объекты тоже писали в память, а здесь локальный вариант вообще не трогает память: обе переменные живут в регистрах. Чем горячее цикл, тем больше выигрыш.</p>
+
+<h3 id="local-read">б) Много проходов по массиву региона</h3>
+<p>Если по массиву региона нужно пройти много раз, дешевле один раз скопировать его в обычный массив. Копировать стоит простым циклом по индексу. <code>Array.from(arr)</code> и <code>[...arr]</code> для массива региона пока идут через итератор, и каждый элемент читается через рантайм. Миллион элементов они копируют примерно за 150 мс, а цикл — примерно за 7 мс.</p>
+<div class="versus">
+<figure class="snippet bad"><div class="snippet-head"><span class="mark" aria-hidden="true"></span>Плохо</div><pre class="code"><code><span class="tok-keyword">for</span> (<span class="tok-keyword">let</span> pass = <span class="tok-number">0</span>; pass &lt; <span class="tok-number">50</span>; pass++)
+  <span class="tok-keyword">for</span> (<span class="tok-keyword">let</span> i = <span class="tok-number">0</span>; i &lt; prices.length; i++) total += prices[i];   <span class="tok-comment">// prices в регионе</span>
+
+<span class="tok-keyword">const</span> local = Array.<span class="tok-fn">from</span>(prices);   <span class="tok-comment">// тоже медленно: через итератор</span></code></pre></figure>
+<figure class="snippet good"><div class="snippet-head"><span class="mark" aria-hidden="true"></span>Хорошо</div><pre class="code"><code><span class="tok-keyword">const</span> local = <span class="tok-keyword">new</span> <span class="tok-fn">Array</span>(prices.length);
+<span class="tok-keyword">for</span> (<span class="tok-keyword">let</span> i = <span class="tok-number">0</span>; i &lt; prices.length; i++) local[i] = prices[i];   <span class="tok-comment">// копия один раз</span>
+<span class="tok-keyword">for</span> (<span class="tok-keyword">let</span> pass = <span class="tok-number">0</span>; pass &lt; <span class="tok-number">50</span>; pass++)
+  <span class="tok-keyword">for</span> (<span class="tok-keyword">let</span> i = <span class="tok-number">0</span>; i &lt; local.length; i++) total += local[i];</code></pre></figure>
+</div>
+
+<figure class="chart"><h4>50 проходов по массиву из 100 000 чисел</h4><p class="sub">Время вместе с копированием, мс. Короче значит лучше.</p><ul class="legend"><li><span class="sw s2"></span>плохо</li><li><span class="sw s1"></span>хорошо</li></ul><svg viewBox="0 0 700 202" role="img" aria-labelledby="ch-p4b-t"><title id="ch-p4b-t">50 проходов по массиву из 100 000 чисел</title><line class="c-grid" x1="200.0" x2="200.0" y1="0" y2="158"/><text class="c-tick" x="200.0" y="174" text-anchor="middle">0</text><line class="c-grid" x1="301.0" x2="301.0" y1="0" y2="158"/><text class="c-tick" x="301.0" y="174" text-anchor="middle">10</text><line class="c-grid" x1="402.0" x2="402.0" y1="0" y2="158"/><text class="c-tick" x="402.0" y="174" text-anchor="middle">20</text><line class="c-grid" x1="503.0" x2="503.0" y1="0" y2="158"/><text class="c-tick" x="503.0" y="174" text-anchor="middle">30</text><line class="c-grid" x1="604.0" x2="604.0" y1="0" y2="158"/><text class="c-tick" x="604.0" y="174" text-anchor="middle">40</text><line class="c-base" x1="200" x2="200" y1="0" y2="158"/><text class="c-axis" x="402.0" y="196" text-anchor="middle">миллисекунды</text><g class="bar" tabindex="0" role="img" aria-label="Массив региона (prices[i] каждый проход): 34,6 мс" data-value="34,6 мс" data-label="Массив региона, prices[i] каждый проход" data-note=""><rect class="c-hit" x="0" y="8.0" width="700" height="42" rx="6"/><text class="c-cat" x="188" y="27.0" text-anchor="end">Массив региона</text><text class="c-cat-s" x="188" y="42.0" text-anchor="end">prices[i] каждый проход</text><path d="M200.0,18.0 h345.1 a4,4 0 0 1 4,4 v14.0 a4,4 0 0 1 -4,4 h-345.1 z" class="c-s2"/><text class="c-val" x="556.1" y="33.5">34,6 мс</text></g><g class="bar" tabindex="0" role="img" aria-label="Копия Array.from (потом обычный массив): 19,1 мс" data-value="19,1 мс" data-label="Копия Array.from, потом обычный массив" data-note="сама копия занимает около 15 мс: Array.from идёт через итератор"><rect class="c-hit" x="0" y="58.0" width="700" height="42" rx="6"/><text class="c-cat" x="188" y="77.0" text-anchor="end">Копия Array.from</text><text class="c-cat-s" x="188" y="92.0" text-anchor="end">потом обычный массив</text><path d="M200.0,68.0 h188.6 a4,4 0 0 1 4,4 v14.0 a4,4 0 0 1 -4,4 h-188.6 z" class="c-s2"/><text class="c-val" x="399.6" y="83.5">19,1 мс</text></g><g class="bar" tabindex="0" role="img" aria-label="Копия циклом (потом обычный массив): 3,9 мс" data-value="3,9 мс" data-label="Копия циклом, потом обычный массив" data-note="в 8,8 раза быстрее массива региона"><rect class="c-hit" x="0" y="108.0" width="700" height="42" rx="6"/><text class="c-cat" x="188" y="127.0" text-anchor="end">Копия циклом</text><text class="c-cat-s" x="188" y="142.0" text-anchor="end">потом обычный массив</text><path d="M200.0,118.0 h35.7 a4,4 0 0 1 4,4 v14.0 a4,4 0 0 1 -4,4 h-35.7 z" class="c-s1"/><text class="c-val" x="246.7" y="133.5">3,9 мс</text></g></svg><details class="table-view"><summary>Показать таблицей</summary><div class="table-wrap"><table><thead><tr><th>Способ</th><th class="num">Медиана</th><th class="num">Пять запусков</th></tr></thead><tbody><tr><td>Массив региона</td><td class="num">34,56 мс</td><td class="num">34,56 · 34,38 · 34,43 · 36,23 · 35,84</td></tr><tr><td>Копия через Array.from</td><td class="num">19,07 мс</td><td class="num">19,13 · 19,13 · 19,07 · 19,07 · 19,01</td></tr><tr><td>Копия циклом по индексу</td><td class="num">3,93 мс</td><td class="num">3,57 · 3,91 · 3,93 · 3,93 · 3,93</td></tr></tbody></table></div></details></figure>
+
+<details class="ex-details"><summary>Код замера и вывод одного запуска <span class="file">examples/practice-04-local-then-write.js</span></summary><figure class="example"><div class="ex-head"><span class="file"><a href="examples/practice-04-local-then-write.js">examples/practice-04-local-then-write.js</a></span><button class="copy" type="button">Копировать</button></div><pre class="code"><code><span class="tok-comment">// Практика 4. Горячие циклы: считать в локальных переменных, а в регион писать один раз.</span>
+<span class="tok-keyword">const</span> region = <span class="tok-keyword">new</span> <span class="tok-api">Region</span>();
+<span class="tok-keyword">const</span> stats = region.<span class="tok-api">run</span>(() =&gt; ({ count: <span class="tok-number">0</span>, sum: <span class="tok-number">0</span> }));
+<span class="tok-keyword">const</span> prices = region.<span class="tok-api">run</span>(() =&gt; Array.<span class="tok-fn">from</span>({ length: <span class="tok-number">100_000</span> }, (_, i) =&gt; i % <span class="tok-number">100</span>));
+<span class="tok-keyword">const</span> values = Array.<span class="tok-fn">from</span>({ length: <span class="tok-number">1_000_000</span> }, (_, i) =&gt; i % <span class="tok-number">7</span>);
+
+<span class="tok-comment">// а) запись. Плохо: пишем в объект региона на каждом шаге.</span>
+<span class="tok-keyword">const</span> writeEachStep = () =&gt; {
+  <span class="tok-keyword">for</span> (<span class="tok-keyword">let</span> i = <span class="tok-number">0</span>; i &lt; values.length; i++) {
+    stats.count += <span class="tok-number">1</span>;
+    stats.sum += values[i];
+  }
+};
+<span class="tok-comment">// Хорошо: считаем локально, в регион пишем результат.</span>
+<span class="tok-keyword">const</span> writeOnce = () =&gt; {
+  <span class="tok-keyword">let</span> count = stats.count, sum = stats.sum;
+  <span class="tok-keyword">for</span> (<span class="tok-keyword">let</span> i = <span class="tok-number">0</span>; i &lt; values.length; i++) {
+    count += <span class="tok-number">1</span>;
+    sum += values[i];
+  }
+  stats.count = count;
+  stats.sum = sum;
+};
+
+<span class="tok-comment">// б) чтение по индексу много раз. Плохо: 50 проходов прямо по массиву региона.</span>
+<span class="tok-keyword">const</span> PASSES = <span class="tok-number">50</span>;
+<span class="tok-keyword">const</span> readRegion = () =&gt; {
+  <span class="tok-keyword">let</span> total = <span class="tok-number">0</span>;
+  <span class="tok-keyword">for</span> (<span class="tok-keyword">let</span> p = <span class="tok-number">0</span>; p &lt; PASSES; p++)
+    <span class="tok-keyword">for</span> (<span class="tok-keyword">let</span> i = <span class="tok-number">0</span>; i &lt; prices.length; i++) total += prices[i];
+  <span class="tok-keyword">return</span> total;
+};
+<span class="tok-comment">// Хорошо: один раз скопировать в обычный массив простым циклом (копия входит в замер).</span>
+<span class="tok-keyword">const</span> sumLocal = (local) =&gt; {
+  <span class="tok-keyword">let</span> total = <span class="tok-number">0</span>;
+  <span class="tok-keyword">for</span> (<span class="tok-keyword">let</span> p = <span class="tok-number">0</span>; p &lt; PASSES; p++)
+    <span class="tok-keyword">for</span> (<span class="tok-keyword">let</span> i = <span class="tok-number">0</span>; i &lt; local.length; i++) total += local[i];
+  <span class="tok-keyword">return</span> total;
+};
+<span class="tok-keyword">const</span> readLoopCopy = () =&gt; {
+  <span class="tok-keyword">const</span> local = <span class="tok-keyword">new</span> <span class="tok-fn">Array</span>(prices.length);
+  <span class="tok-keyword">for</span> (<span class="tok-keyword">let</span> i = <span class="tok-number">0</span>; i &lt; prices.length; i++) local[i] = prices[i];
+  <span class="tok-keyword">return</span> <span class="tok-fn">sumLocal</span>(local);
+};
+<span class="tok-comment">// А Array.from (и spread) на массиве региона пока медленные: они идут через итератор.</span>
+<span class="tok-keyword">const</span> sumFromCopy = (local) =&gt; {
+  <span class="tok-keyword">let</span> total = <span class="tok-number">0</span>;
+  <span class="tok-keyword">for</span> (<span class="tok-keyword">let</span> p = <span class="tok-number">0</span>; p &lt; PASSES; p++)
+    <span class="tok-keyword">for</span> (<span class="tok-keyword">let</span> i = <span class="tok-number">0</span>; i &lt; local.length; i++) total += local[i];
+  <span class="tok-keyword">return</span> total;
+};
+<span class="tok-keyword">const</span> readArrayFrom = () =&gt; <span class="tok-fn">sumFromCopy</span>(Array.<span class="tok-fn">from</span>(prices));
+
+<span class="tok-keyword">const</span> best = (fn) =&gt; {
+  <span class="tok-keyword">let</span> min = Infinity;
+  <span class="tok-keyword">for</span> (<span class="tok-keyword">let</span> rep = <span class="tok-number">0</span>; rep &lt; <span class="tok-number">7</span>; rep++) {
+    <span class="tok-keyword">const</span> t = performance.<span class="tok-fn">now</span>();
+    <span class="tok-fn">fn</span>();
+    min = Math.<span class="tok-fn">min</span>(min, performance.<span class="tok-fn">now</span>() - t);
+  }
+  <span class="tok-keyword">return</span> min.<span class="tok-fn">toFixed</span>(<span class="tok-number">2</span>);
+};
+<span class="tok-fn">print</span>(<span class="tok-string">`запись: в регион на каждом шаге ${</span><span class="tok-fn">best</span>(writeEachStep)<span class="tok-string">} ms, локально и один раз ${</span><span class="tok-fn">best</span>(writeOnce)<span class="tok-string">} ms`</span>);
+<span class="tok-fn">print</span>(<span class="tok-string">`чтение: по массиву региона ${</span><span class="tok-fn">best</span>(readRegion)<span class="tok-string">} ms, копия циклом + обычный массив ${</span><span class="tok-fn">best</span>(readLoopCopy)<span class="tok-string">} ms, `</span> +
+  <span class="tok-string">`копия Array.from + обычный массив ${</span><span class="tok-fn">best</span>(readArrayFrom)<span class="tok-string">} ms`</span>);
+<span class="tok-fn">print</span>(<span class="tok-string">'результаты совпадают:'</span>, <span class="tok-fn">readRegion</span>() === <span class="tok-fn">readLoopCopy</span>() &amp;&amp; <span class="tok-fn">readLoopCopy</span>() === <span class="tok-fn">readArrayFrom</span>());</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8; время у вас будет другим</span></div><pre class="out">запись: в регион на каждом шаге 13.61 ms, локально и один раз 0.70 ms
+чтение: по массиву региона 33.05 ms, копия циклом + обычный массив 3.75 ms, копия Array.from + обычный массив 18.56 ms
+результаты совпадают: true</pre></figure></details>
+
+<p>Копия циклом вместе с 50 проходами в 8,8 раза быстрее, чем 50 проходов по региону. Копия через <code>Array.from</code> выигрывает всего в 1,8 раза: почти всё время уходит на саму копию. Копия — это снимок. Изменения в регионе в ней не появятся, и запись в неё не попадёт в регион. Для одного прохода копировать смысла нет, об этом следующая практика. А если в массиве только числа, лучше с самого начала хранить их в типизированном массиве (<a href="#typed">практика 9</a>): тогда копия не нужна вовсе.</p>
+
+<h2 id="methods"><span class="practice-num">5</span>Массив региона: цикл for, а не filter и map</h2>
+<p>У массива региона нет своего прототипа. <code>map</code>, <code>filter</code>, <code>reduce</code> и другие методы берутся из <code>Array.prototype</code> читающего потока и работают, но медленно: каждый элемент они читают через общий путь встроенных функций, а не через inline cache. Обычный цикл <code>for</code> по индексу идёт через inline cache и оказывается в десятки раз быстрее.</p>
+<div class="versus">
+<figure class="snippet bad"><div class="snippet-head"><span class="mark" aria-hidden="true"></span>Плохо</div><pre class="code"><code><span class="tok-keyword">const</span> total = numbers               <span class="tok-comment">// numbers в регионе</span>
+  .<span class="tok-fn">filter</span>((x) =&gt; x % <span class="tok-number">2</span> === <span class="tok-number">0</span>)
+  .<span class="tok-fn">map</span>((x) =&gt; x * x)
+  .<span class="tok-fn">reduce</span>((a, b) =&gt; a + b, <span class="tok-number">0</span>);</code></pre></figure>
+<figure class="snippet good"><div class="snippet-head"><span class="mark" aria-hidden="true"></span>Хорошо</div><pre class="code"><code><span class="tok-keyword">let</span> total = <span class="tok-number">0</span>;
+<span class="tok-keyword">for</span> (<span class="tok-keyword">let</span> i = <span class="tok-number">0</span>; i &lt; numbers.length; i++) {
+  <span class="tok-keyword">const</span> x = numbers[i];
+  <span class="tok-keyword">if</span> (x % <span class="tok-number">2</span> === <span class="tok-number">0</span>) total += x * x;
+}</code></pre></figure>
+</div>
+
+<figure class="chart"><h4>Сумма квадратов чётных чисел, массив из 1 000 000</h4><p class="sub">Один проход, мс. Короче значит лучше.</p><ul class="legend"><li><span class="sw s2"></span>методы массива</li><li><span class="sw s1"></span>цикл for</li></ul><svg viewBox="0 0 700 252" role="img" aria-labelledby="ch-p5-t"><title id="ch-p5-t">Сумма квадратов чётных чисел, массив из 1 000 000</title><line class="c-grid" x1="200.0" x2="200.0" y1="0" y2="208"/><text class="c-tick" x="200.0" y="224" text-anchor="middle">0</text><line class="c-grid" x1="280.8" x2="280.8" y1="0" y2="208"/><text class="c-tick" x="280.8" y="224" text-anchor="middle">50</text><line class="c-grid" x1="361.6" x2="361.6" y1="0" y2="208"/><text class="c-tick" x="361.6" y="224" text-anchor="middle">100</text><line class="c-grid" x1="442.4" x2="442.4" y1="0" y2="208"/><text class="c-tick" x="442.4" y="224" text-anchor="middle">150</text><line class="c-grid" x1="523.2" x2="523.2" y1="0" y2="208"/><text class="c-tick" x="523.2" y="224" text-anchor="middle">200</text><line class="c-grid" x1="604.0" x2="604.0" y1="0" y2="208"/><text class="c-tick" x="604.0" y="224" text-anchor="middle">250</text><line class="c-base" x1="200" x2="200" y1="0" y2="208"/><text class="c-axis" x="402.0" y="246" text-anchor="middle">миллисекунды</text><g class="bar" tabindex="0" role="img" aria-label="Регион (filter / map / reduce): 223 мс" data-value="223 мс" data-label="Регион, filter / map / reduce" data-note=""><rect class="c-hit" x="0" y="8.0" width="700" height="42" rx="6"/><text class="c-cat" x="188" y="27.0" text-anchor="end">Регион</text><text class="c-cat-s" x="188" y="42.0" text-anchor="end">filter / map / reduce</text><path d="M200.0,18.0 h356.2 a4,4 0 0 1 4,4 v14.0 a4,4 0 0 1 -4,4 h-356.2 z" class="c-s2"/><text class="c-val" x="567.2" y="33.5">223 мс</text></g><g class="bar" tabindex="0" role="img" aria-label="Копия циклом (filter / map / reduce): 27,7 мс" data-value="27,7 мс" data-label="Копия циклом, filter / map / reduce" data-note=""><rect class="c-hit" x="0" y="58.0" width="700" height="42" rx="6"/><text class="c-cat" x="188" y="77.0" text-anchor="end">Копия циклом</text><text class="c-cat-s" x="188" y="92.0" text-anchor="end">filter / map / reduce</text><path d="M200.0,68.0 h40.7 a4,4 0 0 1 4,4 v14.0 a4,4 0 0 1 -4,4 h-40.7 z" class="c-s2"/><text class="c-val" x="251.7" y="83.5">27,7 мс</text></g><g class="bar" tabindex="0" role="img" aria-label="Регион (цикл for): 7,8 мс" data-value="7,8 мс" data-label="Регион, цикл for" data-note="в 28 раз быстрее методов на регионе"><rect class="c-hit" x="0" y="108.0" width="700" height="42" rx="6"/><text class="c-cat" x="188" y="127.0" text-anchor="end">Регион</text><text class="c-cat-s" x="188" y="142.0" text-anchor="end">цикл for</text><path d="M200.0,118.0 h8.6 a4,4 0 0 1 4,4 v14.0 a4,4 0 0 1 -4,4 h-8.6 z" class="c-s1"/><text class="c-val" x="219.6" y="133.5">7,8 мс</text></g><g class="bar" tabindex="0" role="img" aria-label="Копия циклом (цикл for): 8,7 мс" data-value="8,7 мс" data-label="Копия циклом, цикл for" data-note="копия стоит дороже, чем выигрывает на одном проходе"><rect class="c-hit" x="0" y="158.0" width="700" height="42" rx="6"/><text class="c-cat" x="188" y="177.0" text-anchor="end">Копия циклом</text><text class="c-cat-s" x="188" y="192.0" text-anchor="end">цикл for</text><path d="M200.0,168.0 h10.1 a4,4 0 0 1 4,4 v14.0 a4,4 0 0 1 -4,4 h-10.1 z" class="c-s1"/><text class="c-val" x="221.1" y="183.5">8,7 мс</text></g></svg><details class="table-view"><summary>Показать таблицей</summary><div class="table-wrap"><table><thead><tr><th>Способ</th><th class="num">Медиана</th><th class="num">Пять запусков</th></tr></thead><tbody><tr><td>Регион, filter/map/reduce</td><td class="num">222,9 мс</td><td class="num">221,1 · 222,2 · 222,9 · 223,3 · 224,5</td></tr><tr><td>Копия циклом, filter/map/reduce</td><td class="num">27,7 мс</td><td class="num">27,7 · 28,0 · 27,5 · 27,6 · 28,1</td></tr><tr><td>Регион, цикл for</td><td class="num">7,82 мс</td><td class="num">7,82 · 7,81 · 7,92 · 7,81 · 7,93</td></tr><tr><td>Копия циклом, цикл for</td><td class="num">8,74 мс</td><td class="num">8,73 · 8,74 · 8,74 · 8,73 · 8,78</td></tr></tbody></table></div></details></figure>
+
+<details class="ex-details"><summary>Код замера и вывод одного запуска <span class="file">examples/practice-05-methods.js</span></summary><figure class="example"><div class="ex-head"><span class="file"><a href="examples/practice-05-methods.js">examples/practice-05-methods.js</a></span><button class="copy" type="button">Копировать</button></div><pre class="code"><code><span class="tok-comment">// Практика 5. Методы массива на массиве региона, обычный цикл и локальная копия.</span>
+<span class="tok-comment">// Сумма квадратов чётных чисел в массиве из 1 000 000 элементов.</span>
+<span class="tok-keyword">const</span> region = <span class="tok-keyword">new</span> <span class="tok-api">Region</span>();
+<span class="tok-keyword">const</span> numbers = region.<span class="tok-api">run</span>(() =&gt; Array.<span class="tok-fn">from</span>({ length: <span class="tok-number">1_000_000</span> }, (_, i) =&gt; i % <span class="tok-number">1000</span>));
+
+<span class="tok-comment">// Функции продублированы, чтобы подсказки движка для массива региона</span>
+<span class="tok-comment">// и для обычного массива не смешивались в одном месте кода.</span>
+<span class="tok-keyword">const</span> methodsOnRegion = () =&gt; numbers.<span class="tok-fn">filter</span>((x) =&gt; x % <span class="tok-number">2</span> === <span class="tok-number">0</span>).<span class="tok-fn">map</span>((x) =&gt; x * x).<span class="tok-fn">reduce</span>((a, b) =&gt; a + b, <span class="tok-number">0</span>);
+<span class="tok-keyword">const</span> loopOnRegion = () =&gt; {
+  <span class="tok-keyword">let</span> total = <span class="tok-number">0</span>;
+  <span class="tok-keyword">for</span> (<span class="tok-keyword">let</span> i = <span class="tok-number">0</span>; i &lt; numbers.length; i++) {
+    <span class="tok-keyword">const</span> x = numbers[i];
+    <span class="tok-keyword">if</span> (x % <span class="tok-number">2</span> === <span class="tok-number">0</span>) total += x * x;
+  }
+  <span class="tok-keyword">return</span> total;
+};
+<span class="tok-keyword">const</span> copyByLoop = () =&gt; {
+  <span class="tok-keyword">const</span> local = <span class="tok-keyword">new</span> <span class="tok-fn">Array</span>(numbers.length);
+  <span class="tok-keyword">for</span> (<span class="tok-keyword">let</span> i = <span class="tok-number">0</span>; i &lt; numbers.length; i++) local[i] = numbers[i];
+  <span class="tok-keyword">return</span> local;
+};
+<span class="tok-keyword">const</span> methodsOnCopy = () =&gt; <span class="tok-fn">copyByLoop</span>().<span class="tok-fn">filter</span>((x) =&gt; x % <span class="tok-number">2</span> === <span class="tok-number">0</span>).<span class="tok-fn">map</span>((x) =&gt; x * x).<span class="tok-fn">reduce</span>((a, b) =&gt; a + b, <span class="tok-number">0</span>);
+<span class="tok-keyword">const</span> loopOnCopy = () =&gt; {
+  <span class="tok-keyword">const</span> local = <span class="tok-fn">copyByLoop</span>();
+  <span class="tok-keyword">let</span> total = <span class="tok-number">0</span>;
+  <span class="tok-keyword">for</span> (<span class="tok-keyword">let</span> i = <span class="tok-number">0</span>; i &lt; local.length; i++) {
+    <span class="tok-keyword">const</span> x = local[i];
+    <span class="tok-keyword">if</span> (x % <span class="tok-number">2</span> === <span class="tok-number">0</span>) total += x * x;
+  }
+  <span class="tok-keyword">return</span> total;
+};
+
+<span class="tok-keyword">const</span> best = (fn) =&gt; {
+  <span class="tok-keyword">let</span> min = Infinity;
+  <span class="tok-keyword">for</span> (<span class="tok-keyword">let</span> rep = <span class="tok-number">0</span>; rep &lt; <span class="tok-number">7</span>; rep++) {
+    <span class="tok-keyword">const</span> t = performance.<span class="tok-fn">now</span>();
+    <span class="tok-fn">fn</span>();
+    min = Math.<span class="tok-fn">min</span>(min, performance.<span class="tok-fn">now</span>() - t);
+  }
+  <span class="tok-keyword">return</span> min.<span class="tok-fn">toFixed</span>(<span class="tok-number">2</span>).<span class="tok-fn">padStart</span>(<span class="tok-number">6</span>);
+};
+<span class="tok-fn">print</span>(<span class="tok-string">`регион, filter/map/reduce:          ${</span><span class="tok-fn">best</span>(methodsOnRegion)<span class="tok-string">} ms`</span>);
+<span class="tok-fn">print</span>(<span class="tok-string">`регион, цикл for:                   ${</span><span class="tok-fn">best</span>(loopOnRegion)<span class="tok-string">} ms`</span>);
+<span class="tok-fn">print</span>(<span class="tok-string">`копия циклом, filter/map/reduce:    ${</span><span class="tok-fn">best</span>(methodsOnCopy)<span class="tok-string">} ms`</span>);
+<span class="tok-fn">print</span>(<span class="tok-string">`копия циклом, цикл for:             ${</span><span class="tok-fn">best</span>(loopOnCopy)<span class="tok-string">} ms`</span>);
+<span class="tok-fn">print</span>(<span class="tok-string">'результаты совпадают:'</span>, <span class="tok-fn">methodsOnRegion</span>() === <span class="tok-fn">loopOnRegion</span>() &amp;&amp; <span class="tok-fn">loopOnCopy</span>() === <span class="tok-fn">methodsOnCopy</span>());</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8; время у вас будет другим</span></div><pre class="out">регион, filter/map/reduce:          222.81 ms
+регион, цикл for:                     7.46 ms
+копия циклом, filter/map/reduce:     26.65 ms
+копия циклом, цикл for:               8.72 ms
+результаты совпадают: true</pre></figure></details>
+
+<p>Методы на массиве региона в 28 раз медленнее цикла. Если без методов никак, сначала скопируйте массив циклом (практика 4б): тогда методы работают с обычным массивом, и выходит 27,7 мс вместо 223. Для одного прохода с циклом копия не нужна: 8,7 мс с копией против 7,8 мс без неё. То же касается <code>for...of</code>: он тоже идёт через итератор.</p>
+
+<h2 id="shapes"><span class="practice-num">6</span>Одинаковая форма объектов</h2>
+<p>У каждого объекта региона есть «форма»: набор ключей в определённом порядке. Объекты <code>{ x, y }</code> и <code>{ y, x }</code> — разные формы. Inline cache в каждом месте кода запоминает формы, которые там встречались. С одной формой он работает быстрее всего, с двумя–четырьмя (полиморфный случай) перебирает их, а дальше переходит на общий медленный путь (мегаморфный случай). Привычный совет для обычного JS — создавать однотипные объекты одинаково, одной функцией или одним литералом.</p>
+<div class="versus">
+<figure class="snippet bad"><div class="snippet-head"><span class="mark" aria-hidden="true"></span>Плохо</div><pre class="code"><code><span class="tok-keyword">const</span> points = region.<span class="tok-api">run</span>(() =&gt; rows.<span class="tok-fn">map</span>((r) =&gt;
+  r.fromApi ? { y: r.y, x: r.x } : { x: r.x, y: r.y }));   <span class="tok-comment">// две формы вперемешку</span></code></pre></figure>
+<figure class="snippet good"><div class="snippet-head"><span class="mark" aria-hidden="true"></span>Хорошо</div><pre class="code"><code><span class="tok-keyword">const</span> makePoint = (x, y) =&gt; ({ x, y });                     <span class="tok-comment">// одна форма</span>
+<span class="tok-keyword">const</span> points = region.<span class="tok-api">run</span>(() =&gt; rows.<span class="tok-fn">map</span>((r) =&gt; <span class="tok-fn">makePoint</span>(r.x, r.y)));</code></pre></figure>
+</div>
+
+<figure class="chart"><h4>Сумма поля x по 100 000 объектам региона, 20 проходов</h4><p class="sub">Время, мс. Короче значит лучше. Формы — разные порядки одних и тех же четырёх ключей.</p><ul class="legend"><li><span class="sw s1"></span>одна форма</li><li><span class="sw s2"></span>формы вперемешку</li></ul><svg viewBox="0 0 700 202" role="img" aria-labelledby="ch-p6-t"><title id="ch-p6-t">Сумма поля x по 100 000 объектам региона, 20 проходов</title><line class="c-grid" x1="200.0" x2="200.0" y1="0" y2="158"/><text class="c-tick" x="200.0" y="174" text-anchor="middle">0</text><line class="c-grid" x1="334.7" x2="334.7" y1="0" y2="158"/><text class="c-tick" x="334.7" y="174" text-anchor="middle">10</text><line class="c-grid" x1="469.3" x2="469.3" y1="0" y2="158"/><text class="c-tick" x="469.3" y="174" text-anchor="middle">20</text><line class="c-grid" x1="604.0" x2="604.0" y1="0" y2="158"/><text class="c-tick" x="604.0" y="174" text-anchor="middle">30</text><line class="c-base" x1="200" x2="200" y1="0" y2="158"/><text class="c-axis" x="402.0" y="196" text-anchor="middle">миллисекунды</text><g class="bar" tabindex="0" role="img" aria-label="Одна форма (x, y, z, w везде): 20,2 мс" data-value="20,2 мс" data-label="Одна форма, x, y, z, w везде" data-note=""><rect class="c-hit" x="0" y="8.0" width="700" height="42" rx="6"/><text class="c-cat" x="188" y="27.0" text-anchor="end">Одна форма</text><text class="c-cat-s" x="188" y="42.0" text-anchor="end">x, y, z, w везде</text><path d="M200.0,18.0 h268.0 a4,4 0 0 1 4,4 v14.0 a4,4 0 0 1 -4,4 h-268.0 z" class="c-s1"/><text class="c-val" x="479.0" y="33.5">20,2 мс</text></g><g class="bar" tabindex="0" role="img" aria-label="4 формы (полиморфный IC): 26,5 мс" data-value="26,5 мс" data-label="4 формы, полиморфный IC" data-note="на 31% медленнее одной формы"><rect class="c-hit" x="0" y="58.0" width="700" height="42" rx="6"/><text class="c-cat" x="188" y="77.0" text-anchor="end">4 формы</text><text class="c-cat-s" x="188" y="92.0" text-anchor="end">полиморфный IC</text><path d="M200.0,68.0 h352.9 a4,4 0 0 1 4,4 v14.0 a4,4 0 0 1 -4,4 h-352.9 z" class="c-s2"/><text class="c-val" x="563.9" y="83.5">26,5 мс</text></g><g class="bar" tabindex="0" role="img" aria-label="24 формы (мегаморфный IC): 20,3 мс" data-value="20,3 мс" data-label="24 формы, мегаморфный IC" data-note="как одна форма; у обычных объектов здесь в 4,9 раза медленнее"><rect class="c-hit" x="0" y="108.0" width="700" height="42" rx="6"/><text class="c-cat" x="188" y="127.0" text-anchor="end">24 формы</text><text class="c-cat-s" x="188" y="142.0" text-anchor="end">мегаморфный IC</text><path d="M200.0,118.0 h269.4 a4,4 0 0 1 4,4 v14.0 a4,4 0 0 1 -4,4 h-269.4 z" class="c-s2"/><text class="c-val" x="480.4" y="133.5">20,3 мс</text></g></svg><details class="table-view"><summary>Показать таблицей</summary><div class="table-wrap"><table><thead><tr><th>Форм</th><th class="num">Объекты региона</th><th class="num">Обычные объекты</th></tr></thead><tbody><tr><td>1</td><td class="num">20,2 мс</td><td class="num">1,5 мс</td></tr><tr><td>4</td><td class="num">26,5 мс</td><td class="num">1,7 мс</td></tr><tr><td>24</td><td class="num">20,3 мс</td><td class="num">7,3 мс</td></tr></tbody></table></div></details></figure>
+
+<details class="ex-details"><summary>Код замера и вывод одного запуска <span class="file">examples/practice-06-shapes.js</span></summary><figure class="example"><div class="ex-head"><span class="file"><a href="examples/practice-06-shapes.js">examples/practice-06-shapes.js</a></span><button class="copy" type="button">Копировать</button></div><pre class="code"><code><span class="tok-comment">// Практика 6. Одинаковая форма объектов: те же ключи в том же порядке.</span>
+<span class="tok-comment">// Сумма поля x по 100 000 объектов региона, 20 проходов.</span>
+<span class="tok-keyword">const</span> N = <span class="tok-number">100_000</span>;
+<span class="tok-keyword">const</span> PASSES = <span class="tok-number">20</span>;
+<span class="tok-keyword">const</span> KEYS = [<span class="tok-string">'x'</span>, <span class="tok-string">'y'</span>, <span class="tok-string">'z'</span>, <span class="tok-string">'w'</span>];
+<span class="tok-keyword">const</span> permutations = (list) =&gt;
+  list.length &lt;= <span class="tok-number">1</span> ? [list] : list.<span class="tok-fn">flatMap</span>((k, i) =&gt; <span class="tok-fn">permutations</span>([...list.<span class="tok-fn">slice</span>(<span class="tok-number">0</span>, i), ...list.<span class="tok-fn">slice</span>(i + <span class="tok-number">1</span>)]).<span class="tok-fn">map</span>((p) =&gt; [k, ...p]));
+<span class="tok-keyword">const</span> ORDERS = <span class="tok-fn">permutations</span>(KEYS); <span class="tok-comment">// 24 порядка ключей</span>
+
+<span class="tok-comment">// shapes — сколько разных порядков ключей встречается в массиве.</span>
+<span class="tok-keyword">const</span> make = (shapes) =&gt; Array.<span class="tok-fn">from</span>({ length: N }, (_, i) =&gt; {
+  <span class="tok-keyword">const</span> o = {};
+  <span class="tok-keyword">for</span> (<span class="tok-keyword">const</span> key <span class="tok-keyword">of</span> ORDERS[i % shapes]) o[key] = i;
+  <span class="tok-keyword">return</span> o;
+});
+<span class="tok-comment">// Каждому замеру своя копия функции (new Function с уникальным комментарием, иначе</span>
+<span class="tok-comment">// движок возьмёт её из кэша), чтобы подсказки inline cache не смешивались.</span>
+<span class="tok-keyword">let</span> copies = <span class="tok-number">0</span>;
+<span class="tok-keyword">const</span> makeSumX = () =&gt; <span class="tok-keyword">new</span> <span class="tok-fn">Function</span>(<span class="tok-string">'list'</span>, <span class="tok-string">`// копия ${</span>++copies<span class="tok-string">}
+  let total = 0;
+  for (let p = 0; p &lt; ${</span>PASSES<span class="tok-string">}; p++)
+    for (let i = 0; i &lt; list.length; i++) total += list[i].x;
+  return total;
+`</span>);
+
+<span class="tok-keyword">const</span> best = (list) =&gt; {
+  <span class="tok-keyword">const</span> sumX = <span class="tok-fn">makeSumX</span>();
+  <span class="tok-keyword">let</span> min = Infinity;
+  <span class="tok-keyword">for</span> (<span class="tok-keyword">let</span> rep = <span class="tok-number">0</span>; rep &lt; <span class="tok-number">5</span>; rep++) {
+    <span class="tok-keyword">const</span> t = performance.<span class="tok-fn">now</span>();
+    <span class="tok-fn">sumX</span>(list);
+    min = Math.<span class="tok-fn">min</span>(min, performance.<span class="tok-fn">now</span>() - t);
+  }
+  <span class="tok-keyword">return</span> min.<span class="tok-fn">toFixed</span>(<span class="tok-number">1</span>).<span class="tok-fn">padStart</span>(<span class="tok-number">6</span>);
+};
+<span class="tok-keyword">for</span> (<span class="tok-keyword">const</span> shapes <span class="tok-keyword">of</span> [<span class="tok-number">1</span>, <span class="tok-number">4</span>, <span class="tok-number">24</span>]) {
+  <span class="tok-keyword">const</span> region = <span class="tok-keyword">new</span> <span class="tok-api">Region</span>();
+  <span class="tok-keyword">const</span> inRegion = region.<span class="tok-api">run</span>(() =&gt; <span class="tok-fn">make</span>(shapes));
+  <span class="tok-keyword">const</span> plain = <span class="tok-fn">make</span>(shapes);
+  <span class="tok-fn">print</span>(<span class="tok-string">`разных форм ${</span><span class="tok-fn">String</span>(shapes).<span class="tok-fn">padStart</span>(<span class="tok-number">2</span>)<span class="tok-string">}: регион ${</span><span class="tok-fn">best</span>(inRegion)<span class="tok-string">} ms | обычные объекты ${</span><span class="tok-fn">best</span>(plain)<span class="tok-string">} ms`</span>);
+}</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8; время у вас будет другим</span></div><pre class="out">разных форм  1: регион   19.8 ms | обычные объекты    1.4 ms
+разных форм  4: регион   25.7 ms | обычные объекты    1.7 ms
+разных форм 24: регион   19.7 ms | обычные объекты    6.9 ms</pre></figure></details>
+
+<p>Здесь замер разошёлся с ожиданиями. У обычных объектов всё как в учебнике: одна форма 1,5 мс, 24 формы 7,3 мс, почти в 5 раз медленнее. У объектов региона хуже всего четыре формы (+31%), а 24 формы идут так же быстро, как одна. Похоже, общий путь для объектов региона и так используется всегда, потому что компилятор не встраивает доступ к ним, так что переход на него почти ничего не стоит. Совет всё равно в силе: он почти ничего не стоит, полиморфный случай заметно медленнее, а когда компиляторы научатся встраивать доступ к регионам, форма станет важна так же, как у обычных объектов.</p>
+<p>Ещё видно, что сумма поля по 100 000 объектов региона в 13 раз дольше, чем по обычным. Это в основном не форма, а доступ к региону в горячем цикле: индекс по массиву региона (практика 4б) и чтение поля без встраивания в машинный код.</p>
+
+<h2 id="await"><span class="practice-num">7</span>В главном потоке — <code>await</code>, а не <code>join()</code></h2>
+<p><code>task.join()</code> останавливает поток, пока задача не закончится. В браузере это выглядело бы как зависшая страница: клики не обрабатываются, кадры не рисуются, анимации стоят. Задача при этом считается в другом потоке, но главному от этого не легче, он просто ждёт. <code>await task</code> отпускает поток: пока задача считается, главный поток обрабатывает события, а результат приходит потом.</p>
+<p>В d8 нет страницы, поэтому мы изобразили её цепочкой <code>setTimeout</code>: каждый «тик» — как обработка события. Пока задача считается около 0,2 с, мы считаем, сколько тиков успел сделать главный поток и какой была самая длинная пауза между ними. В d8 <code>setTimeout</code> не ждёт указанную задержку, поэтому тиков так много: цепочка крутится так быстро, как позволяет поток.</p>
+<div class="versus">
+<figure class="snippet bad"><div class="snippet-head"><span class="mark" aria-hidden="true"></span>Плохо</div><pre class="code"><code>button.onclick = () =&gt; {
+  <span class="tok-keyword">const</span> result = <span class="tok-api">spawn</span>(buildReport, rows).<span class="tok-api">join</span>();   <span class="tok-comment">// страница стоит, пока считается</span>
+  <span class="tok-fn">render</span>(result);
+};</code></pre></figure>
+<figure class="snippet good"><div class="snippet-head"><span class="mark" aria-hidden="true"></span>Хорошо</div><pre class="code"><code>button.onclick = <span class="tok-keyword">async</span> () =&gt; {
+  <span class="tok-keyword">const</span> result = <span class="tok-keyword">await</span> <span class="tok-api">spawn</span>(buildReport, rows);    <span class="tok-comment">// страница отвечает</span>
+  <span class="tok-fn">render</span>(result);
+};</code></pre></figure>
+</div>
+
+<figure class="chart"><h4>Самая длинная пауза главного потока, пока задача считается ~0,2 с</h4><p class="sub">Сколько главный поток не мог ответить ни на одно событие, мс. Короче значит лучше.</p><ul class="legend"><li><span class="sw s2"></span>плохо</li><li><span class="sw s1"></span>хорошо</li></ul><svg viewBox="0 0 700 152" role="img" aria-labelledby="ch-p7-t"><title id="ch-p7-t">Самая длинная пауза главного потока, пока задача считается ~0,2 с</title><line class="c-grid" x1="200.0" x2="200.0" y1="0" y2="108"/><text class="c-tick" x="200.0" y="124" text-anchor="middle">0</text><line class="c-grid" x1="301.0" x2="301.0" y1="0" y2="108"/><text class="c-tick" x="301.0" y="124" text-anchor="middle">50</text><line class="c-grid" x1="402.0" x2="402.0" y1="0" y2="108"/><text class="c-tick" x="402.0" y="124" text-anchor="middle">100</text><line class="c-grid" x1="503.0" x2="503.0" y1="0" y2="108"/><text class="c-tick" x="503.0" y="124" text-anchor="middle">150</text><line class="c-grid" x1="604.0" x2="604.0" y1="0" y2="108"/><text class="c-tick" x="604.0" y="124" text-anchor="middle">200</text><line class="c-base" x1="200" x2="200" y1="0" y2="108"/><text class="c-axis" x="402.0" y="146" text-anchor="middle">миллисекунды</text><g class="bar" tabindex="0" role="img" aria-label="join() (поток стоит): 192,5 мс" data-value="192,5 мс" data-label="join(), поток стоит" data-note="главный поток ответил 1 раз, уже после задачи"><rect class="c-hit" x="0" y="8.0" width="700" height="42" rx="6"/><text class="c-cat" x="188" y="27.0" text-anchor="end">join()</text><text class="c-cat-s" x="188" y="42.0" text-anchor="end">поток стоит</text><path d="M200.0,18.0 h384.9 a4,4 0 0 1 4,4 v14.0 a4,4 0 0 1 -4,4 h-384.9 z" class="c-s2"/><text class="c-val" x="595.9" y="33.5">192,5 мс</text></g><g class="bar" tabindex="0" role="img" aria-label="await (поток свободен): 0,3 мс" data-value="0,3 мс" data-label="await, поток свободен" data-note="главный поток ответил около 257 тысяч раз"><rect class="c-hit" x="0" y="58.0" width="700" height="42" rx="6"/><text class="c-cat" x="188" y="77.0" text-anchor="end">await</text><text class="c-cat-s" x="188" y="92.0" text-anchor="end">поток свободен</text><rect x="200.0" y="68.0" width="2.0" height="22.0" rx="1" class="c-s1"/><text class="c-val" x="209.0" y="83.5">0,3 мс</text></g></svg><details class="table-view"><summary>Показать таблицей</summary><div class="table-wrap"><table><thead><tr><th>Способ</th><th class="num">Задача</th><th class="num">Ответов главного потока</th><th class="num">Самая длинная пауза</th></tr></thead><tbody><tr><td>join()</td><td class="num">192 мс</td><td class="num">1</td><td class="num">192,5 мс</td></tr><tr><td>await</td><td class="num">192 мс</td><td class="num">≈257 000</td><td class="num">0,3 мс</td></tr></tbody></table></div></details></figure>
+
+<details class="ex-details"><summary>Код замера и вывод одного запуска <span class="file">examples/practice-07-await-not-join.js</span></summary><figure class="example"><div class="ex-head"><span class="file"><a href="examples/practice-07-await-not-join.js">examples/practice-07-await-not-join.js</a></span><button class="copy" type="button">Копировать</button></div><pre class="code"><code><span class="tok-comment">// Практика 7. В главном потоке ждать задачу через await, а не join().</span>
+<span class="tok-comment">// Пока задача считается (~0,2 с), главный поток гоняет цепочку setTimeout — как будто</span>
+<span class="tok-comment">// обрабатывает клики и кадры. Считаем, сколько раз он успел отреагировать и</span>
+<span class="tok-comment">// какой была самая длинная пауза. В d8 setTimeout не ждёт указанную задержку,</span>
+<span class="tok-comment">// поэтому цепочка крутится так быстро, как позволяет поток.</span>
+<span class="tok-keyword">const</span> heavy = (n) =&gt; {
+  <span class="tok-keyword">let</span> t = <span class="tok-number">0</span>;
+  <span class="tok-keyword">for</span> (<span class="tok-keyword">let</span> i = <span class="tok-number">0</span>; i &lt; n; i++) t = (t + i * i) % <span class="tok-number">1000003</span>;
+  <span class="tok-keyword">return</span> t;
+};
+<span class="tok-keyword">const</span> N = <span class="tok-number">30_000_000</span>;
+
+<span class="tok-keyword">const</span> watchMainThread = (label, wait) =&gt; <span class="tok-keyword">new</span> <span class="tok-fn">Promise</span>((resolve) =&gt; {
+  <span class="tok-keyword">let</span> ticks = <span class="tok-number">0</span>, longest = <span class="tok-number">0</span>, last = performance.<span class="tok-fn">now</span>(), running = <span class="tok-keyword">true</span>;
+  <span class="tok-keyword">const</span> tick = () =&gt; {
+    <span class="tok-keyword">const</span> now = performance.<span class="tok-fn">now</span>();
+    longest = Math.<span class="tok-fn">max</span>(longest, now - last);
+    last = now;
+    ticks++;
+    <span class="tok-keyword">if</span> (running) <span class="tok-fn">setTimeout</span>(tick, <span class="tok-number">0</span>);
+  };
+  <span class="tok-fn">setTimeout</span>(tick, <span class="tok-number">0</span>);
+  <span class="tok-keyword">const</span> start = performance.<span class="tok-fn">now</span>();
+  <span class="tok-fn">wait</span>().<span class="tok-fn">then</span>(() =&gt; {
+    running = <span class="tok-keyword">false</span>;
+    <span class="tok-keyword">const</span> total = performance.<span class="tok-fn">now</span>() - start;
+    <span class="tok-fn">setTimeout</span>(() =&gt; {
+      <span class="tok-fn">print</span>(<span class="tok-string">`${</span>label<span class="tok-string">}: задача ${</span>total.<span class="tok-fn">toFixed</span>(<span class="tok-number">0</span>)<span class="tok-string">} ms, главный поток ответил ${</span>ticks<span class="tok-string">} раз, `</span> +
+        <span class="tok-string">`самая длинная пауза ${</span>longest.<span class="tok-fn">toFixed</span>(<span class="tok-number">1</span>)<span class="tok-string">} ms`</span>);
+      <span class="tok-fn">resolve</span>();
+    }, <span class="tok-number">0</span>);
+  });
+});
+
+(<span class="tok-keyword">async</span> () =&gt; {
+  <span class="tok-comment">// Плохо: join() останавливает главный поток до конца задачи.</span>
+  <span class="tok-keyword">await</span> <span class="tok-fn">watchMainThread</span>(<span class="tok-string">'join '</span>, <span class="tok-keyword">async</span> () =&gt; {
+    <span class="tok-api">spawn</span>(heavy, N).<span class="tok-api">join</span>();
+  });
+  <span class="tok-comment">// Хорошо: await отпускает поток, пока задача считается в воркере.</span>
+  <span class="tok-keyword">await</span> <span class="tok-fn">watchMainThread</span>(<span class="tok-string">'await'</span>, <span class="tok-keyword">async</span> () =&gt; {
+    <span class="tok-keyword">await</span> <span class="tok-api">spawn</span>(heavy, N);
+  });
+})();</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8; время у вас будет другим</span></div><pre class="out">join : задача 192 ms, главный поток ответил 1 раз, самая длинная пауза 191.9 ms
+await: задача 190 ms, главный поток ответил 269275 раз, самая длинная пауза 0.3 ms</pre></figure></details>
+
+<p>С <code>join()</code> главный поток не ответил ни разу, пока шла задача: единственный тик случился уже после неё, и пауза равна длине задачи. С <code>await</code> он ответил около 257 тысяч раз, и самая длинная пауза — 0,3 мс. Сама задача в обоих случаях считается одинаково долго. <code>join()</code> уместен в воркере или в скрипте d8, где отвечать некому. Вызов <code>spawn(...).join()</code> подчёркивает правило Biome из <a href="tooling.html#biome">песочницы</a>.</p>
+
+<h2 id="after-move"><span class="practice-num">8</span>Не трогать объект, пока его регион в другом потоке</h2>
+<p>После <code>postMessage(..., [region])</code> или после <code>spawn</code>, захватившего регион, регион принадлежит другому потоку. Ссылка на объект у вас осталась, но любое обращение к нему бросает <code>OwnershipError</code>: и чтение поля, и <code>Object.keys</code>, и <code>JSON.stringify</code>. Это защита от гонки данных, а не ошибка движка. Дождитесь, пока регион вернётся: после <code>await</code> задачи или после ответного сообщения воркера с <code>Region.of(obj)</code> в списке transfer. Замера здесь нет: «плохой» вариант просто не работает.</p>
+<div class="versus">
+<figure class="snippet bad"><div class="snippet-head"><span class="mark" aria-hidden="true"></span>Плохо</div><pre class="code"><code><span class="tok-keyword">const</span> task = <span class="tok-api">spawn</span>(() =&gt; <span class="tok-fn">addShipping</span>(cart));   <span class="tok-comment">// cart уехал в задачу</span>
+<span class="tok-fn">showTotal</span>(cart.total);                         <span class="tok-comment">// OwnershipError</span></code></pre></figure>
+<figure class="snippet good"><div class="snippet-head"><span class="mark" aria-hidden="true"></span>Хорошо</div><pre class="code"><code><span class="tok-keyword">const</span> task = <span class="tok-api">spawn</span>(() =&gt; <span class="tok-fn">addShipping</span>(cart));
+<span class="tok-keyword">await</span> task;                                    <span class="tok-comment">// регион вернулся</span>
+<span class="tok-fn">showTotal</span>(cart.total);                         <span class="tok-comment">// тот же объект, уже изменённый</span></code></pre></figure>
+</div>
+
+<figure class="example"><div class="ex-head"><span class="file"><a href="examples/practice-08-after-move.js">examples/practice-08-after-move.js</a></span><button class="copy" type="button">Копировать</button></div><pre class="code"><code><span class="tok-comment">// Практика 8. Не пользоваться объектом после того, как его регион уехал.</span>
+<span class="tok-keyword">const</span> region = <span class="tok-keyword">new</span> <span class="tok-api">Region</span>();
+<span class="tok-keyword">const</span> cart = region.<span class="tok-api">run</span>(() =&gt; ({ items: [<span class="tok-number">120</span>, <span class="tok-number">80</span>], total: <span class="tok-number">200</span> }));
+
+<span class="tok-comment">// Плохо: отправили задаче и тут же читаем.</span>
+<span class="tok-keyword">const</span> task = <span class="tok-api">spawn</span>(() =&gt; {
+  cart.total = cart.items[<span class="tok-number">0</span>] + cart.items[<span class="tok-number">1</span>] + <span class="tok-number">50</span>; <span class="tok-comment">// доставка</span>
+  <span class="tok-keyword">return</span> cart.total;
+});
+<span class="tok-keyword">try</span> {
+  <span class="tok-fn">print</span>(<span class="tok-string">'сразу после spawn:'</span>, cart.total);
+} <span class="tok-keyword">catch</span> (e) {
+  <span class="tok-fn">print</span>(<span class="tok-string">'сразу после spawn:'</span>, e.message);
+}
+
+<span class="tok-comment">// Хорошо: дождаться задачи. Регион вернулся, объект тот же.</span>
+(<span class="tok-keyword">async</span> () =&gt; {
+  <span class="tok-fn">print</span>(<span class="tok-string">'результат задачи:'</span>, <span class="tok-keyword">await</span> task);
+  <span class="tok-fn">print</span>(<span class="tok-string">'после await:'</span>, cart.total);
+
+  <span class="tok-comment">// С воркером то же самое: после postMessage(..., [region]) объект не трогаем,</span>
+  <span class="tok-comment">// пока воркер не вернёт его.</span>
+  <span class="tok-keyword">const</span> worker = <span class="tok-keyword">new</span> <span class="tok-api">Worker</span>(
+    <span class="tok-string">`onmessage = ({ data: { cart } }) =&gt; {
+       cart.total -= 20; // скидка
+       postMessage({ cart }, [Region.of(cart)]);
+     };`</span>,
+    { type: <span class="tok-string">'string'</span> },
+  );
+  worker.<span class="tok-api">postMessage</span>({ cart }, [region]);
+  <span class="tok-keyword">try</span> {
+    cart.total = <span class="tok-number">0</span>;
+  } <span class="tok-keyword">catch</span> (e) {
+    <span class="tok-fn">print</span>(<span class="tok-string">'запись после postMessage:'</span>, e.message);
+  }
+  <span class="tok-keyword">const</span> back = worker.<span class="tok-api">getMessage</span>().cart;
+  <span class="tok-fn">print</span>(<span class="tok-string">'вернулся тот же объект:'</span>, back === cart, <span class="tok-string">'| total ='</span>, cart.total);
+  worker.<span class="tok-api">terminate</span>();
+})();</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8</span></div><pre class="out"><span class="err">сразу после spawn: OwnershipError: region 0 is being moved between isolates</span>
+результат задачи: 250
+после await: 250
+<span class="err">запись после postMessage: OwnershipError: region 0 is being moved between isolates</span>
+вернулся тот же объект: true | total = 230</pre></figure>
+
+<p>Объект после возврата тот же самый (<code>===</code>), и в нём уже лежат изменения, сделанные в другом потоке. Если нужно что-то показать, пока задача идёт, заранее скопируйте нужные поля в обычные переменные.</p>
+<p>С типизированными массивами в регионе ошибки не будет, но легко ошибиться тише: view, прочитанный до переезда, после него пустой, и после возврата региона таким и останется (<a href="guide.html#typed-detach">подробнее</a>). Перечитайте поле после <code>await</code>. Обращения к захваченному региону, пока задача идёт, подсвечивает правило ESLint <a href="tooling.html#no-region-use-while-spawned"><code>no-region-use-while-spawned</code></a>.</p>
+
+<h2 id="typed"><span class="practice-num">9</span>Много чисел — в типизированный массив</h2>
+<p>Массив региона медленный на доступе по индексу: каждое обращение идёт через inline cache с проверкой владельца (практики <a href="#local-read">4б</a> и <a href="#methods">5</a>). Типизированный массив в регионе устроен иначе. При чтении поля вы получаете обычный <code>Float64Array</code> над памятью региона (<a href="guide.html#typed">подробнее</a>), и цикл по нему компилируется так же, как по любому типизированному массиву. Проверка владельца одна, при чтении поля, а не на каждом элементе.</p>
+<div class="versus">
+<figure class="snippet bad"><div class="snippet-head"><span class="mark" aria-hidden="true"></span>Плохо</div><pre class="code"><code><span class="tok-keyword">const</span> data = region.<span class="tok-api">run</span>(() =&gt; ({
+  samples: Array.<span class="tok-fn">from</span>({ length: N }, read),   <span class="tok-comment">// обычный массив чисел</span>
+}));
+<span class="tok-keyword">for</span> (<span class="tok-keyword">let</span> i = <span class="tok-number">0</span>; i &lt; data.samples.length; i++) total += data.samples[i];</code></pre></figure>
+<figure class="snippet good"><div class="snippet-head"><span class="mark" aria-hidden="true"></span>Хорошо</div><pre class="code"><code><span class="tok-keyword">const</span> data = region.<span class="tok-api">run</span>(() =&gt; ({
+  samples: Float64Array.<span class="tok-fn">from</span>({ length: N }, read),
+}));
+<span class="tok-keyword">const</span> samples = data.samples;                 <span class="tok-comment">// view один раз, до цикла</span>
+<span class="tok-keyword">for</span> (<span class="tok-keyword">let</span> i = <span class="tok-number">0</span>; i &lt; samples.length; i++) total += samples[i];</code></pre></figure>
+</div>
+
+<figure class="chart"><h4>Сумма 1 000 000 чисел</h4><p class="sub">Один проход циклом for, мс. Короче значит лучше.</p><ul class="legend"><li><span class="sw s2"></span>плохо</li><li><span class="sw s1"></span>хорошо</li></ul><svg viewBox="0 0 700 202" role="img" aria-labelledby="ch-p9-t"><title id="ch-p9-t">Сумма 1 000 000 чисел</title><line class="c-grid" x1="200.0" x2="200.0" y1="0" y2="158"/><text class="c-tick" x="200.0" y="174" text-anchor="middle">0</text><line class="c-grid" x1="301.0" x2="301.0" y1="0" y2="158"/><text class="c-tick" x="301.0" y="174" text-anchor="middle">2</text><line class="c-grid" x1="402.0" x2="402.0" y1="0" y2="158"/><text class="c-tick" x="402.0" y="174" text-anchor="middle">4</text><line class="c-grid" x1="503.0" x2="503.0" y1="0" y2="158"/><text class="c-tick" x="503.0" y="174" text-anchor="middle">6</text><line class="c-grid" x1="604.0" x2="604.0" y1="0" y2="158"/><text class="c-tick" x="604.0" y="174" text-anchor="middle">8</text><line class="c-base" x1="200" x2="200" y1="0" y2="158"/><text class="c-axis" x="402.0" y="196" text-anchor="middle">миллисекунды</text><g class="bar" tabindex="0" role="img" aria-label="Массив чисел (в регионе): 6,7 мс" data-value="6,7 мс" data-label="Массив чисел, в регионе" data-note=""><rect class="c-hit" x="0" y="8.0" width="700" height="42" rx="6"/><text class="c-cat" x="188" y="27.0" text-anchor="end">Массив чисел</text><text class="c-cat-s" x="188" y="42.0" text-anchor="end">в регионе</text><path d="M200.0,18.0 h333.3 a4,4 0 0 1 4,4 v14.0 a4,4 0 0 1 -4,4 h-333.3 z" class="c-s2"/><text class="c-val" x="544.3" y="33.5">6,7 мс</text></g><g class="bar" tabindex="0" role="img" aria-label="Float64Array (в регионе): 0,60 мс" data-value="0,60 мс" data-label="Float64Array, в регионе" data-note="в 11 раз быстрее массива региона"><rect class="c-hit" x="0" y="58.0" width="700" height="42" rx="6"/><text class="c-cat" x="188" y="77.0" text-anchor="end">Float64Array</text><text class="c-cat-s" x="188" y="92.0" text-anchor="end">в регионе</text><path d="M200.0,68.0 h26.3 a4,4 0 0 1 4,4 v14.0 a4,4 0 0 1 -4,4 h-26.3 z" class="c-s1"/><text class="c-val" x="237.3" y="83.5">0,60 мс</text></g><g class="bar" tabindex="0" role="img" aria-label="Float64Array (обычный, без регионов): 0,60 мс" data-value="0,60 мс" data-label="Float64Array, обычный, без регионов" data-note="столько же, сколько в регионе"><rect class="c-hit" x="0" y="108.0" width="700" height="42" rx="6"/><text class="c-cat" x="188" y="127.0" text-anchor="end">Float64Array</text><text class="c-cat-s" x="188" y="142.0" text-anchor="end">обычный, без регионов</text><path d="M200.0,118.0 h26.3 a4,4 0 0 1 4,4 v14.0 a4,4 0 0 1 -4,4 h-26.3 z" class="c-s1"/><text class="c-val" x="237.3" y="133.5">0,60 мс</text></g></svg><details class="table-view"><summary>Показать таблицей</summary><div class="table-wrap"><table><thead><tr><th>Способ</th><th class="num">Медиана</th><th class="num">Пять запусков</th></tr></thead><tbody><tr><td>Сумма, массив чисел в регионе</td><td class="num">6,68 мс</td><td class="num">6,68 · 6,57 · 6,91 · 6,58 · 6,85</td></tr><tr><td>Сумма, Float64Array в регионе</td><td class="num">0,60 мс</td><td class="num">0,60 · 0,60 · 0,64 · 0,60 · 0,65</td></tr><tr><td>Сумма, обычный Float64Array</td><td class="num">0,60 мс</td><td class="num">0,60 · 0,60 · 0,64 · 0,60 · 0,60</td></tr><tr><td>Запись, массив чисел в регионе</td><td class="num">74,0 мс</td><td class="num">72,3 · 74,0 · 75,7 · 75,2 · 73,3</td></tr><tr><td>Запись, Float64Array в регионе</td><td class="num">1,48 мс</td><td class="num">1,61 · 0,75 · 1,60 · 0,78 · 1,48</td></tr><tr><td>Запись, обычный Float64Array</td><td class="num">1,47 мс</td><td class="num">1,66 · 0,84 · 1,55 · 1,12 · 1,47</td></tr></tbody></table></div></details></figure>
+
+<details class="ex-details"><summary>Код замера и вывод одного запуска <span class="file">examples/practice-09-typed-arrays.js</span></summary><figure class="example"><div class="ex-head"><span class="file"><a href="examples/practice-09-typed-arrays.js">examples/practice-09-typed-arrays.js</a></span><button class="copy" type="button">Копировать</button></div><pre class="code"><code><span class="tok-comment">// Практика 9. Много чисел — в типизированный массив, а не в обычный массив региона.</span>
+<span class="tok-comment">// Сумма и запись 1 000 000 чисел: массив чисел в регионе, Float64Array в регионе</span>
+<span class="tok-comment">// и обычный Float64Array, который регионов не касается.</span>
+<span class="tok-keyword">const</span> N = <span class="tok-number">1_000_000</span>;
+<span class="tok-keyword">const</span> region = <span class="tok-keyword">new</span> <span class="tok-api">Region</span>();
+<span class="tok-keyword">const</span> data = region.<span class="tok-api">run</span>(() =&gt; ({
+  list: Array.<span class="tok-fn">from</span>({ length: N }, (_, i) =&gt; i % <span class="tok-number">1000</span>),        <span class="tok-comment">// массив чисел</span>
+  samples: Float64Array.<span class="tok-fn">from</span>({ length: N }, (_, i) =&gt; i % <span class="tok-number">1000</span>), <span class="tok-comment">// типизированный массив</span>
+}));
+<span class="tok-keyword">const</span> plain = Float64Array.<span class="tok-fn">from</span>({ length: N }, (_, i) =&gt; i % <span class="tok-number">1000</span>);
+
+<span class="tok-comment">// Функции продублированы, чтобы подсказки движка не смешивались в одном месте кода.</span>
+<span class="tok-keyword">const</span> sumRegionArray = () =&gt; {
+  <span class="tok-keyword">const</span> list = data.list;
+  <span class="tok-keyword">let</span> total = <span class="tok-number">0</span>;
+  <span class="tok-keyword">for</span> (<span class="tok-keyword">let</span> i = <span class="tok-number">0</span>; i &lt; list.length; i++) total += list[i];
+  <span class="tok-keyword">return</span> total;
+};
+<span class="tok-keyword">const</span> sumRegionTyped = () =&gt; {
+  <span class="tok-keyword">const</span> samples = data.samples; <span class="tok-comment">// локальный view над памятью региона</span>
+  <span class="tok-keyword">let</span> total = <span class="tok-number">0</span>;
+  <span class="tok-keyword">for</span> (<span class="tok-keyword">let</span> i = <span class="tok-number">0</span>; i &lt; samples.length; i++) total += samples[i];
+  <span class="tok-keyword">return</span> total;
+};
+<span class="tok-keyword">const</span> sumPlainTyped = () =&gt; {
+  <span class="tok-keyword">let</span> total = <span class="tok-number">0</span>;
+  <span class="tok-keyword">for</span> (<span class="tok-keyword">let</span> i = <span class="tok-number">0</span>; i &lt; plain.length; i++) total += plain[i];
+  <span class="tok-keyword">return</span> total;
+};
+
+<span class="tok-keyword">const</span> writeRegionArray = () =&gt; {
+  <span class="tok-keyword">const</span> list = data.list;
+  <span class="tok-keyword">for</span> (<span class="tok-keyword">let</span> i = <span class="tok-number">0</span>; i &lt; list.length; i++) list[i] = (i * <span class="tok-number">7</span>) % <span class="tok-number">1000</span>;
+};
+<span class="tok-keyword">const</span> writeRegionTyped = () =&gt; {
+  <span class="tok-keyword">const</span> samples = data.samples;
+  <span class="tok-keyword">for</span> (<span class="tok-keyword">let</span> i = <span class="tok-number">0</span>; i &lt; samples.length; i++) samples[i] = (i * <span class="tok-number">7</span>) % <span class="tok-number">1000</span>;
+};
+<span class="tok-keyword">const</span> writePlainTyped = () =&gt; {
+  <span class="tok-keyword">for</span> (<span class="tok-keyword">let</span> i = <span class="tok-number">0</span>; i &lt; plain.length; i++) plain[i] = (i * <span class="tok-number">7</span>) % <span class="tok-number">1000</span>;
+};
+
+<span class="tok-keyword">const</span> best = (fn) =&gt; {
+  <span class="tok-keyword">let</span> min = Infinity;
+  <span class="tok-keyword">for</span> (<span class="tok-keyword">let</span> rep = <span class="tok-number">0</span>; rep &lt; <span class="tok-number">7</span>; rep++) {
+    <span class="tok-keyword">const</span> t = performance.<span class="tok-fn">now</span>();
+    <span class="tok-fn">fn</span>();
+    min = Math.<span class="tok-fn">min</span>(min, performance.<span class="tok-fn">now</span>() - t);
+  }
+  <span class="tok-keyword">return</span> min.<span class="tok-fn">toFixed</span>(<span class="tok-number">2</span>).<span class="tok-fn">padStart</span>(<span class="tok-number">5</span>);
+};
+<span class="tok-fn">print</span>(<span class="tok-string">`сумма, массив чисел в регионе:   ${</span><span class="tok-fn">best</span>(sumRegionArray)<span class="tok-string">} ms`</span>);
+<span class="tok-fn">print</span>(<span class="tok-string">`сумма, Float64Array в регионе:   ${</span><span class="tok-fn">best</span>(sumRegionTyped)<span class="tok-string">} ms`</span>);
+<span class="tok-fn">print</span>(<span class="tok-string">`сумма, обычный Float64Array:     ${</span><span class="tok-fn">best</span>(sumPlainTyped)<span class="tok-string">} ms`</span>);
+<span class="tok-fn">print</span>(<span class="tok-string">`запись, массив чисел в регионе:  ${</span><span class="tok-fn">best</span>(writeRegionArray)<span class="tok-string">} ms`</span>);
+<span class="tok-fn">print</span>(<span class="tok-string">`запись, Float64Array в регионе:  ${</span><span class="tok-fn">best</span>(writeRegionTyped)<span class="tok-string">} ms`</span>);
+<span class="tok-fn">print</span>(<span class="tok-string">`запись, обычный Float64Array:    ${</span><span class="tok-fn">best</span>(writePlainTyped)<span class="tok-string">} ms`</span>);
+<span class="tok-fn">print</span>(<span class="tok-string">'результаты совпадают:'</span>, <span class="tok-fn">sumRegionArray</span>() === <span class="tok-fn">sumRegionTyped</span>() &amp;&amp; <span class="tok-fn">sumRegionTyped</span>() === <span class="tok-fn">sumPlainTyped</span>());</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8; время у вас будет другим</span></div><pre class="out">сумма, массив чисел в регионе:    6.65 ms
+сумма, Float64Array в регионе:    0.66 ms
+сумма, обычный Float64Array:      0.65 ms
+запись, массив чисел в регионе:  76.91 ms
+запись, Float64Array в регионе:   0.80 ms
+запись, обычный Float64Array:     1.57 ms
+результаты совпадают: true</pre></figure></details>
+
+<p>Сумма по <code>Float64Array</code> в регионе идёт ровно с той же скоростью, что по обычному <code>Float64Array</code>, и в 11 раз быстрее, чем по массиву чисел в регионе. С записью разница ещё больше: миллион записей в массив региона занимает около 74 мс, в типизированный массив — около 1,5 мс, как и без регионов. Записи в <code>Float64Array</code> между запусками скачут от 0,75 до 1,6 мс, у обычного и у регионального одинаково.</p>
+<p>Две оговорки. Читайте поле один раз перед циклом: каждое чтение создаёт новый view, и делать это на каждом шаге незачем. И не держите view после переезда или заморозки региона: он отсоединится и будет читаться как пустой.</p>
+
+<h2 id="map"><span class="practice-num">10</span>В <code>map</code> возвращать ручку задачи</h2>
+<p><code>Promise.all(items.map(...))</code> ждёт то, что вернул колбэк <code>map</code>. Если колбэк вызывает <code>spawn</code>, но возвращает что-то другое (номер, исходный элемент, ничего), <code>Promise.all</code> выполнится сразу, а задачи продолжат работать. Код после <code>await</code> решит, что всё готово, хотя это не так. Если задача упадёт, её ошибку тоже никто не поймает, и d8 сообщит о <a href="spawn.html#unhandled">необработанном отклонении</a>.</p>
+<div class="versus">
+<figure class="snippet bad"><div class="snippet-head"><span class="mark" aria-hidden="true"></span>Плохо</div><pre class="code"><code><span class="tok-keyword">await</span> Promise.<span class="tok-fn">all</span>(parts.<span class="tok-fn">map</span>((i) =&gt; {
+  <span class="tok-api">spawn</span>(heavy, sizes[i]);     <span class="tok-comment">// ручка потерялась</span>
+  <span class="tok-keyword">return</span> i;                   <span class="tok-comment">// Promise.all ждёт число</span>
+}));</code></pre></figure>
+<figure class="snippet good"><div class="snippet-head"><span class="mark" aria-hidden="true"></span>Хорошо</div><pre class="code"><code><span class="tok-keyword">const</span> results = <span class="tok-keyword">await</span> Promise.<span class="tok-fn">all</span>(parts.<span class="tok-fn">map</span>((i) =&gt;
+  <span class="tok-api">spawn</span>(heavy, sizes[i])));   <span class="tok-comment">// Promise.all ждёт задачи</span>
+<span class="tok-comment">// или, если нужно другое значение:</span>
+<span class="tok-comment">// parts.map((i) =&gt; spawn(heavy, sizes[i]).then(() =&gt; i))</span></code></pre></figure>
+</div>
+
+<figure class="example"><div class="ex-head"><span class="file"><a href="examples/practice-10-map-handles.js">examples/practice-10-map-handles.js</a></span><button class="copy" type="button">Копировать</button></div><pre class="code"><code><span class="tok-comment">// d8-flags: --module</span>
+<span class="tok-comment">// Практика 10. Колбэк map должен вернуть ручку задачи, а не что-то другое.</span>
+<span class="tok-keyword">const</span> heavy = (n) =&gt; {
+  <span class="tok-keyword">let</span> t = <span class="tok-number">0</span>;
+  <span class="tok-keyword">for</span> (<span class="tok-keyword">let</span> i = <span class="tok-number">0</span>; i &lt; n; i++) t = (t + i * i) % <span class="tok-number">1000003</span>;
+  <span class="tok-keyword">return</span> t;
+};
+<span class="tok-keyword">const</span> parts = [<span class="tok-number">0</span>, <span class="tok-number">1</span>, <span class="tok-number">2</span>, <span class="tok-number">3</span>];
+
+<span class="tok-comment">// Плохо: колбэк запускает задачу, но возвращает номер части.</span>
+<span class="tok-keyword">let</span> start = performance.<span class="tok-fn">now</span>();
+<span class="tok-keyword">const</span> bad = <span class="tok-keyword">await</span> Promise.<span class="tok-fn">all</span>(parts.<span class="tok-fn">map</span>((i) =&gt; {
+  <span class="tok-api">spawn</span>(heavy, <span class="tok-number">20_000_000</span>);
+  <span class="tok-keyword">return</span> i;
+}));
+<span class="tok-fn">print</span>(<span class="tok-string">`плохо:  Promise.all вернул [${</span>bad<span class="tok-string">}] через ${</span>(performance.<span class="tok-fn">now</span>() - start).<span class="tok-fn">toFixed</span>(<span class="tok-number">1</span>)<span class="tok-string">} ms`</span>);
+<span class="tok-keyword">await</span> <span class="tok-api">spawn</span>.<span class="tok-api">idle</span>();
+<span class="tok-fn">print</span>(<span class="tok-string">`        задачи закончились через ${</span>(performance.<span class="tok-fn">now</span>() - start).<span class="tok-fn">toFixed</span>(<span class="tok-number">0</span>)<span class="tok-string">} ms`</span>);
+
+<span class="tok-comment">// Хорошо: колбэк возвращает ручку, Promise.all ждёт сами задачи.</span>
+start = performance.<span class="tok-fn">now</span>();
+<span class="tok-keyword">const</span> good = <span class="tok-keyword">await</span> Promise.<span class="tok-fn">all</span>(parts.<span class="tok-fn">map</span>(() =&gt; <span class="tok-api">spawn</span>(heavy, <span class="tok-number">20_000_000</span>)));
+<span class="tok-fn">print</span>(<span class="tok-string">`хорошо: Promise.all вернул результаты через ${</span>(performance.<span class="tok-fn">now</span>() - start).<span class="tok-fn">toFixed</span>(<span class="tok-number">0</span>)<span class="tok-string">} ms, `</span> +
+  <span class="tok-string">`все одинаковые: ${</span>good.<span class="tok-fn">every</span>((v) =&gt; v === good[<span class="tok-number">0</span>])<span class="tok-string">}`</span>);</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8 --module; время у вас будет другим</span></div><pre class="out">плохо:  Promise.all вернул [0,1,2,3] через 7.8 ms
+        задачи закончились через 142 ms
+хорошо: Promise.all вернул результаты через 132 ms, все одинаковые: true</pre></figure>
+
+<p>В плохом варианте <code>Promise.all</code> вернул номера частей, пока задачи только начинались: эти миллисекунды ушли на сами вызовы <code>spawn</code> и запуск воркеров пула. Задачи закончились намного позже, и узнать об этом удалось только через <code>spawn.idle()</code>. Эту ошибку подсвечивает правило ESLint <a href="tooling.html#no-floating-spawn"><code>no-floating-spawn</code></a>: оно отдельно говорит, что колбэк возвращает не ту ручку.</p>
+
+<h2 id="borrow-while"><span class="practice-num">11</span>Билет в асинхронной задаче — через <code>borrowWhile</code></h2>
+<p>Билет <code>region.borrow()</code>, взятый в задаче <code>spawn</code>, сдаётся сам, когда задача закончилась. Для синхронной работы это то, что нужно. Но если задача отложила чтение на потом (таймер, <code>await</code> без возврата промиса), к этому моменту билета уже нет, регион могли разморозить, и чтение бросит <code>OwnershipError</code>. <code>region.borrowWhile(fn)</code> держит билет, пока не выполнится промис из <code>fn</code>. Главное — вернуть этот промис из задачи или дождаться его, иначе задача закончится раньше. Замера здесь нет: плохой вариант просто не работает. Пример с настоящим выводом — на <a href="spawn.html#borrow">странице про spawn</a>.</p>
+<div class="versus">
+<figure class="snippet bad"><div class="snippet-head"><span class="mark" aria-hidden="true"></span>Плохо</div><pre class="code"><code><span class="tok-keyword">await</span> <span class="tok-api">spawn</span>(() =&gt; {
+  <span class="tok-keyword">const</span> ticket = <span class="tok-api">Region</span>.<span class="tok-keyword">of</span>(prices).<span class="tok-api">borrow</span>();
+  <span class="tok-fn">setTimeout</span>(() =&gt; <span class="tok-fn">show</span>(prices.apple), <span class="tok-number">100</span>);   <span class="tok-comment">// билет уже сдан</span>
+});</code></pre></figure>
+<figure class="snippet good"><div class="snippet-head"><span class="mark" aria-hidden="true"></span>Хорошо</div><pre class="code"><code><span class="tok-keyword">const</span> apple = <span class="tok-keyword">await</span> <span class="tok-api">spawn</span>(() =&gt;
+  <span class="tok-api">Region</span>.<span class="tok-keyword">of</span>(prices).<span class="tok-api">borrowWhile</span>(<span class="tok-keyword">async</span> () =&gt; {
+    <span class="tok-keyword">await</span> <span class="tok-fn">sleep</span>(<span class="tok-number">100</span>);
+    <span class="tok-keyword">return</span> prices.apple;                       <span class="tok-comment">// билет ещё у задачи</span>
+  }));</code></pre></figure>
+</div>
+<p>Голый билет, переживший задачу, d8 замечает при запуске и печатает в воркере предупреждение. <code>borrowWhile</code> с асинхронной функцией без <code>return</code> видно ещё в редакторе: его подсвечивает правило ESLint <a href="tooling.html#no-floating-borrow-while"><code>no-floating-borrow-while</code></a>.</p>
+<nav class="pager" aria-label="Соседние страницы"><a class="prev" href="channels.html"><span>← Назад</span>Каналы</a><a class="next" href="tooling.html"><span>Дальше →</span>Редактор и линтеры</a></nav>
+<p class="footer">Регионы владения в V8 — исследовательский прототип, не продукт. Цифры получены на сборке с включёнными проверками (dcheck), Apple Silicon.</p>
+</article>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

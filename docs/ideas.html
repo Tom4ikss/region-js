@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="description" content="Владение, переезд, заморозка и билеты читателя на бытовых примерах. Что такое гонка данных и почему регионы её не допускают.">
+<title>Идея владения · Регионы владения в V8</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="index.html"><svg width="26" height="26" viewBox="0 0 26 26" aria-hidden="true"><rect x="1" y="1" width="24" height="24" rx="7" fill="var(--series-1)"/><rect x="6" y="6" width="14" height="14" rx="4" fill="none" stroke="#fff" stroke-width="2"/><circle cx="13" cy="13" r="2.6" fill="#fff"/></svg><span>Регионы владения</span></a>
+  <span class="badge">эксперимент · форк V8</span>
+  <span class="spacer"></span>
+  <span class="meta">работает только в d8</span>
+</header>
+<div class="layout">
+<nav class="sidebar" aria-label="Разделы">
+<ol>
+<li><a href="index.html">Что это такое</a></li>
+<li><a href="problem.html">Зачем это нужно</a></li>
+<li><a href="ideas.html" aria-current="page">Идея владения</a></li>
+<li><a href="guide.html">API шаг за шагом</a></li>
+<li><a href="spawn.html">spawn: задачи в потоках</a></li>
+<li><a href="channels.html">Каналы</a></li>
+<li><a href="practices.html">Как делать и как не делать</a></li>
+<li><a href="tooling.html">Редактор и линтеры</a></li>
+<li><a href="inside.html">Как это устроено</a></li>
+<li><a href="numbers.html">Цифры</a></li>
+<li><a href="limits.html">Ограничения и планы</a></li>
+</ol>
+<p class="side-note">Исследовательский прототип. Все примеры на сайте запущены в собранном d8, вывод настоящий.</p>
+</nav>
+<main>
+<article class="content">
+<p class="eyebrow">Глава 2</p>
+<h1>Идея: у данных есть хозяин</h1>
+<p class="lead">Регионы держатся на одном правиле: в каждый момент у данных один хозяин, и писать в них может только он. Всё остальное — способы передать хозяйство другому потоку или на время пустить всех посмотреть.</p>
+
+<h2>Один владелец</h2>
+<div class="callout analogy">
+<span class="callout-title">Аналогия: ключи от квартиры</span>
+<p>У квартиры один комплект ключей. У кого ключи, тот и заходит: живёт, переставляет мебель, что-то меняет. Если вы отдали ключи другу, сами вы зайти уже не можете. Зато саму квартиру никто не копировал и не перевозил: поменялось только то, у кого ключи.</p>
+</div>
+<p><strong>Регион</strong> — это и есть квартира. В нём лежит группа связанных объектов: например, дерево, его массивы и строки. Владеет регионом один поток. Только он может читать и менять эти объекты. Любой другой поток, который попробует к ним обратиться, получит ошибку <code>OwnershipError</code>.</p>
+<p>Хозяин назначается сразу всему региону, а не каждому объекту отдельно. Поэтому передать регион из миллиона объектов так же дёшево, как из трёх: отдаётся один комплект ключей, а не миллион.</p>
+
+<h2>Переезд</h2>
+<p>Передать регион другому потоку — значит отдать ключи. В коде это обычный <code>postMessage</code>, только регион указан в списке transfer: <code>worker.postMessage(msg, [region])</code>. Так же сегодня передают <code>ArrayBuffer</code>.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 680 200" role="img" aria-labelledby="i1t">
+<title id="i1t">Переезд региона: владелец — главный поток, затем регион в пути и недоступен никому, затем владелец — воркер</title>
+<rect class="d-box-a" x="10" y="20" width="190" height="120" rx="12"/>
+<text class="d-t-b" x="105" y="48" text-anchor="middle">Главный поток</text>
+<text class="d-t-a" x="105" y="70" text-anchor="middle">владелец</text>
+<text class="d-t-s" x="105" y="98" text-anchor="middle">читает и пишет</text>
+<text class="d-t-s" x="105" y="116" text-anchor="middle">tree.value = 5</text>
+<rect class="d-box-w" x="245" y="20" width="190" height="120" rx="12"/>
+<text class="d-t-b" x="340" y="48" text-anchor="middle">В пути</text>
+<text class="d-t-w" x="340" y="70" text-anchor="middle">ключи ни у кого</text>
+<text class="d-t-s" x="340" y="98" text-anchor="middle">любое обращение —</text>
+<text class="d-t-s" x="340" y="116" text-anchor="middle">OwnershipError</text>
+<rect class="d-box-a" x="480" y="20" width="190" height="120" rx="12"/>
+<text class="d-t-b" x="575" y="48" text-anchor="middle">Воркер</text>
+<text class="d-t-a" x="575" y="70" text-anchor="middle">новый владелец</text>
+<text class="d-t-s" x="575" y="98" text-anchor="middle">читает и пишет</text>
+<text class="d-t-s" x="575" y="116" text-anchor="middle">те же самые объекты</text>
+<path class="d-line" d="M200,80 L238,80"/><path class="d-arrow" d="M236,75 L245,80 L236,85 z"/>
+<path class="d-line" d="M435,80 L473,80"/><path class="d-arrow" d="M471,75 L480,80 L471,85 z"/>
+<text class="d-t-m" x="222" y="170" text-anchor="middle">postMessage(msg, [region])</text>
+<text class="d-t-m" x="458" y="170" text-anchor="middle">воркер получил сообщение</text>
+<path class="d-line" d="M222,155 L222,92"/>
+<path class="d-line" d="M458,155 L458,92"/>
+</svg>
+<figcaption>Между отправкой и получением регион никому не принадлежит. Объекты никуда не двигаются: меняется только запись о том, кто владелец.</figcaption>
+</figure>
+
+<p>Через переезд можно и вернуть регион обратно: воркер отправляет его главному потоку тем же способом. Объекты при этом остаются теми же самыми: <code>===</code> вернёт <code>true</code>.</p>
+
+<h2>Заморозка: смотреть можно всем</h2>
+<p>Иногда хочется не передать данные одному потоку, а дать их прочитать сразу многим. Например, справочник, настройки или большое дерево, по которому несколько воркеров ищут параллельно.</p>
+<div class="callout analogy">
+<span class="callout-title">Аналогия: музейный экспонат</span>
+<p>Экспонат стоит в зале. Смотреть на него могут сколько угодно посетителей одновременно, и это никому не мешает. Трогать нельзя никому, даже самому музею, пока экспонат выставлен. Чтобы что-то поправить, его сначала снимают с экспозиции.</p>
+</div>
+<p><code>region.freeze()</code> выставляет регион в зал. Теперь его могут читать все потоки, а писать не может никто, включая владельца. Такой регион можно разослать нескольким воркерам обычным <code>postMessage</code> без списка transfer: каждый получит ссылку на те же объекты, без копий.</p>
+<p><code>region.thaw()</code> снимает экспонат: владелец снова может писать, а остальные теряют доступ. Снять экспонат может только тот, кто его выставил. Это право можно передать другому потоку, сами данные при этом никуда не едут.</p>
+
+<h3>Билет посетителя</h3>
+<p>Чтобы экспонат не сняли прямо у вас перед носом, можно взять билет: <code>region.borrow()</code>. Пока на руках есть хотя бы один билет, разморозить регион нельзя: <code>thaw()</code> бросит ошибку. Когда вы дочитали, верните билет: <code>release()</code>. С новым синтаксисом <code>using</code> он вернётся сам при выходе из блока.</p>
+<p>Билет не обязателен для чтения: замороженный регион читается и без него. Билет нужен, когда важно, чтобы данные гарантированно не поменялись, пока вы их читаете.</p>
+
+<h2>Все состояния региона</h2>
+<figure class="diagram">
+<svg viewBox="0 0 680 300" role="img" aria-labelledby="i2t">
+<title id="i2t">Состояния региона: владеет поток A; в пути; владеет поток B; заморожен с n читателями</title>
+<rect class="d-box-a" x="20" y="30" width="170" height="78" rx="12"/>
+<text class="d-t-b" x="105" y="58" text-anchor="middle">Владеет поток A</text>
+<text class="d-t-s" x="105" y="80" text-anchor="middle">читает и пишет</text>
+<text class="d-t-s" x="105" y="96" text-anchor="middle">только A</text>
+<rect class="d-box-w" x="255" y="30" width="170" height="78" rx="12"/>
+<text class="d-t-b" x="340" y="58" text-anchor="middle">В пути</text>
+<text class="d-t-s" x="340" y="80" text-anchor="middle">недоступен</text>
+<text class="d-t-s" x="340" y="96" text-anchor="middle">никому</text>
+<rect class="d-box-a" x="490" y="30" width="170" height="78" rx="12"/>
+<text class="d-t-b" x="575" y="58" text-anchor="middle">Владеет поток B</text>
+<text class="d-t-s" x="575" y="80" text-anchor="middle">читает и пишет</text>
+<text class="d-t-s" x="575" y="96" text-anchor="middle">только B</text>
+<rect class="d-box" x="20" y="190" width="300" height="84" rx="12"/>
+<text class="d-t-b" x="170" y="218" text-anchor="middle">Заморожен, n читателей</text>
+<text class="d-t-s" x="170" y="240" text-anchor="middle">читают все потоки,</text>
+<text class="d-t-s" x="170" y="256" text-anchor="middle">не пишет никто</text>
+<path class="d-line" d="M190,62 L248,62"/><path class="d-arrow" d="M246,57 L255,62 L246,67 z"/>
+<text class="d-t-m" x="222" y="22" text-anchor="middle">postMessage(…, [region])</text>
+<path class="d-line" d="M425,62 L483,62"/><path class="d-arrow" d="M481,57 L490,62 L481,67 z"/>
+<text class="d-t-s" x="458" y="22" text-anchor="middle">получено</text>
+<path class="d-line" d="M80,108 L80,183"/><path class="d-arrow" d="M75,181 L80,190 L85,181 z"/>
+<text class="d-t-m" x="72" y="152" text-anchor="end">freeze()</text>
+<path class="d-line" d="M130,190 L130,115"/><path class="d-arrow" d="M125,117 L130,108 L135,117 z"/>
+<text class="d-t-m" x="140" y="146">thaw()</text>
+<text class="d-t-s" x="140" y="163">только A и только при n = 0</text>
+<path class="d-line" d="M320,214 C380,204 380,262 320,252"/><path class="d-arrow" d="M328,247 L320,252 L328,258 z"/>
+<text class="d-t-m" x="385" y="226">borrow(): n + 1</text>
+<text class="d-t-m" x="385" y="246">release(): n − 1</text>
+</svg>
+<figcaption>Из состояния «владеет B» регион так же может переехать дальше или обратно к A. Заморозить может только владелец, разморозить — только тот, кто заморозил, или поток, которому он передал это право.</figcaption>
+</figure>
+
+<h2>Почему так не бывает гонок данных</h2>
+<p>Гонка данных случается, когда выполняются три условия сразу:</p>
+<ol>
+  <li>два потока обращаются к одной и той же памяти,</li>
+  <li>делают это одновременно,</li>
+  <li>и хотя бы один из них пишет.</li>
+</ol>
+<p>Правила регионов ломают это сочетание. Писать может только владелец, а он один. Когда регион заморожен, читают многие, но не пишет никто. Когда регион в пути, его нельзя даже прочитать. Ситуации «один пишет, другой в это же время читает или пишет» просто не возникает.</p>
+<p>Важно, что это проверяет движок при каждом обращении к полю, а не договорённость «давайте не трогать этот объект из воркера». Ошибиться и случайно прочитать чужие данные нельзя: вместо тихо испорченного значения будет исключение.</p>
+<p>Вот тот же опыт со счётчиком, что и на прошлой странице, только с регионом. Оба воркера держат ссылку на один объект и одновременно пытаются его увеличивать по миллиону раз. Владельцем сделан только воркер A.</p>
+
+<figure class="example"><div class="ex-head"><span class="file"><a href="examples/17-no-race.js">examples/17-no-race.js</a></span><button class="copy" type="button">Копировать</button></div><pre class="code"><code><span class="tok-comment">// Та же попытка с регионом: у обоих воркеров есть ссылка на счётчик, но писать может только владелец.</span>
+<span class="tok-keyword">const</span> region = <span class="tok-keyword">new</span> <span class="tok-api">Region</span>();
+<span class="tok-keyword">const</span> counter = region.<span class="tok-api">run</span>(() =&gt; ({ value: <span class="tok-number">0</span> }));
+
+<span class="tok-keyword">const</span> source = <span class="tok-string">`
+  onmessage = ({ data }) =&gt; {
+    if (data.keep) { globalThis.counter = data.keep; postMessage('ok'); return; }
+    let done = 0, denied = 0;
+    for (let i = 0; i &lt; 1_000_000; i++) {
+      try { counter.value = counter.value + 1; done++; }
+      catch (e) { denied++; }
+    }
+    if (data.owner) postMessage({ done, denied }, [Region.of(counter)]);
+    else postMessage({ done, denied });
+  };
+`</span>;
+<span class="tok-keyword">const</span> a = <span class="tok-keyword">new</span> <span class="tok-api">Worker</span>(source, { type: <span class="tok-string">'string'</span> });
+<span class="tok-keyword">const</span> b = <span class="tok-keyword">new</span> <span class="tok-api">Worker</span>(source, { type: <span class="tok-string">'string'</span> });
+
+<span class="tok-comment">// Раздаём обоим ссылку на один и тот же объект (через заморозку, как рассылку).</span>
+region.<span class="tok-api">freeze</span>();
+<span class="tok-keyword">for</span> (<span class="tok-keyword">const</span> w <span class="tok-keyword">of</span> [a, b]) w.<span class="tok-api">postMessage</span>({ keep: counter });
+<span class="tok-keyword">for</span> (<span class="tok-keyword">const</span> w <span class="tok-keyword">of</span> [a, b]) w.<span class="tok-api">getMessage</span>();
+region.<span class="tok-api">thaw</span>();
+
+<span class="tok-comment">// Владельцем делаем только воркер A и запускаем обоих одновременно.</span>
+a.<span class="tok-api">postMessage</span>({ owner: <span class="tok-keyword">true</span> }, [region]);
+b.<span class="tok-api">postMessage</span>({ owner: <span class="tok-keyword">false</span> });
+<span class="tok-keyword">const</span> ra = a.<span class="tok-api">getMessage</span>();
+<span class="tok-keyword">const</span> rb = b.<span class="tok-api">getMessage</span>();
+<span class="tok-fn">print</span>(<span class="tok-string">'воркер A (владелец): записей'</span>, ra.done, <span class="tok-string">'| отказов'</span>, ra.denied);
+<span class="tok-fn">print</span>(<span class="tok-string">'воркер B (не владелец): записей'</span>, rb.done, <span class="tok-string">'| отказов'</span>, rb.denied);
+<span class="tok-fn">print</span>(<span class="tok-string">'итог в главном потоке:'</span>, counter.value);
+a.<span class="tok-api">terminate</span>();
+b.<span class="tok-api">terminate</span>();</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8</span></div><pre class="out">воркер A (владелец): записей 1000000 | отказов 0
+воркер B (не владелец): записей 0 | отказов 1000000
+итог в главном потоке: 1000000</pre></figure>
+
+<p>У воркера B не прошла ни одна запись, а у владельца прошли все. Итог ровно миллион, сколько бы раз вы ни запускали этот пример. Никаких <code>Atomics</code> и замков в коде нет.</p>
+
+<h3>А если писать хочется двоим?</h3>
+<p>Тогда регион передают по очереди: поработал, отдал. Ждать никто не будет: если поток пытается писать в чужой регион, он сразу получает исключение, а не встаёт в очередь. Это осознанное решение. Замков, которые ждут, нет вообще, а значит нет и взаимных блокировок, когда два потока навсегда ждут друг друга.</p>
+
+<h2>Почему в регион кладут только данные</h2>
+<p>В регионе могут лежать обычные объекты, массивы, типизированные массивы, строки, числа, <code>true</code>/<code>false</code>, <code>null</code> и <code>undefined</code>. Функции, экземпляры <code>Map</code>, <code>Set</code>, <code>Date</code> и подобное туда не попадают. Причина простая: функция помнит переменные того потока, где её создали (замыкание), а встроенные объекты вроде <code>Map</code> устроены внутри движка по-своему и привязаны к своему потоку. Отдать их другому потоку по ссылке без копии нельзя. Обычные данные отдать можно: им нужен только сам граф полей.</p>
+
+<div class="callout aside">
+<span class="callout-title">Если вы знаете Rust</span>
+<p>Переезд похож на move, заморозка с билетами — на общее заимствование <code>&amp;T</code>. Разница в том, что здесь всё проверяется во время выполнения, а не компилятором: ошибку вы увидите как исключение, а не как ошибку сборки.</p>
+</div>
+<nav class="pager" aria-label="Соседние страницы"><a class="prev" href="problem.html"><span>← Назад</span>Зачем это нужно</a><a class="next" href="guide.html"><span>Дальше →</span>API шаг за шагом</a></nav>
+<p class="footer">Регионы владения в V8 — исследовательский прототип, не продукт. Цифры получены на сборке с включёнными проверками (dcheck), Apple Silicon.</p>
+</article>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

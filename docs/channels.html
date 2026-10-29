@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="description" content="Channel: очередь между потоками, как в Go. send и recv, буфер, close, for await, select, блокирующие версии для воркеров, переезд регионов через канал и сколько это стоит.">
+<title>Каналы · Регионы владения в V8</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="index.html"><svg width="26" height="26" viewBox="0 0 26 26" aria-hidden="true"><rect x="1" y="1" width="24" height="24" rx="7" fill="var(--series-1)"/><rect x="6" y="6" width="14" height="14" rx="4" fill="none" stroke="#fff" stroke-width="2"/><circle cx="13" cy="13" r="2.6" fill="#fff"/></svg><span>Регионы владения</span></a>
+  <span class="badge">эксперимент · форк V8</span>
+  <span class="spacer"></span>
+  <span class="meta">работает только в d8</span>
+</header>
+<div class="layout">
+<nav class="sidebar" aria-label="Разделы">
+<ol>
+<li><a href="index.html">Что это такое</a></li>
+<li><a href="problem.html">Зачем это нужно</a></li>
+<li><a href="ideas.html">Идея владения</a></li>
+<li><a href="guide.html">API шаг за шагом</a></li>
+<li><a href="spawn.html">spawn: задачи в потоках</a></li>
+<li><a href="channels.html" aria-current="page">Каналы</a></li>
+<li><a href="practices.html">Как делать и как не делать</a></li>
+<li><a href="tooling.html">Редактор и линтеры</a></li>
+<li><a href="inside.html">Как это устроено</a></li>
+<li><a href="numbers.html">Цифры</a></li>
+<li><a href="limits.html">Ограничения и планы</a></li>
+</ol>
+<p class="side-note">Исследовательский прототип. Все примеры на сайте запущены в собранном d8, вывод настоящий.</p>
+</nav>
+<main>
+<article class="content">
+<p class="eyebrow">Глава 5</p>
+<h1>Каналы: потоки, которые разговаривают</h1>
+<p class="lead"><code>spawn</code> хорош, когда задача получила данные, посчитала и вернула результат. Но часто потоки должны обмениваться данными по ходу работы: один производит, другие обрабатывают, третий собирает. Для этого есть каналы. Идея взята из Go: канал — это очередь, в которую один поток кладёт значения, а другой их забирает.</p>
+
+<h2 id="basics">Отправить и получить</h2>
+<p><code>new Channel(capacity)</code> создаёт канал. <code>await ch.send(value)</code> кладёт значение, <code>await ch.recv()</code> забирает самое старое и возвращает <code>{ value, done }</code>, как итератор. Канал закрывают через <code>ch.close()</code>: новые <code>send</code> после этого бросают ошибку, а то, что уже отправлено, по-прежнему можно получить. Когда закрытый канал опустел, <code>recv</code> возвращает <code>done: true</code>. Удобнее всего читать канал через <code>for await</code>: цикл закончится сам, когда канал закроют и вычитают.</p>
+
+<figure class="example"><div class="ex-head"><span class="file"><a href="examples/28-channel-basics.js">examples/28-channel-basics.js</a></span><button class="copy" type="button">Копировать</button></div><pre class="code"><code><span class="tok-comment">// d8-flags: --module</span>
+<span class="tok-comment">// Канал с буфером на два значения, закрытие и перебор через for await.</span>
+<span class="tok-keyword">const</span> ch = <span class="tok-keyword">new</span> <span class="tok-api">Channel</span>(<span class="tok-number">2</span>);
+<span class="tok-keyword">await</span> ch.<span class="tok-api">send</span>(<span class="tok-string">'первое'</span>);
+<span class="tok-keyword">await</span> ch.<span class="tok-api">send</span>({ text: <span class="tok-string">'второе'</span> });
+<span class="tok-fn">print</span>(<span class="tok-string">'в буфере:'</span>, ch.size, <span class="tok-string">'из'</span>, ch.capacity);
+
+<span class="tok-keyword">const</span> first = <span class="tok-keyword">await</span> ch.<span class="tok-api">recv</span>();
+<span class="tok-fn">print</span>(<span class="tok-string">'recv:'</span>, first.value, first.done);
+
+ch.<span class="tok-api">close</span>();
+<span class="tok-keyword">try</span> {
+  <span class="tok-keyword">await</span> ch.<span class="tok-api">send</span>(<span class="tok-string">'третье'</span>);
+} <span class="tok-keyword">catch</span> (e) {
+  <span class="tok-fn">print</span>(<span class="tok-string">'send после close:'</span>, e.message);
+}
+<span class="tok-comment">// Уже отправленное после close всё равно можно получить.</span>
+<span class="tok-keyword">for</span> <span class="tok-keyword">await</span> (<span class="tok-keyword">const</span> value <span class="tok-keyword">of</span> ch) <span class="tok-fn">print</span>(<span class="tok-string">'for await:'</span>, JSON.<span class="tok-fn">stringify</span>(value));
+<span class="tok-fn">print</span>(<span class="tok-string">'после конца:'</span>, JSON.<span class="tok-fn">stringify</span>(<span class="tok-keyword">await</span> ch.<span class="tok-api">recv</span>()));</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8 --module</span></div><pre class="out">в буфере: 2 из 2
+recv: первое false
+send после close: send on a closed channel
+for await: {"text":"второе"}
+после конца: {"done":true}</pre></figure>
+
+<h3 id="capacity">Буфер</h3>
+<p><code>capacity</code> — сколько значений канал держит, пока их никто не забрал. Пока в буфере есть место, <code>send</code> завершается сразу. Когда места нет, <code>send</code> ждёт, пока кто-нибудь прочитает. Так быстрый производитель не убежит далеко вперёд медленного потребителя и не съест всю память.</p>
+<p>Канал без буфера (<code>new Channel()</code>, ёмкость 0) — это встреча: <code>send</code> завершается, только когда значение забрал получатель. Отправитель точно знает, что его значение уже в чужих руках.</p>
+
+<h2 id="move">Что происходит со значением</h2>
+<p>Канал подчиняется тем же правилам, что <code>postMessage</code> и <code>spawn</code>:</p>
+<ul>
+  <li><strong>Объект региона переезжает.</strong> Его регион уходит в канал целиком, без копии, и у отправителя доступа больше нет. Переносить регион в transfer list не нужно: канал делает это сам для регионов, на которые значение ссылается напрямую (само значение или его поля первого уровня).</li>
+  <li><strong>Замороженный регион становится общим.</strong> Получатель читает тот же объект, отправитель тоже.</li>
+  <li><strong>Обычные данные копируются</strong>, как при <code>postMessage</code>.</li>
+</ul>
+
+<figure class="example"><div class="ex-head"><span class="file"><a href="examples/29-channel-move.js">examples/29-channel-move.js</a></span><button class="copy" type="button">Копировать</button></div><pre class="code"><code><span class="tok-comment">// d8-flags: --module</span>
+<span class="tok-comment">// Регион, отправленный в канал, переезжает: у отправителя доступа больше нет.</span>
+<span class="tok-keyword">const</span> ch = <span class="tok-keyword">new</span> <span class="tok-api">Channel</span>(<span class="tok-number">1</span>);
+<span class="tok-keyword">const</span> order = <span class="tok-keyword">new</span> <span class="tok-api">Region</span>().<span class="tok-api">run</span>(() =&gt; ({ id: <span class="tok-number">7</span>, status: <span class="tok-string">'новый'</span>, items: [<span class="tok-string">'чай'</span>, <span class="tok-string">'сыр'</span>] }));
+<span class="tok-keyword">await</span> ch.<span class="tok-api">send</span>(order);
+<span class="tok-keyword">try</span> {
+  <span class="tok-fn">print</span>(order.status);
+} <span class="tok-keyword">catch</span> (e) {
+  <span class="tok-fn">print</span>(<span class="tok-string">'отправитель после send:'</span>, e.message);
+}
+
+<span class="tok-comment">// Регион лежит в канале, пока его не заберут.</span>
+<span class="tok-keyword">const</span> back = <span class="tok-keyword">await</span> <span class="tok-api">spawn</span>(<span class="tok-keyword">async</span> () =&gt; {
+  <span class="tok-keyword">const</span> { value: received } = <span class="tok-keyword">await</span> ch.<span class="tok-api">recv</span>();
+  received.status = <span class="tok-string">'принят'</span>;
+  <span class="tok-keyword">return</span> received;
+});
+<span class="tok-fn">print</span>(<span class="tok-string">'вернулся из задачи:'</span>, back.<span class="tok-api">id</span>, back.status, back.items.<span class="tok-api">join</span>(<span class="tok-string">', '</span>));</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8 --module</span></div><pre class="out"><span class="err">отправитель после send: OwnershipError: region 0 is being moved between isolates</span>
+вернулся из задачи: 7 принят чай, сыр</pre></figure>
+
+<p>Канал можно захватить в <code>spawn</code>, передать через <code>postMessage</code> и даже отправить через другой канал: на всех концах это будет один и тот же канал. Класть канал внутрь региона нельзя, регион хранит только данные.</p>
+
+<h2 id="pipeline">Конвейер</h2>
+<p>Самый частый узор: одна задача производит работу, несколько задач её разбирают, а результаты стекаются в общий канал. Задачи-обработчики читают один и тот же канал <code>orders</code>, поэтому каждый заказ достаётся ровно одной из них. Когда производитель закрывает канал, их циклы <code>for await</code> заканчиваются сами.</p>
+
+<figure class="example"><div class="ex-head"><span class="file"><a href="examples/30-channel-pipeline.js">examples/30-channel-pipeline.js</a></span><button class="copy" type="button">Копировать</button></div><pre class="code"><code><span class="tok-comment">// d8-flags: --module</span>
+<span class="tok-comment">// Конвейер: одна задача производит заказы, три их считают, главный поток собирает.</span>
+<span class="tok-keyword">const</span> orders = <span class="tok-keyword">new</span> <span class="tok-api">Channel</span>(<span class="tok-number">8</span>);
+<span class="tok-keyword">const</span> priced = <span class="tok-keyword">new</span> <span class="tok-api">Channel</span>(<span class="tok-number">8</span>);
+
+<span class="tok-keyword">const</span> producer = <span class="tok-api">spawn</span>(<span class="tok-keyword">async</span> () =&gt; {
+  <span class="tok-keyword">for</span> (<span class="tok-keyword">let</span> id = <span class="tok-number">0</span>; id &lt; <span class="tok-number">12</span>; id++) {
+    <span class="tok-keyword">await</span> orders.<span class="tok-api">send</span>(<span class="tok-keyword">new</span> <span class="tok-api">Region</span>().<span class="tok-api">run</span>(() =&gt; ({ id, prices: [id, id * <span class="tok-number">2</span>, <span class="tok-number">3</span>] })));
+  }
+  orders.<span class="tok-api">close</span>();
+});
+
+<span class="tok-keyword">const</span> pricers = [<span class="tok-number">0</span>, <span class="tok-number">1</span>, <span class="tok-number">2</span>].<span class="tok-fn">map</span>(() =&gt; <span class="tok-api">spawn</span>(<span class="tok-keyword">async</span> () =&gt; {
+  <span class="tok-keyword">let</span> count = <span class="tok-number">0</span>;
+  <span class="tok-keyword">for</span> <span class="tok-keyword">await</span> (<span class="tok-keyword">const</span> order <span class="tok-keyword">of</span> orders) {
+    <span class="tok-keyword">const</span> total = order.prices.<span class="tok-fn">reduce</span>((sum, price) =&gt; sum + price, <span class="tok-number">0</span>);
+    <span class="tok-keyword">await</span> priced.<span class="tok-api">send</span>({ id: order.<span class="tok-api">id</span>, total });
+    count++;
+  }
+  <span class="tok-keyword">return</span> count;
+}));
+
+<span class="tok-keyword">const</span> totals = [];
+<span class="tok-keyword">for</span> (<span class="tok-keyword">let</span> i = <span class="tok-number">0</span>; i &lt; <span class="tok-number">12</span>; i++) {
+  <span class="tok-keyword">const</span> { value } = <span class="tok-keyword">await</span> priced.<span class="tok-api">recv</span>();
+  totals[value.<span class="tok-api">id</span>] = value.total;
+}
+<span class="tok-keyword">await</span> producer;
+<span class="tok-keyword">const</span> counts = <span class="tok-keyword">await</span> Promise.<span class="tok-fn">all</span>(pricers);
+<span class="tok-fn">print</span>(<span class="tok-string">'суммы:'</span>, totals.<span class="tok-api">join</span>(<span class="tok-string">' '</span>));
+<span class="tok-fn">print</span>(<span class="tok-string">'всего посчитано:'</span>, counts.<span class="tok-fn">reduce</span>((a, b) =&gt; a + b, <span class="tok-number">0</span>));</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8 --module</span></div><pre class="out">суммы: 3 6 9 12 15 18 21 24 27 30 33 36
+всего посчитано: 12</pre></figure>
+
+<p>Сколько заказов достанется каждой задаче, заранее неизвестно: кто первым освободился, тот и взял. Если нужен порядок, несите его в данных, как здесь <code>id</code>.</p>
+
+<h2 id="select">Ждать несколько каналов: <code>select</code></h2>
+<p><code>await Channel.select([a, b, c])</code> ждёт первый канал, в котором появилось значение, и возвращает <code>{ channel, value, done }</code>. Закрытый канал тоже считается готовым: для него придёт <code>done: true</code>. Если готовы сразу несколько, выбирается любой из них, чтобы ни один канал не голодал.</p>
+
+<figure class="example"><div class="ex-head"><span class="file"><a href="examples/31-channel-select.js">examples/31-channel-select.js</a></span><button class="copy" type="button">Копировать</button></div><pre class="code"><code><span class="tok-comment">// d8-flags: --module</span>
+<span class="tok-comment">// select ждёт тот канал, в котором значение появится первым.</span>
+<span class="tok-keyword">const</span> results = <span class="tok-keyword">new</span> <span class="tok-api">Channel</span>(<span class="tok-number">1</span>);
+<span class="tok-keyword">const</span> errors = <span class="tok-keyword">new</span> <span class="tok-api">Channel</span>(<span class="tok-number">1</span>);
+
+<span class="tok-keyword">const</span> task = <span class="tok-api">spawn</span>(<span class="tok-keyword">async</span> () =&gt; {
+  <span class="tok-keyword">try</span> {
+    <span class="tok-keyword">await</span> results.<span class="tok-api">send</span>(JSON.<span class="tok-fn">parse</span>(<span class="tok-string">'{"ok": true}'</span>));
+  } <span class="tok-keyword">catch</span> (e) {
+    <span class="tok-keyword">await</span> errors.<span class="tok-api">send</span>(e.message);
+  }
+});
+
+<span class="tok-keyword">const</span> first = <span class="tok-keyword">await</span> <span class="tok-api">Channel</span>.<span class="tok-api">select</span>([results, errors]);
+<span class="tok-fn">print</span>(first.channel === results ? <span class="tok-string">'результат:'</span> : <span class="tok-string">'ошибка:'</span>, JSON.<span class="tok-fn">stringify</span>(first.value));
+<span class="tok-keyword">await</span> task;
+
+<span class="tok-comment">// Закрытый канал тоже «готов»: select вернёт его с done: true.</span>
+errors.<span class="tok-api">close</span>();
+<span class="tok-keyword">const</span> closed = <span class="tok-keyword">await</span> <span class="tok-api">Channel</span>.<span class="tok-api">select</span>([results, errors]);
+<span class="tok-fn">print</span>(<span class="tok-string">'закрытый:'</span>, closed.channel === errors, closed.done);</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8 --module</span></div><pre class="out">результат: {"ok":true}
+закрытый: true true</pre></figure>
+
+<h2 id="blocking">Блокирующие версии</h2>
+<p>У каждой операции есть версия, которая останавливает поток до результата: <code>sendSync</code>, <code>recvSync</code>, <code>Channel.selectSync</code>, а <code>for (const value of ch)</code> читает канал без <code>await</code>. В воркере это удобно: код получается прямым, как в Go, и не нужно делать <code>async</code> всю цепочку вызовов. В главном потоке блокировать не стоит по той же причине, что и <code>join()</code>: пока поток ждёт, он ничего больше не делает.</p>
+
+<figure class="example"><div class="ex-head"><span class="file"><a href="examples/32-channel-blocking.js">examples/32-channel-blocking.js</a></span><button class="copy" type="button">Копировать</button></div><pre class="code"><code><span class="tok-comment">// d8-flags: --module</span>
+<span class="tok-comment">// В воркере можно ждать блокирующе: for...of по каналу и sendSync.</span>
+<span class="tok-comment">// Сам канал отправлен воркеру через postMessage.</span>
+<span class="tok-keyword">const</span> numbers = <span class="tok-keyword">new</span> <span class="tok-api">Channel</span>();
+<span class="tok-keyword">const</span> sums = <span class="tok-keyword">new</span> <span class="tok-api">Channel</span>(<span class="tok-number">1</span>);
+<span class="tok-keyword">const</span> worker = <span class="tok-keyword">new</span> <span class="tok-api">Worker</span>(<span class="tok-string">`
+  onmessage = ({ data: { numbers, sums } }) =&gt; {
+    let total = 0;
+    for (const n of numbers) total += n;   // ждёт, пока канал не закроют
+    sums.sendSync(total);
+  };`</span>, { type: <span class="tok-string">'string'</span> });
+worker.<span class="tok-api">postMessage</span>({ numbers, sums });
+
+<span class="tok-keyword">for</span> (<span class="tok-keyword">let</span> i = <span class="tok-number">1</span>; i &lt;= <span class="tok-number">100</span>; i++) <span class="tok-keyword">await</span> numbers.<span class="tok-api">send</span>(i);
+numbers.<span class="tok-api">close</span>();
+<span class="tok-fn">print</span>(<span class="tok-string">'сумма от воркера:'</span>, (<span class="tok-keyword">await</span> sums.<span class="tok-api">recv</span>()).value);
+worker.<span class="tok-api">terminate</span>();</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8 --module</span></div><pre class="out">сумма от воркера: 5050</pre></figure>
+
+<p>Поток, который ждёт на канале, не мешает сборке мусора остальных потоков. Если воркер завершают через <code>terminate()</code>, пока он ждёт, ожидание прерывается, а значение, которое ему уже отдали, но он не успел прочитать, возвращается в канал следующему получателю.</p>
+
+<h2 id="vs-go">Чем это отличается от Go</h2>
+<div class="table-wrap">
+<table>
+<thead><tr><th></th><th>Go</th><th>Здесь</th></tr></thead>
+<tbody>
+<tr><td>Что можно отправить</td><td>что угодно, общая память</td><td>данные: регионы переезжают, остальное копируется</td></tr>
+<tr><td>Гонки данных</td><td>возможны, ловит race detector</td><td>нет: у региона всегда один хозяин</td></tr>
+<tr><td>Ждать без блокировки</td><td>не нужно, горутины дешёвые</td><td><code>await</code>; блокировать можно в воркерах</td></tr>
+<tr><td>send в закрытый канал</td><td>panic</td><td><code>TypeError</code></td></tr>
+<tr><td>Отправители, ждущие при close</td><td>panic</td><td>их значения остаются в канале</td></tr>
+<tr><td>Конец программы</td><td>когда закончилась <code>main</code></td><td>d8 ждёт задачи и операции на каналах</td></tr>
+</tbody>
+</table>
+</div>
+<p>Последняя строка значит, что забытый получатель держит программу. Если задача ждёт канал, в который никто никогда не напишет, d8 не завершится. Go в такой ситуации сообщает «all goroutines are asleep», здесь такой проверки пока нет.</p>
+
+<h2 id="cost">Сколько это стоит</h2>
+<p>Числа, строки, объекты регионов и сами каналы идут через канал напрямую, без сериализатора. Обычные объекты копирует тот же сериализатор, что у <code>postMessage</code>. Ожидающий поток будится напрямую. Круг «туда и обратно» через два канала без буфера всё равно немного дороже, чем обмен сообщениями с воркером: каждый круг — это две встречи отправителя с получателем, и на каждую получатель собирает результат <code>{ value, done }</code> и засыпает или просыпается.</p>
+
+<figure class="example"><div class="ex-head"><span class="file"><a href="examples/33-channel-overhead.js">examples/33-channel-overhead.js</a></span><button class="copy" type="button">Копировать</button></div><pre class="code"><code><span class="tok-comment">// d8-flags: --module</span>
+<span class="tok-comment">// Сколько стоит один круг «туда и обратно» через два канала без буфера.</span>
+<span class="tok-keyword">const</span> N = <span class="tok-number">5000</span>;
+<span class="tok-keyword">const</span> ping = <span class="tok-keyword">new</span> <span class="tok-api">Channel</span>();
+<span class="tok-keyword">const</span> pong = <span class="tok-keyword">new</span> <span class="tok-api">Channel</span>();
+<span class="tok-keyword">const</span> echo = <span class="tok-api">spawn</span>(() =&gt; {
+  <span class="tok-keyword">for</span> (<span class="tok-keyword">const</span> n <span class="tok-keyword">of</span> ping) pong.<span class="tok-api">sendSync</span>(n + <span class="tok-number">1</span>);
+});
+
+<span class="tok-keyword">const</span> start = performance.<span class="tok-fn">now</span>();
+<span class="tok-keyword">for</span> (<span class="tok-keyword">let</span> i = <span class="tok-number">0</span>; i &lt; N; i++) {
+  ping.<span class="tok-api">sendSync</span>(i);
+  pong.<span class="tok-api">recvSync</span>();
+}
+<span class="tok-keyword">const</span> perTrip = (performance.<span class="tok-fn">now</span>() - start) * <span class="tok-number">1000</span> / N;
+ping.<span class="tok-api">close</span>();
+<span class="tok-keyword">await</span> echo;
+
+<span class="tok-keyword">const</span> worker = <span class="tok-keyword">new</span> <span class="tok-api">Worker</span>(<span class="tok-string">'onmessage = ({ data }) =&gt; postMessage(data + 1);'</span>, { type: <span class="tok-string">'string'</span> });
+<span class="tok-keyword">const</span> t = performance.<span class="tok-fn">now</span>();
+<span class="tok-keyword">for</span> (<span class="tok-keyword">let</span> i = <span class="tok-number">0</span>; i &lt; N; i++) {
+  worker.<span class="tok-api">postMessage</span>(i);
+  worker.<span class="tok-api">getMessage</span>();
+}
+<span class="tok-keyword">const</span> perMessage = (performance.<span class="tok-fn">now</span>() - t) * <span class="tok-number">1000</span> / N;
+worker.<span class="tok-api">terminate</span>();
+<span class="tok-fn">print</span>(<span class="tok-string">'канал, круг:'</span>, perTrip.<span class="tok-fn">toFixed</span>(<span class="tok-number">1</span>), <span class="tok-string">'µs'</span>);
+<span class="tok-fn">print</span>(<span class="tok-string">'postMessage + getMessage, круг:'</span>, perMessage.<span class="tok-fn">toFixed</span>(<span class="tok-number">1</span>), <span class="tok-string">'µs'</span>);</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8 --module; время у вас будет другим</span></div><pre class="out">канал, круг: 5.2 µs
+postMessage + getMessage, круг: 3.1 µs</pre></figure>
+
+<p>Это единицы микросекунд, а у горутин в Go — доли микросекунды. Если гонять через канал по одному числу, больше 200 000 значений в секунду не выйдет, и в горячем цикле пересылка легко займёт больше времени, чем сама работа. Каналы подходят, чтобы передавать порции работы: заказ, кусок файла, пачку строк. Объединяйте мелкие значения в пачки, как и для <code>spawn</code> (<a href="practices.html#batch">подробнее</a>).</p>
+<nav class="pager" aria-label="Соседние страницы"><a class="prev" href="spawn.html"><span>← Назад</span>spawn: задачи в потоках</a><a class="next" href="practices.html"><span>Дальше →</span>Как делать и как не делать</a></nav>
+<p class="footer">Регионы владения в V8 — исследовательский прототип, не продукт. Цифры получены на сборке с включёнными проверками (dcheck), Apple Silicon.</p>
+</article>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

@@ -1,0 +1,9 @@
+language js
+
+`spawn($...).join()` as $call where {
+  register_diagnostic(
+    span = $call,
+    message = "join() blocks this thread until the task ends; on the main thread prefer `await spawn(...)`.",
+    severity = "warn"
+  )
+}

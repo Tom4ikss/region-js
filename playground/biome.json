@@ -1,0 +1,41 @@
+{
+  "$schema": "./node_modules/@biomejs/biome/configuration_schema.json",
+  "files": {
+    "includes": [
+      "examples/**",
+      "*.js"
+    ]
+  },
+  "formatter": {
+    "indentStyle": "space",
+    "indentWidth": 2,
+    "lineWidth": 100
+  },
+  "javascript": {
+    "formatter": {
+      "quoteStyle": "single"
+    },
+    "globals": [
+      "Region",
+      "spawn",
+      "print",
+      "gc",
+      "quit",
+      "Worker",
+      "postMessage",
+      "onmessage"
+    ]
+  },
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "preset": "recommended"
+    }
+  },
+  "plugins": [
+    "./rules/no-class-in-spawn.grit",
+    "./rules/no-eval-in-spawn.grit",
+    "./rules/no-method-as-spawn-callback.grit",
+    "./rules/prefer-await-over-join.grit"
+  ]
+}

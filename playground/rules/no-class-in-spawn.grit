@@ -1,0 +1,10 @@
+language js
+
+`spawn($callback, $...)` where {
+  $callback <: contains or { `class $name { $... }`, `class { $... }` },
+  register_diagnostic(
+    span = $callback,
+    message = "spawn() callbacks cannot declare classes: their methods cannot be checked and sent to the worker. Use plain objects and functions.",
+    severity = "error"
+  )
+}

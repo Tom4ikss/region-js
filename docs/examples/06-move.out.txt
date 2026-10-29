@@ -1,0 +1,5 @@
+главный поток: OwnershipError: region 0 is being moved between isolates
+воркер: paid, сумма 200
+главный поток пишет: OwnershipError: region 0 is owned by isolate 1, not by isolate 0
+главный поток, Object.keys: OwnershipError: region 0 is owned by isolate 1, not by isolate 0
+владелец региона теперь isolate 1

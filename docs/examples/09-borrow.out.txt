@@ -1,0 +1,7 @@
+readers: 1
+thaw с читателем: Region is still borrowed by 1 reader(s)
+после release, readers: 0
+внутри блока, readers: 1 | apple = 50
+после блока, readers: 0
+разморожено, apple = 55
+borrow незамороженного: Region must be frozen to borrow it

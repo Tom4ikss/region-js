@@ -1,0 +1,531 @@
+Statistical profiling result from v8.log, (1251 ticks, 0 unaccounted, 0 excluded).
+
+ [Shared libraries]:
+   ticks  total  nonlib   name
+     88    7.0%          /usr/lib/system/libdyld.dylib
+      1    0.1%          /usr/lib/system/libsystem_platform.dylib
+
+ [JavaScript]:
+   ticks  total  nonlib   name
+     16    1.3%    1.4%  Builtin: CEntry_Return1_ArgvOnStack_NoBuiltinExit
+      9    0.7%    0.8%  JS: *sum hot-sum.js:6:13
+      8    0.6%    0.7%  Builtin: LoadIC
+      3    0.2%    0.3%  JS: ~build hot-sum.js:2:15
+      2    0.2%    0.2%  Builtin: LoadICTrampoline
+      2    0.2%    0.2%  Builtin: InterpreterEntryTrampoline
+      1    0.1%    0.1%  Builtin: CallFunction_ReceiverIsNullOrUndefined
+
+ [C++]:
+   ticks  total  nonlib   name
+     82    6.6%    7.1%  v8::internal::Runtime_GetProperty(int, unsigned long*, v8::internal::Isolate*)
+     63    5.0%    5.4%  v8::internal::String::SlowEquals(v8::internal::Tagged<v8::internal::String>, v8::internal::SharedStringAccessGuardIfNeeded const&) const
+     51    4.1%    4.4%  v8::internal::StringShape::StringShape(v8::internal::Tagged<v8::internal::Map>)
+     44    3.5%    3.8%  bool v8::internal::CastTraitsImpl<v8::internal::Union<v8::internal::Smi, v8::internal::HeapNumber, v8::internal::BigInt, v8::internal::String, v8::internal::Symbol, v8::internal::Boolean, v8::internal::Null, v8::internal::Undefined, v8::internal::JSReceiver>>::AllowFrom<v8::internal::Union<v8::internal::Smi, v8::internal::HeapNumber, v8::internal::BigInt, v8::internal::String, v8::internal::Symbol, v8::internal::Boolean, v8::internal::Null, v8::internal::Undefined, v8::internal::JSReceiver, v8::internal::Hole, v8::internal::UninitializedHeapNumber>>(v8::internal::Tagged<v8::internal::Union<v8::internal::Smi, v8::internal::HeapNumber, v8::internal::BigInt, v8::internal::String, v8::internal::Symbol, v8::internal::Boolean, v8::internal::Null, v8::internal::Undefined, v8::internal::JSReceiver, v8::internal::Hole, v8::internal::UninitializedHeapNumber>>)
+     43    3.4%    3.7%  v8::internal::InstanceTypeChecker::IsSeqOneByteString(v8::internal::Tagged<v8::internal::Map>)
+     41    3.3%    3.5%  v8::internal::IsJSReceiver(v8::internal::Tagged<v8::internal::Object>)
+     39    3.1%    3.4%  v8::internal::PerThreadAssertScope<true, (v8::internal::PerThreadAssertType)5>::~PerThreadAssertScope()
+     39    3.1%    3.4%  v8::internal::Isolate::VerifyBuiltinsResult(v8::internal::Tagged<v8::internal::Object>)
+     39    3.1%    3.4%  v8::internal::(anonymous namespace)::FindIndex(v8::internal::DirectHandle<v8::internal::JSRegionObject>, v8::internal::LookupIterator*)
+     38    3.0%    3.3%  v8::internal::SharedStringAccessGuardIfNeeded::IsNeeded(v8::internal::Tagged<v8::internal::String>, bool)
+     36    2.9%    3.1%  v8::internal::PerThreadAssertScope<false, (v8::internal::PerThreadAssertType)1, (v8::internal::PerThreadAssertType)2>::PerThreadAssertScope()
+     33    2.6%    2.8%  v8::internal::String::SlowEqualsNonThinSameLength(unsigned int, v8::internal::Tagged<v8::internal::String>, v8::internal::SharedStringAccessGuardIfNeeded const&) const
+     33    2.6%    2.8%  v8::internal::Name::AsIntegerIndex(unsigned long*)
+     28    2.2%    2.4%  v8::internal::Isolate::has_exception()
+     27    2.2%    2.3%  auto v8::internal::StringShape::DispatchToSpecificType<v8::internal::String::GetImpl(unsigned int, v8::internal::SharedStringAccessGuardIfNeeded const&) const::'lambda'(auto)>(v8::internal::Tagged<v8::internal::String>, auto&&) const
+     25    2.0%    2.2%  T1<T> v8::internal::Cast<v8::internal::String, v8::internal::Object, v8::internal::Tagged>(T1<T0>, v8::SourceLocation)
+     24    1.9%    2.1%  v8::internal::IsBoolean(v8::internal::Tagged<v8::internal::HeapObject>)
+     23    1.8%    2.0%  v8::internal::LocalHeap::VerifyCurrent() const
+     22    1.8%    1.9%  v8::internal::String::SlowEquals(v8::internal::Tagged<v8::internal::String>) const
+     22    1.8%    1.9%  v8::internal::HandleScope::Extend(v8::internal::Isolate*)
+     21    1.7%    1.8%  v8::internal::BasePage* v8::internal::MemoryChunk::MetadataImpl<true>(v8::internal::Isolate const*)
+     19    1.5%    1.6%  v8::internal::LookupIterator::State v8::internal::LookupIterator::LookupInSpecialHolder<false>(v8::internal::Tagged<v8::internal::Map>, v8::internal::Tagged<v8::internal::JSReceiver>)
+     18    1.4%    1.5%  v8::internal::Object::GetProperty(v8::internal::LookupIterator*, bool)
+     18    1.4%    1.5%  v8::internal::(anonymous namespace)::IsArrayLength(v8::internal::Isolate*, v8::internal::Tagged<v8::internal::JSRegionObject>, v8::internal::LookupIterator*)
+     16    1.3%    1.4%  T1<T> v8::internal::Cast<v8::internal::Name, v8::internal::Object, v8::internal::DirectHandle>(T1<T0>, v8::SourceLocation)
+     15    1.2%    1.3%  v8::internal::String::Equals(v8::internal::Tagged<v8::internal::String>) const
+     14    1.1%    1.2%  v8::internal::LookupIterator::LookupIterator(v8::internal::Isolate*, v8::internal::DirectHandle<v8::internal::Union<v8::internal::Smi, v8::internal::HeapNumber, v8::internal::BigInt, v8::internal::String, v8::internal::Symbol, v8::internal::Boolean, v8::internal::Null, v8::internal::Undefined, v8::internal::JSReceiver>>, v8::internal::DirectHandle<v8::internal::Name>, unsigned long, v8::internal::DirectHandle<v8::internal::Union<v8::internal::Smi, v8::internal::HeapNumber, v8::internal::BigInt, v8::internal::String, v8::internal::Symbol, v8::internal::Boolean, v8::internal::Null, v8::internal::Undefined, v8::internal::JSReceiver>>, v8::internal::LookupIterator::Configuration)
+     13    1.0%    1.1%  v8::internal::DirectHandle<v8::internal::JSRegionObject> v8::internal::LookupIterator::GetHolder<v8::internal::JSRegionObject>() const
+     12    1.0%    1.0%  v8::internal::HandleScope::CreateHandle(v8::internal::Isolate*, unsigned long)
+     11    0.9%    0.9%  v8::internal::Runtime::GetObjectProperty(v8::internal::Isolate*, v8::internal::DirectHandle<v8::internal::Union<v8::internal::Smi, v8::internal::HeapNumber, v8::internal::BigInt, v8::internal::String, v8::internal::Symbol, v8::internal::Boolean, v8::internal::Null, v8::internal::Undefined, v8::internal::JSReceiver>>, v8::internal::DirectHandle<v8::internal::Object>, v8::internal::DirectHandle<v8::internal::Union<v8::internal::Smi, v8::internal::HeapNumber, v8::internal::BigInt, v8::internal::String, v8::internal::Symbol, v8::internal::Boolean, v8::internal::Null, v8::internal::Undefined, v8::internal::JSReceiver>>, bool*)
+     11    0.9%    0.9%  v8::internal::IsJSSegmentDataObjectWithIsWordLike(v8::internal::Tagged<v8::internal::Object>)
+     10    0.8%    0.9%  v8::internal::ClobberDoubleRegisters(double, double, double, double)
+     10    0.8%    0.9%  bool v8::internal::Is<v8::internal::Undefined, v8::internal::ReadOnly<v8::internal::Undefined>>(v8::internal::Tagged<v8::internal::ReadOnly<v8::internal::Undefined>>)
+      9    0.7%    0.8%  v8::internal::DirectHandle<v8::internal::Name>::MaybeType v8::internal::Object::ToName<v8::internal::DirectHandle>(v8::internal::Isolate*, v8::internal::DirectHandle<v8::internal::Object>) requires std::is_convertible_v<v8::internal::DirectHandle<v8::internal::Object>, v8::internal::DirectHandle<v8::internal::Object>>
+      9    0.7%    0.8%  v8::internal::(anonymous namespace)::ReadOwnedProperty(v8::internal::Isolate*, v8::internal::DirectHandle<v8::internal::JSRegionObject>, v8::internal::LookupIterator*)
+      8    0.6%    0.7%  v8::internal::Name::IsAnyPrivate()
+      7    0.6%    0.6%  v8::internal::PerThreadAssertScope<true, (v8::internal::PerThreadAssertType)3>::IsAllowed()
+      7    0.6%    0.6%  v8::internal::Object::ToIntegerIndex(v8::internal::Tagged<v8::internal::Object>, unsigned long*)
+      7    0.6%    0.6%  v8::internal::HandleScope::CloseScope(v8::internal::Isolate*, unsigned long*, unsigned long*)
+      7    0.6%    0.6%  v8::internal::DirectHandle<v8::internal::Name> v8::internal::Factory::InternalizeName<v8::internal::Name>(v8::internal::DirectHandle<T>)
+      6    0.5%    0.5%  v8::internal::JSRegionObject::GetProperty(v8::internal::LookupIterator*)
+      6    0.5%    0.5%  v8::internal::IsNull(v8::internal::Tagged<v8::internal::Object>)
+      5    0.4%    0.4%  v8::internal::PropertyKey::PropertyKey<v8::internal::Object, v8::internal::DirectHandle>(v8::internal::Isolate*, T0<T>, bool*)
+      5    0.4%    0.4%  v8::internal::Isolate::IsOnCentralStack()
+      5    0.4%    0.4%  v8::internal::HandleScope::DeleteExtensions(v8::internal::Isolate*)
+      5    0.4%    0.4%  __kernelrpc_mach_port_get_refs
+      4    0.3%    0.3%  void v8::internal::LookupIterator::Start<false>()
+      4    0.3%    0.3%  v8::internal::PerThreadAssertScope<true, (v8::internal::PerThreadAssertType)5>::IsAllowed()
+      4    0.3%    0.3%  v8::internal::(anonymous namespace)::Evacuator::Copy(v8::internal::DirectHandle<v8::internal::Object>)
+      4    0.3%    0.3%  v8::base::ThreadId::GetCurrentThreadId()
+      3    0.2%    0.3%  v8::internal::Isolate::main_thread_local_heap()
+      3    0.2%    0.3%  v8::internal::GetCurrentStackPosition()
+      3    0.2%    0.3%  v8::internal::AllocationResult v8::internal::HeapAllocator::AllocateRaw<(v8::internal::AllocationType)5>(int, v8::internal::AllocationOrigin, v8::internal::AllocationAlignment, v8::internal::AllocationHint)
+      3    0.2%    0.3%  v8::base::Stack::GetStackStart()
+      2    0.2%    0.2%  v8::internal::TaggedMember<v8::internal::JSPromise, v8::internal::V8HeapCompressionSchemeImpl<v8::internal::MainCage>>::store(v8::internal::HeapObject*, v8::internal::Tagged<v8::internal::JSPromise>, v8::internal::WriteBarrierMode)
+      2    0.2%    0.2%  v8::internal::String::ComputeAndSetRawHash(v8::internal::SharedStringAccessGuardIfNeeded const&, bool*)
+      2    0.2%    0.2%  v8::internal::Object::FilterKey(v8::internal::Tagged<v8::internal::Object>, v8::internal::PropertyFilter)
+      2    0.2%    0.2%  v8::internal::LookupIterator::FetchValue(v8::base::StrongAlias<v8::internal::AllowAllocationTag, bool>) const
+      2    0.2%    0.2%  v8::internal::LocalHeap::IsRunning() const
+      2    0.2%    0.2%  v8::internal::IdentityMapBase::Lookup(unsigned long) const
+      2    0.2%    0.2%  v8::internal::HeapObject::SizeFromMap(v8::internal::Tagged<v8::internal::Map>) const
+      2    0.2%    0.2%  v8::internal::Handle<v8::internal::FixedArray> v8::internal::TaggedArrayBase<v8::internal::FixedArray, v8::internal::Object, v8::internal::FixedArrayBase>::Allocate<v8::internal::Isolate>(v8::internal::Isolate*, unsigned int, std::__Cr::optional<v8::internal::PerThreadAssertScope<false, (v8::internal::PerThreadAssertType)1, (v8::internal::PerThreadAssertType)2>>*, v8::internal::AllocationType, v8::internal::AllocationHint)
+      2    0.2%    0.2%  v8::internal::FieldIndex::ForDetails(v8::internal::Tagged<v8::internal::Map>, v8::internal::PropertyDetails)
+      2    0.2%    0.2%  v8::internal::FieldIndex::FieldIndex(bool, int, v8::internal::FieldIndex::Encoding, int, int)
+      1    0.1%    0.1%  void* partition_alloc::PartitionRoot::Alloc<(partition_alloc::internal::AllocFlags)17>(unsigned long, char const*)
+      1    0.1%    0.1%  void v8::internal::WriteBarrier::VerifySkipWriteBarrier<v8::internal::JSPromise>(v8::internal::Tagged<v8::internal::HeapObject>, v8::internal::Tagged<v8::internal::JSPromise>, v8::internal::WriteBarrierMode)
+      1    0.1%    0.1%  void v8::internal::UpdateHeapObjectReferenceSlot<v8::internal::CompressedHeapObjectSlot>(v8::internal::CompressedHeapObjectSlot, v8::internal::Tagged<v8::internal::HeapObject>)
+      1    0.1%    0.1%  void v8::internal::Heap::CopyRange<v8::internal::CompressedObjectSlot>(v8::internal::Tagged<v8::internal::HeapObject>, v8::internal::CompressedObjectSlot, v8::internal::CompressedObjectSlot, unsigned int, v8::internal::WriteBarrierMode)
+      1    0.1%    0.1%  void v8::internal::CopyChars<unsigned char, unsigned char>(unsigned char*, unsigned char const*, unsigned long)
+      1    0.1%    0.1%  void v8::internal::BodyDescriptorBase::IterateMaybeWeakPointer<v8::internal::ScavengerPromotedObjectVisitor>(v8::internal::Tagged<v8::internal::HeapObject>, int, v8::internal::ScavengerPromotedObjectVisitor*)
+      1    0.1%    0.1%  v8::internal::interpreter::BytecodeRegisterOptimizer::GetRegisterInfo(v8::internal::interpreter::Register)
+      1    0.1%    0.1%  v8::internal::heap::ZapBlock(unsigned long, unsigned long, unsigned long)
+      1    0.1%    0.1%  v8::internal::compiler::TraceScope::TraceScope(v8::internal::compiler::JSHeapBroker*, void*, char const*)
+      1    0.1%    0.1%  v8::internal::compiler::Pipeline::NewCompilationJob(v8::internal::Isolate*, v8::internal::Handle<v8::internal::JSFunction>, v8::internal::CodeKind, bool, v8::internal::BytecodeOffset)
+      1    0.1%    0.1%  v8::internal::compiler::CommonOperatorBuilder::CommonOperatorBuilder(v8::internal::Zone*)
+      1    0.1%    0.1%  v8::internal::UnoptimizedCompileFlags::ForToplevelCompile(v8::internal::Isolate*, bool, v8::internal::LanguageMode, v8::internal::REPLMode, v8::ScriptType, bool)
+      1    0.1%    0.1%  v8::internal::TaggedArrayBase<v8::internal::FixedArray, v8::internal::Object, v8::internal::FixedArrayBase>::RightTrim(v8::internal::Isolate*, unsigned int)
+      1    0.1%    0.1%  v8::internal::Runtime_NewClosure(int, unsigned long*, v8::internal::Isolate*)
+      1    0.1%    0.1%  v8::internal::Runtime::SetObjectProperty(v8::internal::Isolate*, v8::internal::DirectHandle<v8::internal::Union<v8::internal::Smi, v8::internal::HeapNumber, v8::internal::BigInt, v8::internal::String, v8::internal::Symbol, v8::internal::Boolean, v8::internal::Null, v8::internal::Undefined, v8::internal::JSReceiver>>, v8::internal::DirectHandle<v8::internal::Object>, v8::internal::DirectHandle<v8::internal::Object>, v8::internal::StoreOrigin, v8::Maybe<v8::internal::ShouldThrow>)
+      1    0.1%    0.1%  v8::internal::Relocatable::~Relocatable()
+      1    0.1%    0.1%  v8::internal::ReadOnlyRoots::IsNameForProtector(v8::internal::Tagged<v8::internal::HeapObject>) const
+      1    0.1%    0.1%  v8::internal::ReadOnlyHeap::Contains(v8::internal::Tagged<v8::internal::HeapObject>)
+      1    0.1%    0.1%  v8::internal::PerThreadAssertScope<true, (v8::internal::PerThreadAssertType)2>::IsAllowed()
+      1    0.1%    0.1%  v8::internal::Name::set_raw_hash_field_if_empty(unsigned int)
+      1    0.1%    0.1%  v8::internal::MutablePage::MutablePage(v8::internal::Heap*, v8::internal::BaseSpace*, unsigned long, unsigned long, unsigned long, v8::internal::VirtualMemory, v8::internal::PageSize, v8::internal::Executability)
+      1    0.1%    0.1%  v8::internal::MaybeHandle<v8::internal::SeqOneByteString> v8::internal::FactoryBase<v8::internal::Factory>::NewRawStringWithMap<v8::internal::SeqOneByteString>(unsigned int, v8::internal::Tagged<v8::internal::Map>, v8::internal::AllocationType, v8::internal::AllocationHint)
+      1    0.1%    0.1%  v8::internal::Map::NumberOfEnumerableProperties() const
+      1    0.1%    0.1%  v8::internal::LocalHeap::Safepoint()
+      1    0.1%    0.1%  v8::internal::JSReceiver::HasFastProperties() const
+      1    0.1%    0.1%  v8::internal::JSObject::RawFastPropertyAt(v8::internal::FieldIndex) const
+      1    0.1%    0.1%  v8::internal::JSObject::InitializeBody(v8::internal::Tagged<v8::internal::Map>, int, bool, v8::internal::NewJSObjectType)::'lambda'(unsigned int, unsigned int)::operator()(unsigned int, unsigned int) const
+      1    0.1%    0.1%  v8::internal::JSFunction::InitializeFeedbackCell(v8::internal::Isolate*, v8::internal::DirectHandle<v8::internal::JSFunction>, v8::internal::IsCompiledScope*, bool)
+      1    0.1%    0.1%  v8::internal::JSDispatchTable::TryAllocateAndInitializeEntry(v8::internal::ExternalEntityTable<v8::internal::JSDispatchEntry, 268435456ul>::Space*, unsigned short, v8::internal::Tagged<v8::internal::Code>)
+      1    0.1%    0.1%  v8::internal::IdentityMapBase::InsertKey(unsigned long, unsigned int)
+      1    0.1%    0.1%  v8::internal::IdentityMap<unsigned int, v8::internal::FreeStoreAllocationPolicy>::NewPointerArray(unsigned long, unsigned long)
+      1    0.1%    0.1%  v8::internal::HeapAllocator::ResetMostRecentYoungAllocation()
+      1    0.1%    0.1%  v8::internal::HeapAllocator::AllocateRaw(int, v8::internal::AllocationType, v8::internal::AllocationOrigin, v8::internal::AllocationAlignment, v8::internal::AllocationHint)
+      1    0.1%    0.1%  v8::internal::HandleScope::ExtendAndCreateHandle(v8::internal::Isolate*, unsigned long)
+      1    0.1%    0.1%  v8::internal::Handle<v8::internal::Union<v8::internal::Smi, v8::internal::HeapNumber, v8::internal::BigInt, v8::internal::String, v8::internal::Symbol, v8::internal::Boolean, v8::internal::Null, v8::internal::Undefined, v8::internal::JSReceiver>> v8::internal::Object::WrapForRead<(v8::internal::AllocationType)0, v8::internal::Isolate>(v8::internal::Isolate*, v8::internal::Handle<v8::internal::Union<v8::internal::Smi, v8::internal::HeapNumber, v8::internal::BigInt, v8::internal::String, v8::internal::Symbol, v8::internal::Boolean, v8::internal::Null, v8::internal::Undefined, v8::internal::JSReceiver>>, v8::internal::Representation)
+      1    0.1%    0.1%  v8::internal::Handle<v8::internal::FixedArray> v8::internal::FixedArray::New<v8::internal::Isolate>(v8::internal::Isolate*, unsigned int, v8::internal::AllocationType, v8::internal::AllocationHint)
+      1    0.1%    0.1%  v8::internal::FactoryBase<v8::internal::Factory>::AllocateRawArray(int, v8::internal::AllocationType, v8::internal::AllocationHint, v8::internal::AllocationAlignment)
+      1    0.1%    0.1%  v8::internal::Factory::ComputeSharingStrategyForString(v8::internal::DirectHandle<v8::internal::String>, v8::internal::MaybeDirectHandle<v8::internal::Map>*)
+      1    0.1%    0.1%  v8::internal::DirectHandle<v8::internal::JSReceiver> v8::internal::LookupIterator::GetStoreTarget<v8::internal::JSReceiver>() const
+      1    0.1%    0.1%  v8::internal::DescriptorArray::GetValue(v8::internal::InternalIndex)
+      1    0.1%    0.1%  v8::base::Vector<unsigned char const> v8::internal::LiteralBuffer::literal<unsigned char>() const
+      1    0.1%    0.1%  unsigned int v8::internal::StringHasher::HashSequentialString<unsigned char>(unsigned char const*, unsigned int, v8::internal::HashSeed, bool*)
+      1    0.1%    0.1%  partition_alloc::internal::ThreadCache::FillBucket(unsigned long)
+      1    0.1%    0.1%  partition_alloc::internal::PartitionBucket::SlowPathAlloc(partition_alloc::PartitionRoot*, partition_alloc::internal::AllocFlags, unsigned long, unsigned long, partition_alloc::internal::SlotSpanMetadata**, bool*, bool*)
+      1    0.1%    0.1%  heap::base::Worklist<v8::internal::Scavenger::ScavengedObjectListEntry, (unsigned short)256>::Local::Push(v8::internal::Scavenger::ScavengedObjectListEntry)
+      1    0.1%    0.1%  __os_once_gate_wait
+      1    0.1%    0.1%  T1<T> v8::internal::Cast<v8::internal::JSObject, v8::internal::HeapObject, v8::internal::Tagged>(T1<T0>, v8::SourceLocation)
+
+ [Summary]:
+   ticks  total  nonlib   name
+     41    3.3%    3.5%  JavaScript
+   1121   89.6%   96.5%  C++
+     10    0.8%    0.9%  GC
+     89    7.1%          Shared libraries
+
+ [C++ entry points]:
+   ticks    cpp   total   name
+     82    7.4%    6.6%  v8::internal::Runtime_GetProperty(int, unsigned long*, v8::internal::Isolate*)
+     63    5.7%    5.0%  v8::internal::String::SlowEquals(v8::internal::Tagged<v8::internal::String>, v8::internal::SharedStringAccessGuardIfNeeded const&) const
+     51    4.6%    4.1%  v8::internal::StringShape::StringShape(v8::internal::Tagged<v8::internal::Map>)
+     44    4.0%    3.5%  bool v8::internal::CastTraitsImpl<v8::internal::Union<v8::internal::Smi, v8::internal::HeapNumber, v8::internal::BigInt, v8::internal::String, v8::internal::Symbol, v8::internal::Boolean, v8::internal::Null, v8::internal::Undefined, v8::internal::JSReceiver>>::AllowFrom<v8::internal::Union<v8::internal::Smi, v8::internal::HeapNumber, v8::internal::BigInt, v8::internal::String, v8::internal::Symbol, v8::internal::Boolean, v8::internal::Null, v8::internal::Undefined, v8::internal::JSReceiver, v8::internal::Hole, v8::internal::UninitializedHeapNumber>>(v8::internal::Tagged<v8::internal::Union<v8::internal::Smi, v8::internal::HeapNumber, v8::internal::BigInt, v8::internal::String, v8::internal::Symbol, v8::internal::Boolean, v8::internal::Null, v8::internal::Undefined, v8::internal::JSReceiver, v8::internal::Hole, v8::internal::UninitializedHeapNumber>>)
+     42    3.8%    3.4%  v8::internal::InstanceTypeChecker::IsSeqOneByteString(v8::internal::Tagged<v8::internal::Map>)
+     41    3.7%    3.3%  v8::internal::IsJSReceiver(v8::internal::Tagged<v8::internal::Object>)
+     39    3.5%    3.1%  v8::internal::PerThreadAssertScope<true, (v8::internal::PerThreadAssertType)5>::~PerThreadAssertScope()
+     39    3.5%    3.1%  v8::internal::Isolate::VerifyBuiltinsResult(v8::internal::Tagged<v8::internal::Object>)
+     39    3.5%    3.1%  v8::internal::(anonymous namespace)::FindIndex(v8::internal::DirectHandle<v8::internal::JSRegionObject>, v8::internal::LookupIterator*)
+     38    3.5%    3.0%  v8::internal::SharedStringAccessGuardIfNeeded::IsNeeded(v8::internal::Tagged<v8::internal::String>, bool)
+     36    3.3%    2.9%  v8::internal::PerThreadAssertScope<false, (v8::internal::PerThreadAssertType)1, (v8::internal::PerThreadAssertType)2>::PerThreadAssertScope()
+     33    3.0%    2.6%  v8::internal::String::SlowEqualsNonThinSameLength(unsigned int, v8::internal::Tagged<v8::internal::String>, v8::internal::SharedStringAccessGuardIfNeeded const&) const
+     33    3.0%    2.6%  v8::internal::Name::AsIntegerIndex(unsigned long*)
+     28    2.5%    2.2%  v8::internal::Isolate::has_exception()
+     27    2.5%    2.2%  auto v8::internal::StringShape::DispatchToSpecificType<v8::internal::String::GetImpl(unsigned int, v8::internal::SharedStringAccessGuardIfNeeded const&) const::'lambda'(auto)>(v8::internal::Tagged<v8::internal::String>, auto&&) const
+     25    2.3%    2.0%  T1<T> v8::internal::Cast<v8::internal::String, v8::internal::Object, v8::internal::Tagged>(T1<T0>, v8::SourceLocation)
+     24    2.2%    1.9%  v8::internal::IsBoolean(v8::internal::Tagged<v8::internal::HeapObject>)
+     23    2.1%    1.8%  v8::internal::LocalHeap::VerifyCurrent() const
+     22    2.0%    1.8%  v8::internal::String::SlowEquals(v8::internal::Tagged<v8::internal::String>) const
+     22    2.0%    1.8%  v8::internal::HandleScope::Extend(v8::internal::Isolate*)
+     21    1.9%    1.7%  v8::internal::BasePage* v8::internal::MemoryChunk::MetadataImpl<true>(v8::internal::Isolate const*)
+     19    1.7%    1.5%  v8::internal::LookupIterator::State v8::internal::LookupIterator::LookupInSpecialHolder<false>(v8::internal::Tagged<v8::internal::Map>, v8::internal::Tagged<v8::internal::JSReceiver>)
+     18    1.6%    1.4%  v8::internal::Object::GetProperty(v8::internal::LookupIterator*, bool)
+     18    1.6%    1.4%  v8::internal::(anonymous namespace)::IsArrayLength(v8::internal::Isolate*, v8::internal::Tagged<v8::internal::JSRegionObject>, v8::internal::LookupIterator*)
+     16    1.5%    1.3%  T1<T> v8::internal::Cast<v8::internal::Name, v8::internal::Object, v8::internal::DirectHandle>(T1<T0>, v8::SourceLocation)
+     15    1.4%    1.2%  v8::internal::String::Equals(v8::internal::Tagged<v8::internal::String>) const
+     14    1.3%    1.1%  v8::internal::LookupIterator::LookupIterator(v8::internal::Isolate*, v8::internal::DirectHandle<v8::internal::Union<v8::internal::Smi, v8::internal::HeapNumber, v8::internal::BigInt, v8::internal::String, v8::internal::Symbol, v8::internal::Boolean, v8::internal::Null, v8::internal::Undefined, v8::internal::JSReceiver>>, v8::internal::DirectHandle<v8::internal::Name>, unsigned long, v8::internal::DirectHandle<v8::internal::Union<v8::internal::Smi, v8::internal::HeapNumber, v8::internal::BigInt, v8::internal::String, v8::internal::Symbol, v8::internal::Boolean, v8::internal::Null, v8::internal::Undefined, v8::internal::JSReceiver>>, v8::internal::LookupIterator::Configuration)
+     13    1.2%    1.0%  v8::internal::DirectHandle<v8::internal::JSRegionObject> v8::internal::LookupIterator::GetHolder<v8::internal::JSRegionObject>() const
+     12    1.1%    1.0%  v8::internal::HandleScope::CreateHandle(v8::internal::Isolate*, unsigned long)
+     11    1.0%    0.9%  v8::internal::Runtime::GetObjectProperty(v8::internal::Isolate*, v8::internal::DirectHandle<v8::internal::Union<v8::internal::Smi, v8::internal::HeapNumber, v8::internal::BigInt, v8::internal::String, v8::internal::Symbol, v8::internal::Boolean, v8::internal::Null, v8::internal::Undefined, v8::internal::JSReceiver>>, v8::internal::DirectHandle<v8::internal::Object>, v8::internal::DirectHandle<v8::internal::Union<v8::internal::Smi, v8::internal::HeapNumber, v8::internal::BigInt, v8::internal::String, v8::internal::Symbol, v8::internal::Boolean, v8::internal::Null, v8::internal::Undefined, v8::internal::JSReceiver>>, bool*)
+     11    1.0%    0.9%  v8::internal::IsJSSegmentDataObjectWithIsWordLike(v8::internal::Tagged<v8::internal::Object>)
+     10    0.9%    0.8%  v8::internal::ClobberDoubleRegisters(double, double, double, double)
+     10    0.9%    0.8%  bool v8::internal::Is<v8::internal::Undefined, v8::internal::ReadOnly<v8::internal::Undefined>>(v8::internal::Tagged<v8::internal::ReadOnly<v8::internal::Undefined>>)
+      9    0.8%    0.7%  v8::internal::DirectHandle<v8::internal::Name>::MaybeType v8::internal::Object::ToName<v8::internal::DirectHandle>(v8::internal::Isolate*, v8::internal::DirectHandle<v8::internal::Object>) requires std::is_convertible_v<v8::internal::DirectHandle<v8::internal::Object>, v8::internal::DirectHandle<v8::internal::Object>>
+      9    0.8%    0.7%  v8::internal::(anonymous namespace)::ReadOwnedProperty(v8::internal::Isolate*, v8::internal::DirectHandle<v8::internal::JSRegionObject>, v8::internal::LookupIterator*)
+      8    0.7%    0.6%  v8::internal::Name::IsAnyPrivate()
+      7    0.6%    0.6%  v8::internal::PerThreadAssertScope<true, (v8::internal::PerThreadAssertType)3>::IsAllowed()
+      7    0.6%    0.6%  v8::internal::Object::ToIntegerIndex(v8::internal::Tagged<v8::internal::Object>, unsigned long*)
+      7    0.6%    0.6%  v8::internal::HandleScope::CloseScope(v8::internal::Isolate*, unsigned long*, unsigned long*)
+      7    0.6%    0.6%  v8::internal::DirectHandle<v8::internal::Name> v8::internal::Factory::InternalizeName<v8::internal::Name>(v8::internal::DirectHandle<T>)
+      6    0.5%    0.5%  v8::internal::JSRegionObject::GetProperty(v8::internal::LookupIterator*)
+      6    0.5%    0.5%  v8::internal::IsNull(v8::internal::Tagged<v8::internal::Object>)
+      5    0.5%    0.4%  v8::internal::PropertyKey::PropertyKey<v8::internal::Object, v8::internal::DirectHandle>(v8::internal::Isolate*, T0<T>, bool*)
+      5    0.5%    0.4%  v8::internal::Isolate::IsOnCentralStack()
+      5    0.5%    0.4%  v8::internal::HandleScope::DeleteExtensions(v8::internal::Isolate*)
+      4    0.4%    0.3%  void v8::internal::LookupIterator::Start<false>()
+      4    0.4%    0.3%  v8::internal::PerThreadAssertScope<true, (v8::internal::PerThreadAssertType)5>::IsAllowed()
+      4    0.4%    0.3%  v8::internal::(anonymous namespace)::Evacuator::Copy(v8::internal::DirectHandle<v8::internal::Object>)
+      4    0.4%    0.3%  v8::base::ThreadId::GetCurrentThreadId()
+      3    0.3%    0.2%  v8::internal::Isolate::main_thread_local_heap()
+      3    0.3%    0.2%  v8::internal::GetCurrentStackPosition()
+      3    0.3%    0.2%  v8::internal::AllocationResult v8::internal::HeapAllocator::AllocateRaw<(v8::internal::AllocationType)5>(int, v8::internal::AllocationOrigin, v8::internal::AllocationAlignment, v8::internal::AllocationHint)
+      3    0.3%    0.2%  v8::base::Stack::GetStackStart()
+      2    0.2%    0.2%  v8::internal::TaggedMember<v8::internal::JSPromise, v8::internal::V8HeapCompressionSchemeImpl<v8::internal::MainCage>>::store(v8::internal::HeapObject*, v8::internal::Tagged<v8::internal::JSPromise>, v8::internal::WriteBarrierMode)
+      2    0.2%    0.2%  v8::internal::String::ComputeAndSetRawHash(v8::internal::SharedStringAccessGuardIfNeeded const&, bool*)
+      2    0.2%    0.2%  v8::internal::Object::FilterKey(v8::internal::Tagged<v8::internal::Object>, v8::internal::PropertyFilter)
+      2    0.2%    0.2%  v8::internal::LookupIterator::FetchValue(v8::base::StrongAlias<v8::internal::AllowAllocationTag, bool>) const
+      2    0.2%    0.2%  v8::internal::LocalHeap::IsRunning() const
+      2    0.2%    0.2%  v8::internal::IdentityMapBase::Lookup(unsigned long) const
+      2    0.2%    0.2%  v8::internal::HeapObject::SizeFromMap(v8::internal::Tagged<v8::internal::Map>) const
+      2    0.2%    0.2%  v8::internal::Handle<v8::internal::FixedArray> v8::internal::TaggedArrayBase<v8::internal::FixedArray, v8::internal::Object, v8::internal::FixedArrayBase>::Allocate<v8::internal::Isolate>(v8::internal::Isolate*, unsigned int, std::__Cr::optional<v8::internal::PerThreadAssertScope<false, (v8::internal::PerThreadAssertType)1, (v8::internal::PerThreadAssertType)2>>*, v8::internal::AllocationType, v8::internal::AllocationHint)
+      2    0.2%    0.2%  v8::internal::FieldIndex::ForDetails(v8::internal::Tagged<v8::internal::Map>, v8::internal::PropertyDetails)
+      2    0.2%    0.2%  v8::internal::FieldIndex::FieldIndex(bool, int, v8::internal::FieldIndex::Encoding, int, int)
+      1    0.1%    0.1%  void* partition_alloc::PartitionRoot::Alloc<(partition_alloc::internal::AllocFlags)17>(unsigned long, char const*)
+      1    0.1%    0.1%  void v8::internal::WriteBarrier::VerifySkipWriteBarrier<v8::internal::JSPromise>(v8::internal::Tagged<v8::internal::HeapObject>, v8::internal::Tagged<v8::internal::JSPromise>, v8::internal::WriteBarrierMode)
+      1    0.1%    0.1%  void v8::internal::Heap::CopyRange<v8::internal::CompressedObjectSlot>(v8::internal::Tagged<v8::internal::HeapObject>, v8::internal::CompressedObjectSlot, v8::internal::CompressedObjectSlot, unsigned int, v8::internal::WriteBarrierMode)
+      1    0.1%    0.1%  void v8::internal::CopyChars<unsigned char, unsigned char>(unsigned char*, unsigned char const*, unsigned long)
+      1    0.1%    0.1%  v8::internal::compiler::TraceScope::TraceScope(v8::internal::compiler::JSHeapBroker*, void*, char const*)
+      1    0.1%    0.1%  v8::internal::compiler::Pipeline::NewCompilationJob(v8::internal::Isolate*, v8::internal::Handle<v8::internal::JSFunction>, v8::internal::CodeKind, bool, v8::internal::BytecodeOffset)
+      1    0.1%    0.1%  v8::internal::compiler::CommonOperatorBuilder::CommonOperatorBuilder(v8::internal::Zone*)
+      1    0.1%    0.1%  v8::internal::TaggedArrayBase<v8::internal::FixedArray, v8::internal::Object, v8::internal::FixedArrayBase>::RightTrim(v8::internal::Isolate*, unsigned int)
+      1    0.1%    0.1%  v8::internal::Runtime_NewClosure(int, unsigned long*, v8::internal::Isolate*)
+      1    0.1%    0.1%  v8::internal::ReadOnlyRoots::IsNameForProtector(v8::internal::Tagged<v8::internal::HeapObject>) const
+      1    0.1%    0.1%  v8::internal::ReadOnlyHeap::Contains(v8::internal::Tagged<v8::internal::HeapObject>)
+      1    0.1%    0.1%  v8::internal::PerThreadAssertScope<true, (v8::internal::PerThreadAssertType)2>::IsAllowed()
+      1    0.1%    0.1%  v8::internal::Name::set_raw_hash_field_if_empty(unsigned int)
+      1    0.1%    0.1%  v8::internal::MaybeHandle<v8::internal::SeqOneByteString> v8::internal::FactoryBase<v8::internal::Factory>::NewRawStringWithMap<v8::internal::SeqOneByteString>(unsigned int, v8::internal::Tagged<v8::internal::Map>, v8::internal::AllocationType, v8::internal::AllocationHint)
+      1    0.1%    0.1%  v8::internal::Map::NumberOfEnumerableProperties() const
+      1    0.1%    0.1%  v8::internal::LocalHeap::Safepoint()
+      1    0.1%    0.1%  v8::internal::JSReceiver::HasFastProperties() const
+      1    0.1%    0.1%  v8::internal::JSObject::RawFastPropertyAt(v8::internal::FieldIndex) const
+      1    0.1%    0.1%  v8::internal::JSObject::InitializeBody(v8::internal::Tagged<v8::internal::Map>, int, bool, v8::internal::NewJSObjectType)::'lambda'(unsigned int, unsigned int)::operator()(unsigned int, unsigned int) const
+      1    0.1%    0.1%  v8::internal::JSFunction::InitializeFeedbackCell(v8::internal::Isolate*, v8::internal::DirectHandle<v8::internal::JSFunction>, v8::internal::IsCompiledScope*, bool)
+      1    0.1%    0.1%  v8::internal::IdentityMapBase::InsertKey(unsigned long, unsigned int)
+      1    0.1%    0.1%  v8::internal::IdentityMap<unsigned int, v8::internal::FreeStoreAllocationPolicy>::NewPointerArray(unsigned long, unsigned long)
+      1    0.1%    0.1%  v8::internal::HeapAllocator::ResetMostRecentYoungAllocation()
+      1    0.1%    0.1%  v8::internal::HeapAllocator::AllocateRaw(int, v8::internal::AllocationType, v8::internal::AllocationOrigin, v8::internal::AllocationAlignment, v8::internal::AllocationHint)
+      1    0.1%    0.1%  v8::internal::HandleScope::ExtendAndCreateHandle(v8::internal::Isolate*, unsigned long)
+      1    0.1%    0.1%  v8::internal::Handle<v8::internal::Union<v8::internal::Smi, v8::internal::HeapNumber, v8::internal::BigInt, v8::internal::String, v8::internal::Symbol, v8::internal::Boolean, v8::internal::Null, v8::internal::Undefined, v8::internal::JSReceiver>> v8::internal::Object::WrapForRead<(v8::internal::AllocationType)0, v8::internal::Isolate>(v8::internal::Isolate*, v8::internal::Handle<v8::internal::Union<v8::internal::Smi, v8::internal::HeapNumber, v8::internal::BigInt, v8::internal::String, v8::internal::Symbol, v8::internal::Boolean, v8::internal::Null, v8::internal::Undefined, v8::internal::JSReceiver>>, v8::internal::Representation)
+      1    0.1%    0.1%  v8::internal::Handle<v8::internal::FixedArray> v8::internal::FixedArray::New<v8::internal::Isolate>(v8::internal::Isolate*, unsigned int, v8::internal::AllocationType, v8::internal::AllocationHint)
+      1    0.1%    0.1%  v8::internal::Factory::ComputeSharingStrategyForString(v8::internal::DirectHandle<v8::internal::String>, v8::internal::MaybeDirectHandle<v8::internal::Map>*)
+      1    0.1%    0.1%  unsigned int v8::internal::StringHasher::HashSequentialString<unsigned char>(unsigned char const*, unsigned int, v8::internal::HashSeed, bool*)
+      1    0.1%    0.1%  partition_alloc::internal::ThreadCache::FillBucket(unsigned long)
+      1    0.1%    0.1%  partition_alloc::internal::PartitionBucket::SlowPathAlloc(partition_alloc::PartitionRoot*, partition_alloc::internal::AllocFlags, unsigned long, unsigned long, partition_alloc::internal::SlotSpanMetadata**, bool*, bool*)
+      1    0.1%    0.1%  __os_once_gate_wait
+      1    0.1%    0.1%  T1<T> v8::internal::Cast<v8::internal::JSObject, v8::internal::HeapObject, v8::internal::Tagged>(T1<T0>, v8::SourceLocation)
+
+ [Bottom up (heavy) profile]:
+  Note: percentage shows a share of a particular caller in the total
+  amount of its parent calls.
+  Callers occupying less than 1.0% are not shown.
+
+   ticks parent  name
+     88    7.0%  /usr/lib/system/libdyld.dylib
+     76   86.4%    JS: *sum hot-sum.js:6:13
+     76  100.0%      JS: *sum hot-sum.js:6:13
+     76  100.0%        JS: *sum hot-sum.js:6:13
+     76  100.0%          JS: *sum hot-sum.js:6:13
+     76  100.0%            JS: *sum hot-sum.js:6:13
+     12   13.6%    Script: ~<anonymous> hot-sum.js:1:1
+
+     82    6.6%  v8::internal::Runtime_GetProperty(int, unsigned long*, v8::internal::Isolate*)
+     78   95.1%    JS: *sum hot-sum.js:6:13
+     78  100.0%      JS: *sum hot-sum.js:6:13
+     78  100.0%        JS: *sum hot-sum.js:6:13
+     78  100.0%          JS: *sum hot-sum.js:6:13
+     78  100.0%            JS: *sum hot-sum.js:6:13
+      4    4.9%    JS: +sum hot-sum.js:6:13
+      4  100.0%      JS: +sum hot-sum.js:6:13
+      4  100.0%        JS: +sum hot-sum.js:6:13
+      4  100.0%          JS: +sum hot-sum.js:6:13
+      4  100.0%            JS: +sum hot-sum.js:6:13
+
+     63    5.0%  v8::internal::String::SlowEquals(v8::internal::Tagged<v8::internal::String>, v8::internal::SharedStringAccessGuardIfNeeded const&) const
+     60   95.2%    JS: *sum hot-sum.js:6:13
+     60  100.0%      JS: *sum hot-sum.js:6:13
+     60  100.0%        JS: *sum hot-sum.js:6:13
+     60  100.0%          JS: *sum hot-sum.js:6:13
+     60  100.0%            JS: *sum hot-sum.js:6:13
+      3    4.8%    JS: +sum hot-sum.js:6:13
+      3  100.0%      JS: +sum hot-sum.js:6:13
+      3  100.0%        JS: +sum hot-sum.js:6:13
+      3  100.0%          JS: +sum hot-sum.js:6:13
+      3  100.0%            JS: +sum hot-sum.js:6:13
+
+     51    4.1%  v8::internal::StringShape::StringShape(v8::internal::Tagged<v8::internal::Map>)
+     45   88.2%    JS: *sum hot-sum.js:6:13
+     45  100.0%      JS: *sum hot-sum.js:6:13
+     45  100.0%        JS: *sum hot-sum.js:6:13
+     45  100.0%          JS: *sum hot-sum.js:6:13
+     45  100.0%            JS: *sum hot-sum.js:6:13
+      6   11.8%    Script: ~<anonymous> hot-sum.js:1:1
+
+     44    3.5%  bool v8::internal::CastTraitsImpl<v8::internal::Union<v8::internal::Smi, v8::internal::HeapNumber, v8::internal::BigInt, v8::internal::String, v8::internal::Symbol, v8::internal::Boolean, v8::internal::Null, v8::internal::Undefined, v8::internal::JSReceiver>>::AllowFrom<v8::internal::Union<v8::internal::Smi, v8::internal::HeapNumber, v8::internal::BigInt, v8::internal::String, v8::internal::Symbol, v8::internal::Boolean, v8::internal::Null, v8::internal::Undefined, v8::internal::JSReceiver, v8::internal::Hole, v8::internal::UninitializedHeapNumber>>(v8::internal::Tagged<v8::internal::Union<v8::internal::Smi, v8::internal::HeapNumber, v8::internal::BigInt, v8::internal::String, v8::internal::Symbol, v8::internal::Boolean, v8::internal::Null, v8::internal::Undefined, v8::internal::JSReceiver, v8::internal::Hole, v8::internal::UninitializedHeapNumber>>)
+     41   93.2%    JS: *sum hot-sum.js:6:13
+     41  100.0%      JS: *sum hot-sum.js:6:13
+     41  100.0%        JS: *sum hot-sum.js:6:13
+     41  100.0%          JS: *sum hot-sum.js:6:13
+     41  100.0%            JS: *sum hot-sum.js:6:13
+      3    6.8%    JS: +sum hot-sum.js:6:13
+      3  100.0%      JS: +sum hot-sum.js:6:13
+      3  100.0%        JS: +sum hot-sum.js:6:13
+      3  100.0%          JS: +sum hot-sum.js:6:13
+      3  100.0%            JS: +sum hot-sum.js:6:13
+
+     43    3.4%  v8::internal::InstanceTypeChecker::IsSeqOneByteString(v8::internal::Tagged<v8::internal::Map>)
+     42   97.7%    JS: *sum hot-sum.js:6:13
+     42  100.0%      JS: *sum hot-sum.js:6:13
+     42  100.0%        JS: *sum hot-sum.js:6:13
+     42  100.0%          JS: *sum hot-sum.js:6:13
+     42  100.0%            JS: *sum hot-sum.js:6:13
+
+     41    3.3%  v8::internal::IsJSReceiver(v8::internal::Tagged<v8::internal::Object>)
+     41  100.0%    JS: *sum hot-sum.js:6:13
+     41  100.0%      JS: *sum hot-sum.js:6:13
+     41  100.0%        JS: *sum hot-sum.js:6:13
+     41  100.0%          JS: *sum hot-sum.js:6:13
+     41  100.0%            JS: *sum hot-sum.js:6:13
+
+     39    3.1%  v8::internal::PerThreadAssertScope<true, (v8::internal::PerThreadAssertType)5>::~PerThreadAssertScope()
+     37   94.9%    JS: *sum hot-sum.js:6:13
+     37  100.0%      JS: *sum hot-sum.js:6:13
+     37  100.0%        JS: *sum hot-sum.js:6:13
+     37  100.0%          JS: *sum hot-sum.js:6:13
+     37  100.0%            JS: *sum hot-sum.js:6:13
+      1    2.6%    Script: ~<anonymous> hot-sum.js:1:1
+      1    2.6%    JS: +sum hot-sum.js:6:13
+      1  100.0%      JS: +sum hot-sum.js:6:13
+      1  100.0%        JS: +sum hot-sum.js:6:13
+      1  100.0%          JS: +sum hot-sum.js:6:13
+      1  100.0%            JS: +sum hot-sum.js:6:13
+
+     39    3.1%  v8::internal::Isolate::VerifyBuiltinsResult(v8::internal::Tagged<v8::internal::Object>)
+     39  100.0%    JS: *sum hot-sum.js:6:13
+     39  100.0%      JS: *sum hot-sum.js:6:13
+     39  100.0%        JS: *sum hot-sum.js:6:13
+     39  100.0%          JS: *sum hot-sum.js:6:13
+     39  100.0%            JS: *sum hot-sum.js:6:13
+
+     39    3.1%  v8::internal::(anonymous namespace)::FindIndex(v8::internal::DirectHandle<v8::internal::JSRegionObject>, v8::internal::LookupIterator*)
+     39  100.0%    JS: *sum hot-sum.js:6:13
+     39  100.0%      JS: *sum hot-sum.js:6:13
+     39  100.0%        JS: *sum hot-sum.js:6:13
+     39  100.0%          JS: *sum hot-sum.js:6:13
+     39  100.0%            JS: *sum hot-sum.js:6:13
+
+     38    3.0%  v8::internal::SharedStringAccessGuardIfNeeded::IsNeeded(v8::internal::Tagged<v8::internal::String>, bool)
+     36   94.7%    JS: *sum hot-sum.js:6:13
+     36  100.0%      JS: *sum hot-sum.js:6:13
+     36  100.0%        JS: *sum hot-sum.js:6:13
+     36  100.0%          JS: *sum hot-sum.js:6:13
+     36  100.0%            JS: *sum hot-sum.js:6:13
+      2    5.3%    Script: ~<anonymous> hot-sum.js:1:1
+
+     36    2.9%  v8::internal::PerThreadAssertScope<false, (v8::internal::PerThreadAssertType)1, (v8::internal::PerThreadAssertType)2>::PerThreadAssertScope()
+     34   94.4%    JS: *sum hot-sum.js:6:13
+     34  100.0%      JS: *sum hot-sum.js:6:13
+     34  100.0%        JS: *sum hot-sum.js:6:13
+     34  100.0%          JS: *sum hot-sum.js:6:13
+     34  100.0%            JS: *sum hot-sum.js:6:13
+      1    2.8%    Script: ~<anonymous> hot-sum.js:1:1
+      1    2.8%    JS: +sum hot-sum.js:6:13
+      1  100.0%      JS: +sum hot-sum.js:6:13
+      1  100.0%        JS: +sum hot-sum.js:6:13
+      1  100.0%          JS: +sum hot-sum.js:6:13
+      1  100.0%            JS: +sum hot-sum.js:6:13
+
+     33    2.6%  v8::internal::String::SlowEqualsNonThinSameLength(unsigned int, v8::internal::Tagged<v8::internal::String>, v8::internal::SharedStringAccessGuardIfNeeded const&) const
+     33  100.0%    JS: *sum hot-sum.js:6:13
+     33  100.0%      JS: *sum hot-sum.js:6:13
+     33  100.0%        JS: *sum hot-sum.js:6:13
+     33  100.0%          JS: *sum hot-sum.js:6:13
+     33  100.0%            JS: *sum hot-sum.js:6:13
+
+     33    2.6%  v8::internal::Name::AsIntegerIndex(unsigned long*)
+     31   93.9%    JS: *sum hot-sum.js:6:13
+     31  100.0%      JS: *sum hot-sum.js:6:13
+     31  100.0%        JS: *sum hot-sum.js:6:13
+     31  100.0%          JS: *sum hot-sum.js:6:13
+     31  100.0%            JS: *sum hot-sum.js:6:13
+      1    3.0%    Script: ~<anonymous> hot-sum.js:1:1
+      1    3.0%    JS: +sum hot-sum.js:6:13
+      1  100.0%      JS: +sum hot-sum.js:6:13
+      1  100.0%        JS: +sum hot-sum.js:6:13
+      1  100.0%          JS: +sum hot-sum.js:6:13
+      1  100.0%            JS: +sum hot-sum.js:6:13
+
+     28    2.2%  v8::internal::Isolate::has_exception()
+     28  100.0%    JS: *sum hot-sum.js:6:13
+     28  100.0%      JS: *sum hot-sum.js:6:13
+     28  100.0%        JS: *sum hot-sum.js:6:13
+     28  100.0%          JS: *sum hot-sum.js:6:13
+     28  100.0%            JS: *sum hot-sum.js:6:13
+
+     27    2.2%  auto v8::internal::StringShape::DispatchToSpecificType<v8::internal::String::GetImpl(unsigned int, v8::internal::SharedStringAccessGuardIfNeeded const&) const::'lambda'(auto)>(v8::internal::Tagged<v8::internal::String>, auto&&) const
+     27  100.0%    JS: *sum hot-sum.js:6:13
+     27  100.0%      JS: *sum hot-sum.js:6:13
+     27  100.0%        JS: *sum hot-sum.js:6:13
+     27  100.0%          JS: *sum hot-sum.js:6:13
+     27  100.0%            JS: *sum hot-sum.js:6:13
+
+     25    2.0%  T1<T> v8::internal::Cast<v8::internal::String, v8::internal::Object, v8::internal::Tagged>(T1<T0>, v8::SourceLocation)
+     25  100.0%    JS: *sum hot-sum.js:6:13
+     25  100.0%      JS: *sum hot-sum.js:6:13
+     25  100.0%        JS: *sum hot-sum.js:6:13
+     25  100.0%          JS: *sum hot-sum.js:6:13
+     25  100.0%            JS: *sum hot-sum.js:6:13
+
+     24    1.9%  v8::internal::IsBoolean(v8::internal::Tagged<v8::internal::HeapObject>)
+     23   95.8%    JS: *sum hot-sum.js:6:13
+     23  100.0%      JS: *sum hot-sum.js:6:13
+     23  100.0%        JS: *sum hot-sum.js:6:13
+     23  100.0%          JS: *sum hot-sum.js:6:13
+     23  100.0%            JS: *sum hot-sum.js:6:13
+      1    4.2%    JS: +sum hot-sum.js:6:13
+      1  100.0%      JS: +sum hot-sum.js:6:13
+      1  100.0%        JS: +sum hot-sum.js:6:13
+      1  100.0%          JS: +sum hot-sum.js:6:13
+      1  100.0%            JS: +sum hot-sum.js:6:13
+
+     23    1.8%  v8::internal::LocalHeap::VerifyCurrent() const
+     14   60.9%    JS: *sum hot-sum.js:6:13
+     14  100.0%      JS: *sum hot-sum.js:6:13
+     14  100.0%        JS: *sum hot-sum.js:6:13
+     14  100.0%          JS: *sum hot-sum.js:6:13
+     14  100.0%            JS: *sum hot-sum.js:6:13
+      7   30.4%    Script: ~<anonymous> hot-sum.js:1:1
+      2    8.7%    JS: +sum hot-sum.js:6:13
+      2  100.0%      JS: +sum hot-sum.js:6:13
+      2  100.0%        JS: +sum hot-sum.js:6:13
+      2  100.0%          JS: +sum hot-sum.js:6:13
+      2  100.0%            JS: +sum hot-sum.js:6:13
+
+     22    1.8%  v8::internal::String::SlowEquals(v8::internal::Tagged<v8::internal::String>) const
+     22  100.0%    JS: *sum hot-sum.js:6:13
+     22  100.0%      JS: *sum hot-sum.js:6:13
+     22  100.0%        JS: *sum hot-sum.js:6:13
+     22  100.0%          JS: *sum hot-sum.js:6:13
+     22  100.0%            JS: *sum hot-sum.js:6:13
+
+     22    1.8%  v8::internal::HandleScope::Extend(v8::internal::Isolate*)
+     22  100.0%    JS: *sum hot-sum.js:6:13
+     22  100.0%      JS: *sum hot-sum.js:6:13
+     22  100.0%        JS: *sum hot-sum.js:6:13
+     22  100.0%          JS: *sum hot-sum.js:6:13
+     22  100.0%            JS: *sum hot-sum.js:6:13
+
+     21    1.7%  v8::internal::BasePage* v8::internal::MemoryChunk::MetadataImpl<true>(v8::internal::Isolate const*)
+     16   76.2%    JS: *sum hot-sum.js:6:13
+     16  100.0%      JS: *sum hot-sum.js:6:13
+     16  100.0%        JS: *sum hot-sum.js:6:13
+     16  100.0%          JS: *sum hot-sum.js:6:13
+     16  100.0%            JS: *sum hot-sum.js:6:13
+      4   19.0%    Script: ~<anonymous> hot-sum.js:1:1
+      1    4.8%    JS: +sum hot-sum.js:6:13
+      1  100.0%      JS: +sum hot-sum.js:6:13
+      1  100.0%        JS: +sum hot-sum.js:6:13
+      1  100.0%          JS: +sum hot-sum.js:6:13
+      1  100.0%            JS: +sum hot-sum.js:6:13
+
+     19    1.5%  v8::internal::LookupIterator::State v8::internal::LookupIterator::LookupInSpecialHolder<false>(v8::internal::Tagged<v8::internal::Map>, v8::internal::Tagged<v8::internal::JSReceiver>)
+     19  100.0%    JS: *sum hot-sum.js:6:13
+     19  100.0%      JS: *sum hot-sum.js:6:13
+     19  100.0%        JS: *sum hot-sum.js:6:13
+     19  100.0%          JS: *sum hot-sum.js:6:13
+     19  100.0%            JS: *sum hot-sum.js:6:13
+
+     18    1.4%  v8::internal::Object::GetProperty(v8::internal::LookupIterator*, bool)
+     17   94.4%    JS: *sum hot-sum.js:6:13
+     17  100.0%      JS: *sum hot-sum.js:6:13
+     17  100.0%        JS: *sum hot-sum.js:6:13
+     17  100.0%          JS: *sum hot-sum.js:6:13
+     17  100.0%            JS: *sum hot-sum.js:6:13
+      1    5.6%    JS: +sum hot-sum.js:6:13
+      1  100.0%      JS: +sum hot-sum.js:6:13
+      1  100.0%        JS: +sum hot-sum.js:6:13
+      1  100.0%          JS: +sum hot-sum.js:6:13
+      1  100.0%            JS: +sum hot-sum.js:6:13
+
+     18    1.4%  v8::internal::(anonymous namespace)::IsArrayLength(v8::internal::Isolate*, v8::internal::Tagged<v8::internal::JSRegionObject>, v8::internal::LookupIterator*)
+     17   94.4%    JS: *sum hot-sum.js:6:13
+     17  100.0%      JS: *sum hot-sum.js:6:13
+     17  100.0%        JS: *sum hot-sum.js:6:13
+     17  100.0%          JS: *sum hot-sum.js:6:13
+     17  100.0%            JS: *sum hot-sum.js:6:13
+      1    5.6%    JS: +sum hot-sum.js:6:13
+      1  100.0%      JS: +sum hot-sum.js:6:13
+      1  100.0%        JS: +sum hot-sum.js:6:13
+      1  100.0%          JS: +sum hot-sum.js:6:13
+      1  100.0%            JS: +sum hot-sum.js:6:13
+
+     16    1.3%  T1<T> v8::internal::Cast<v8::internal::Name, v8::internal::Object, v8::internal::DirectHandle>(T1<T0>, v8::SourceLocation)
+     16  100.0%    JS: *sum hot-sum.js:6:13
+     16  100.0%      JS: *sum hot-sum.js:6:13
+     16  100.0%        JS: *sum hot-sum.js:6:13
+     16  100.0%          JS: *sum hot-sum.js:6:13
+     16  100.0%            JS: *sum hot-sum.js:6:13
+
+     16    1.3%  Builtin: CEntry_Return1_ArgvOnStack_NoBuiltinExit
+     12   75.0%    JS: *sum hot-sum.js:6:13
+     12  100.0%      JS: *sum hot-sum.js:6:13
+     12  100.0%        JS: *sum hot-sum.js:6:13
+     12  100.0%          JS: *sum hot-sum.js:6:13
+     12  100.0%            JS: *sum hot-sum.js:6:13
+
+     15    1.2%  v8::internal::String::Equals(v8::internal::Tagged<v8::internal::String>) const
+     14   93.3%    JS: *sum hot-sum.js:6:13
+     14  100.0%      JS: *sum hot-sum.js:6:13
+     14  100.0%        JS: *sum hot-sum.js:6:13
+     14  100.0%          JS: *sum hot-sum.js:6:13
+     14  100.0%            JS: *sum hot-sum.js:6:13
+      1    6.7%    JS: +sum hot-sum.js:6:13
+      1  100.0%      JS: +sum hot-sum.js:6:13
+      1  100.0%        JS: +sum hot-sum.js:6:13
+      1  100.0%          JS: +sum hot-sum.js:6:13
+      1  100.0%            JS: +sum hot-sum.js:6:13
+
+     14    1.1%  v8::internal::LookupIterator::LookupIterator(v8::internal::Isolate*, v8::internal::DirectHandle<v8::internal::Union<v8::internal::Smi, v8::internal::HeapNumber, v8::internal::BigInt, v8::internal::String, v8::internal::Symbol, v8::internal::Boolean, v8::internal::Null, v8::internal::Undefined, v8::internal::JSReceiver>>, v8::internal::DirectHandle<v8::internal::Name>, unsigned long, v8::internal::DirectHandle<v8::internal::Union<v8::internal::Smi, v8::internal::HeapNumber, v8::internal::BigInt, v8::internal::String, v8::internal::Symbol, v8::internal::Boolean, v8::internal::Null, v8::internal::Undefined, v8::internal::JSReceiver>>, v8::internal::LookupIterator::Configuration)
+     13   92.9%    JS: *sum hot-sum.js:6:13
+     13  100.0%      JS: *sum hot-sum.js:6:13
+     13  100.0%        JS: *sum hot-sum.js:6:13
+     13  100.0%          JS: *sum hot-sum.js:6:13
+     13  100.0%            JS: *sum hot-sum.js:6:13
+      1    7.1%    JS: +sum hot-sum.js:6:13
+      1  100.0%      JS: +sum hot-sum.js:6:13
+      1  100.0%        JS: +sum hot-sum.js:6:13
+      1  100.0%          JS: +sum hot-sum.js:6:13
+      1  100.0%            JS: +sum hot-sum.js:6:13
+
+     13    1.0%  v8::internal::DirectHandle<v8::internal::JSRegionObject> v8::internal::LookupIterator::GetHolder<v8::internal::JSRegionObject>() const
+     12   92.3%    JS: *sum hot-sum.js:6:13
+     12  100.0%      JS: *sum hot-sum.js:6:13
+     12  100.0%        JS: *sum hot-sum.js:6:13
+     12  100.0%          JS: *sum hot-sum.js:6:13
+     12  100.0%            JS: *sum hot-sum.js:6:13
+      1    7.7%    JS: +sum hot-sum.js:6:13
+      1  100.0%      JS: +sum hot-sum.js:6:13
+      1  100.0%        JS: +sum hot-sum.js:6:13
+      1  100.0%          JS: +sum hot-sum.js:6:13
+      1  100.0%            JS: +sum hot-sum.js:6:13
+
