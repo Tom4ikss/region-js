@@ -43,7 +43,7 @@
   <li>Нет функций, <code>Map</code>, <code>Set</code>, <code>Date</code>, <code>BigInt</code>, <code>Symbol</code>, самих <code>ArrayBuffer</code> и <code>DataView</code>.</li>
   <li>Типизированные массивы поверх <code>SharedArrayBuffer</code> и буферов с изменяемым размером не кладутся. Обычные копируются или переезжают без копии через <code>region.run(fn, [buffer])</code>. View над памятью региона отсоединяются, когда регион переезжает или замораживается, и после этого читаются как пустые (<a href="guide.html#typed">подробнее</a>).</li>
   <li>Экземпляры классов и наследники <code>Array</code> не кладутся: ошибка «cannot be moved into a region».</li>
-  <li>Форма фиксирована: нельзя добавить поле, <code>push</code> и <code>pop</code> не работают.</li>
+  <li>Форма объектов фиксирована: новое поле добавить нельзя. Массивы растут и укорачиваются (<code>push</code>, <code>pop</code>, <code>splice</code>, <code>length</code>), но пока через рантайм: миллион <code>push</code> занимает около 0,3 с.</li>
   <li><code>Object.keys</code>, <code>Object.values</code>, <code>Object.entries</code>, <code>for...in</code>, <code>JSON.stringify</code>, <code>Array.isArray</code>, <code>flat</code> и spread работают. Для потока, который не владеет регионом, они бросают <code>OwnershipError</code>.</li>
   <li>Отдельного класса <code>OwnershipError</code> нет: это <code>TypeError</code> с таким префиксом в тексте.</li>
 </ul>

@@ -172,7 +172,7 @@ index 8226ac48..5a21d9d3 100644
    V(address_of_double_neg_constant, "double_negate_constant")                  \
    V(address_of_enable_experimental_regexp_engine,                              \
 diff --git a/src/common/message-template.h b/src/common/message-template.h
-index ce7c8efa..c24c20e7 100644
+index ce7c8efa..0424746c 100644
 --- a/src/common/message-template.h
 +++ b/src/common/message-template.h
 @@ -739,6 +739,21 @@ namespace internal {
@@ -190,7 +190,7 @@ index ce7c8efa..c24c20e7 100644
 +    "OwnershipError: region % is frozen; borrow it to read its typed arrays")  \
 +  T(RegionCrossReference,                                                      \
 +    "OwnershipError: a region object cannot reference objects outside its "    \
-+    "region")                                                                  \
++    "region; copy them in with Region.object() or Region.array()")             \
 +  T(RegionCannotMove, "% cannot be moved into a region")                       \
 +  T(RegionNotExtensible,                                                       \
 +    "Cannot add property %, region objects have a fixed shape")                \
@@ -1880,7 +1880,7 @@ index 00000000..bd767012
 +
 +#endif  // V8_D8_D8_PORT_H_
 diff --git a/src/d8/d8.cc b/src/d8/d8.cc
-index 49121fe1..b92b1f38 100644
+index 49121fe1..a9ef26a9 100644
 --- a/src/d8/d8.cc
 +++ b/src/d8/d8.cc
 @@ -14,6 +14,7 @@
@@ -2067,7 +2067,7 @@ index 49121fe1..b92b1f38 100644
  
    // Prevent fuzzers from creating side effects.
    if (!i::v8_flags.fuzzing) {
-@@ -4899,6 +4991,826 @@ Local<FunctionTemplate> Shell::CreateWorkerTemplate(Isolate* isolate) {
+@@ -4899,6 +4991,993 @@ Local<FunctionTemplate> Shell::CreateWorkerTemplate(Isolate* isolate) {
    return worker_fun_template;
  }
  
@@ -2094,6 +2094,29 @@ index 49121fe1..b92b1f38 100644
 +                       FunctionTemplate::New(isolate, RegionIsRegionObject));
 +  region_template->Set(isolate, "__info",
 +                       FunctionTemplate::New(isolate, RegionInfo));
++  region_template->Set(isolate, "object",
++                       FunctionTemplate::New(isolate, RegionCurrentObject));
++  region_template->Set(isolate, "array",
++                       FunctionTemplate::New(isolate, RegionCurrentArray));
++  {
++    // Scopes returned by region.enter(): [region id or undefined].
++    Local<FunctionTemplate> scope_template = FunctionTemplate::New(isolate);
++    scope_template->SetClassName(
++        String::NewFromUtf8Literal(isolate, "RegionScope"));
++    scope_template->InstanceTemplate()->SetInternalFieldCount(1);
++    Local<FunctionTemplate> exit = FunctionTemplate::New(
++        isolate, RegionScopeExit, Local<Value>(),
++        Signature::New(isolate, scope_template), 0, ConstructorBehavior::kThrow);
++    scope_template->PrototypeTemplate()->Set(
++        Utils::ToLocal(reinterpret_cast<i::Isolate*>(isolate)
++                           ->factory()
++                           ->dispose_symbol()),
++        exit);
++    scope_template->PrototypeTemplate()->Set(
++        String::NewFromUtf8Literal(isolate, "exit"), exit);
++    PerIsolateData::Get(isolate)->region_scope_ctor_.Reset(isolate,
++                                                           scope_template);
++  }
 +  region_template->Set(isolate, "stats",
 +                       FunctionTemplate::New(isolate, RegionStats));
 +  // `using region = new Region()` frees the region at the end of the block,
@@ -2113,7 +2136,9 @@ index 49121fe1..b92b1f38 100644
 +                       FunctionTemplate::New(isolate, RegionToJS));
 +  for (auto [name, callback] :
 +       {std::pair{"freeze", RegionFreeze}, std::pair{"thaw", RegionThaw},
-+        std::pair{"borrow", RegionBorrow}, std::pair{"free", RegionFree}}) {
++        std::pair{"borrow", RegionBorrow}, std::pair{"free", RegionFree},
++        std::pair{"enter", RegionEnter}, std::pair{"object", RegionNewObject},
++        std::pair{"array", RegionNewArray}}) {
 +    region_template->PrototypeTemplate()->Set(
 +        String::NewFromUtf8(isolate, name).ToLocalChecked(),
 +        FunctionTemplate::New(isolate, callback, Local<Value>(), signature, 0,
@@ -2855,12 +2880,16 @@ index 49121fe1..b92b1f38 100644
 +          i::Cast<i::JSArrayBuffer>(Utils::OpenDirectHandle(*item)));
 +    }
 +  }
++  // Inside fn the region is the current one, for Region.object() and
++  // Region.array().
++  std::vector<int>& current = PerIsolateData::Get(isolate)->current_regions();
++  current.push_back(RegionIdOf(info));
 +  Local<Value> result;
-+  if (!info[0].As<Function>()
-+           ->Call(context, Undefined(isolate), 0, nullptr)
-+           .ToLocal(&result)) {
-+    return;
-+  }
++  bool called = info[0].As<Function>()
++                    ->Call(context, Undefined(isolate), 0, nullptr)
++                    .ToLocal(&result);
++  current.pop_back();
++  if (!called) return;
 +  i::DirectHandle<i::Object> evacuated;
 +  if (!i::JSRegionObject::Evacuate(i_isolate, RegionIdOf(info),
 +                                   Utils::OpenDirectHandle(*result), &transfer,
@@ -2873,6 +2902,144 @@ index 49121fe1..b92b1f38 100644
 +                                   i::indirect_handle(evacuated, i_isolate))
 +          .ToHandle(&value)) {
 +    info.GetReturnValue().Set(Utils::ToLocal(value));
++  }
++}
++
++namespace {
++
++// Copies `value` into `region` and returns what JS sees of it.
++void CreateInRegion(const v8::FunctionCallbackInfo<v8::Value>& info,
++                    int region, Local<Value> value) {
++  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(info.GetIsolate());
++  i::DirectHandle<i::Object> evacuated;
++  if (!i::JSRegionObject::Evacuate(i_isolate, region,
++                                   Utils::OpenDirectHandle(*value), nullptr,
++                                   false)
++           .ToHandle(&evacuated)) {
++    return;
++  }
++  i::Handle<i::Object> result;
++  if (i::JSRegionObject::ToJSValue(i_isolate,
++                                   i::indirect_handle(evacuated, i_isolate))
++          .ToHandle(&result)) {
++    info.GetReturnValue().Set(Utils::ToLocal(result));
++  }
++}
++
++bool CheckObjectArgument(const v8::FunctionCallbackInfo<v8::Value>& info,
++                         const char* name) {
++  if (info.Length() < 1 || !info[0]->IsObject() || info[0]->IsArray() ||
++      info[0]->IsFunction()) {
++    std::string message =
++        std::string(name) + "() expects a plain object; use array() for arrays";
++    info.GetIsolate()->ThrowException(Exception::TypeError(
++        String::NewFromUtf8(info.GetIsolate(), message.c_str())
++            .ToLocalChecked()));
++    return false;
++  }
++  return true;
++}
++
++MaybeLocal<Array> ArgumentsArray(
++    const v8::FunctionCallbackInfo<v8::Value>& info) {
++  std::vector<Local<Value>> items;
++  for (int i = 0; i < info.Length(); i++) items.push_back(info[i]);
++  return Array::New(info.GetIsolate(), items.data(), items.size());
++}
++
++int CurrentRegion(const v8::FunctionCallbackInfo<v8::Value>& info,
++                  const char* name) {
++  std::vector<int>& current =
++      PerIsolateData::Get(info.GetIsolate())->current_regions();
++  if (current.empty()) {
++    std::string message = std::string("Region.") + name +
++                          "() needs a current region: use region.enter() or "
++                          "region." + name + "()";
++    info.GetIsolate()->ThrowException(Exception::TypeError(
++        String::NewFromUtf8(info.GetIsolate(), message.c_str())
++            .ToLocalChecked()));
++    return -1;
++  }
++  return current.back();
++}
++
++}  // namespace
++
++// region.object(value): a plain object copied into this region.
++void Shell::RegionNewObject(const v8::FunctionCallbackInfo<v8::Value>& info) {
++  DCHECK(i::ValidateCallbackInfo(info));
++  if (!CheckObjectArgument(info, "region.object")) return;
++  CreateInRegion(info, RegionIdOf(info), info[0]);
++}
++
++// region.array(...items): an array of the items in this region.
++void Shell::RegionNewArray(const v8::FunctionCallbackInfo<v8::Value>& info) {
++  DCHECK(i::ValidateCallbackInfo(info));
++  Local<Array> items;
++  if (!ArgumentsArray(info).ToLocal(&items)) return;
++  CreateInRegion(info, RegionIdOf(info), items);
++}
++
++// Region.object(value) and Region.array(...items): the same in the current
++// region.
++void Shell::RegionCurrentObject(
++    const v8::FunctionCallbackInfo<v8::Value>& info) {
++  DCHECK(i::ValidateCallbackInfo(info));
++  if (!CheckObjectArgument(info, "Region.object")) return;
++  int region = CurrentRegion(info, "object");
++  if (region >= 0) CreateInRegion(info, region, info[0]);
++}
++
++void Shell::RegionCurrentArray(
++    const v8::FunctionCallbackInfo<v8::Value>& info) {
++  DCHECK(i::ValidateCallbackInfo(info));
++  int region = CurrentRegion(info, "array");
++  if (region < 0) return;
++  Local<Array> items;
++  if (!ArgumentsArray(info).ToLocal(&items)) return;
++  CreateInRegion(info, region, items);
++}
++
++// region.enter(): makes the region current until the returned scope is
++// disposed, e.g. by `using _ = region.enter()`.
++void Shell::RegionEnter(const v8::FunctionCallbackInfo<v8::Value>& info) {
++  DCHECK(i::ValidateCallbackInfo(info));
++  Isolate* isolate = info.GetIsolate();
++  int region = RegionIdOf(info);
++  if (!i::RegionRegistry::IsOwner(region,
++                                  reinterpret_cast<i::Isolate*>(isolate))) {
++    ThrowError(isolate, i::RegionRegistry::IsFreed(region)
++                            ? "Region was freed"
++                            : "Region is not owned by this isolate");
++    return;
++  }
++  PerIsolateData* data = PerIsolateData::Get(isolate);
++  Local<Object> scope;
++  if (!data->region_scope_ctor_.Get(isolate)
++           ->InstanceTemplate()
++           ->NewInstance(isolate->GetCurrentContext())
++           .ToLocal(&scope)) {
++    return;
++  }
++  data->current_regions_.push_back(region);
++  scope->SetInternalField(0, Int32::New(isolate, region));
++  info.GetReturnValue().Set(scope);
++}
++
++void Shell::RegionScopeExit(const v8::FunctionCallbackInfo<v8::Value>& info) {
++  DCHECK(i::ValidateCallbackInfo(info));
++  Local<Object> scope = info.This();
++  Local<Value> field = scope->GetInternalField(0).As<Value>();
++  if (!field->IsInt32()) return;  // Already left.
++  int region = field.As<Int32>()->Value();
++  scope->SetInternalField(0, Undefined(info.GetIsolate()));
++  std::vector<int>& current =
++      PerIsolateData::Get(info.GetIsolate())->current_regions();
++  for (auto it = current.rbegin(); it != current.rend(); ++it) {
++    if (*it == region) {
++      current.erase(std::next(it).base());
++      return;
++    }
 +  }
 +}
 +
@@ -2894,7 +3061,7 @@ index 49121fe1..b92b1f38 100644
  Local<ObjectTemplate> Shell::CreateAsyncHookTemplate(Isolate* isolate) {
    Local<ObjectTemplate> async_hooks_templ = ObjectTemplate::New(isolate);
    async_hooks_templ->Set(isolate, "createHook",
-@@ -5376,9 +6288,593 @@ MaybeLocal<Context> Shell::CreateEvaluationContext(Isolate* isolate) {
+@@ -5376,9 +6455,593 @@ MaybeLocal<Context> Shell::CreateEvaluationContext(Isolate* isolate) {
    }
  #endif  // V8_ENABLE_HARDWARE_WATCHPOINT_SUPPORT
  
@@ -3488,7 +3655,7 @@ index 49121fe1..b92b1f38 100644
  namespace {
  int LineFromOffset(Local<debug::Script> script, int offset) {
    debug::Location location = script->GetSourceLocation(offset);
-@@ -6538,6 +8034,7 @@ void SourceGroup::JoinThread(const i::ParkedScope& parked) {
+@@ -6538,6 +8201,7 @@ void SourceGroup::JoinThread(const i::ParkedScope& parked) {
  void SerializationDataQueue::Enqueue(std::unique_ptr<SerializationData> data) {
    base::MutexGuard lock_guard(&mutex_);
    data_.push_back(std::move(data));
@@ -3496,7 +3663,7 @@ index 49121fe1..b92b1f38 100644
  }
  
  bool SerializationDataQueue::Dequeue(
-@@ -6547,6 +8044,7 @@ bool SerializationDataQueue::Dequeue(
+@@ -6547,6 +8211,7 @@ bool SerializationDataQueue::Dequeue(
    if (data_.empty()) return false;
    *out_data = std::move(data_[0]);
    data_.erase(data_.begin());
@@ -3504,7 +3671,7 @@ index 49121fe1..b92b1f38 100644
    return true;
  }
  
-@@ -6558,6 +8056,7 @@ bool SerializationDataQueue::IsEmpty() {
+@@ -6558,6 +8223,7 @@ bool SerializationDataQueue::IsEmpty() {
  void SerializationDataQueue::Clear() {
    base::MutexGuard lock_guard(&mutex_);
    data_.clear();
@@ -3512,7 +3679,7 @@ index 49121fe1..b92b1f38 100644
  }
  
  Worker::Worker(Isolate* parent_isolate, const char* script)
-@@ -6668,6 +8167,12 @@ std::unique_ptr<SerializationData> Worker::GetMessage(Isolate* requester) {
+@@ -6668,6 +8334,12 @@ std::unique_ptr<SerializationData> Worker::GetMessage(Isolate* requester) {
        out_queue_.Dequeue(&result);
        break;
      }
@@ -3525,7 +3692,7 @@ index 49121fe1..b92b1f38 100644
      out_semaphore_.ParkedWait(
          reinterpret_cast<i::Isolate*>(requester)->main_thread_local_isolate());
    }
-@@ -6705,6 +8210,8 @@ void Worker::Terminate() {
+@@ -6705,6 +8377,8 @@ void Worker::Terminate() {
    // returning to the event queue. Since we checked the state before, and we are
    // holding the {worker_mutex_}, it's safe to access the isolate.
    isolate_->TerminateExecution();
@@ -3534,7 +3701,7 @@ index 49121fe1..b92b1f38 100644
  }
  
  void Worker::EnterTerminatedState() {
-@@ -7310,6 +8817,9 @@ bool Shell::SetOptions(int argc, char* argv[]) {
+@@ -7310,6 +8984,9 @@ bool Shell::SetOptions(int argc, char* argv[]) {
                                    argv, &i)) {
        // Value is expressed in MB.
        options.max_serializer_memory = atoi(flag_value) * i::MB;
@@ -3544,7 +3711,7 @@ index 49121fe1..b92b1f38 100644
      } else if (FlagMatches("--bundle", &argv[i])) {
        options.bundle = true;
  #ifdef V8_FUZZILLI
-@@ -7921,6 +9431,27 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7921,6 +9598,27 @@ class Serializer : public ValueSerializer::Delegate {
      return true;
    }
  
@@ -3572,7 +3739,7 @@ index 49121fe1..b92b1f38 100644
   private:
    Maybe<bool> PrepareTransfer(Local<Context> context, Local<Value> transfer) {
      if (transfer->IsArray()) {
-@@ -7929,6 +9460,22 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7929,6 +9627,22 @@ class Serializer : public ValueSerializer::Delegate {
        for (uint32_t i = 0; i < length; ++i) {
          Local<Value> element;
          if (transfer_array->Get(context, i).ToLocal(&element)) {
@@ -3595,7 +3762,7 @@ index 49121fe1..b92b1f38 100644
            if (!element->IsArrayBuffer()) {
              ThrowError(isolate_,
                         "Transfer array elements must be an ArrayBuffer");
-@@ -7961,7 +9508,48 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7961,7 +9675,48 @@ class Serializer : public ValueSerializer::Delegate {
      }
    }
  
@@ -3644,7 +3811,7 @@ index 49121fe1..b92b1f38 100644
      for (const auto& global_array_buffer : array_buffers_) {
        Local<ArrayBuffer> array_buffer =
            Local<ArrayBuffer>::New(isolate_, global_array_buffer);
-@@ -7987,6 +9575,7 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7987,6 +9742,7 @@ class Serializer : public ValueSerializer::Delegate {
    ValueSerializer serializer_;
    std::unique_ptr<SerializationData> data_;
    std::vector<Global<ArrayBuffer>> array_buffers_;
@@ -3652,7 +3819,7 @@ index 49121fe1..b92b1f38 100644
    std::vector<Global<SharedArrayBuffer>> shared_array_buffers_;
    std::vector<Global<WasmModuleObject>> wasm_modules_;
    std::vector<std::shared_ptr<v8::BackingStore>> backing_stores_;
-@@ -8013,6 +9602,21 @@ class Deserializer : public ValueDeserializer::Delegate {
+@@ -8013,6 +9769,21 @@ class Deserializer : public ValueDeserializer::Delegate {
        return MaybeLocal<Value>();
      }
  
@@ -3674,7 +3841,7 @@ index 49121fe1..b92b1f38 100644
      uint32_t index = 0;
      for (const auto& backing_store : data_->backing_stores()) {
        Local<ArrayBuffer> array_buffer =
-@@ -8049,6 +9653,21 @@ class Deserializer : public ValueDeserializer::Delegate {
+@@ -8049,6 +9820,21 @@ class Deserializer : public ValueDeserializer::Delegate {
      return nullptr;
    }
  
@@ -3696,7 +3863,7 @@ index 49121fe1..b92b1f38 100644
   private:
    Isolate* isolate_;
    ValueDeserializer deserializer_;
-@@ -8309,6 +9928,8 @@ int Shell::Main(int argc, char* argv[]) {
+@@ -8309,6 +10095,8 @@ int Shell::Main(int argc, char* argv[]) {
    // The platform is owned by wrapper platform despite the `std::move` below.
    START_IGNORE_LIFETIME_SAFETY_WARNINGS()
    g_default_platform = g_platform.get();
@@ -3706,7 +3873,7 @@ index 49121fe1..b92b1f38 100644
    if (i::v8_flags.predictable) {
      g_platform = MakePredictablePlatform(std::move(g_platform));
 diff --git a/src/d8/d8.h b/src/d8/d8.h
-index 0c7ad50a..97d9ebf0 100644
+index 0c7ad50a..ea122080 100644
 --- a/src/d8/d8.h
 +++ b/src/d8/d8.h
 @@ -8,6 +8,7 @@
@@ -3786,10 +3953,12 @@ index 0c7ad50a..97d9ebf0 100644
    std::vector<std::unique_ptr<SerializationData>> data_;
  };
  
-@@ -432,8 +460,22 @@ class PerIsolateData {
+@@ -432,8 +460,24 @@ class PerIsolateData {
    Local<FunctionTemplate> GetDomNodeCtor() const;
    void SetDomNodeCtor(Local<FunctionTemplate> ctor);
  
++  // Regions entered with region.enter() or region.run(), innermost last.
++  std::vector<int>& current_regions() { return current_regions_; }
 +  Local<FunctionTemplate> GetRegionCtor() const;
 +  void SetRegionCtor(Local<FunctionTemplate> ctor);
 +  Local<FunctionTemplate> GetRegionBorrowCtor() const;
@@ -3809,7 +3978,7 @@ index 0c7ad50a..97d9ebf0 100644
    void SubscribeWorkerOnMessage(const std::shared_ptr<Worker>& worker,
                                  Local<Context> context,
                                  Local<Function> callback);
-@@ -457,6 +499,32 @@ class PerIsolateData {
+@@ -457,6 +501,36 @@ class PerIsolateData {
    std::unordered_set<DynamicImportData*> import_data_;
    Global<FunctionTemplate> test_api_object_ctor_;
    Global<FunctionTemplate> dom_node_ctor_;
@@ -3836,13 +4005,17 @@ index 0c7ad50a..97d9ebf0 100644
 +    std::vector<std::string> names;
 +  };
 +  std::unordered_map<std::string, int> spawn_code_ids_;
++  // Regions entered with region.enter() or region.run(), innermost last:
++  // Region.object() and Region.array() create objects in the last one.
++  std::vector<int> current_regions_;
++  Global<FunctionTemplate> region_scope_ctor_;
 +  std::vector<SpawnCode> spawn_codes_;
 +  struct RegionHandle;
 +  std::unordered_set<RegionHandle*> region_handles_;
    // See Shell::GetOrCreateLeafInterfaceTypeTemplate.
    Global<FunctionTemplate> leaf_interface_type_template_;
    // The template of the global object of all contexts that d8 creates in this
-@@ -641,6 +709,9 @@ class ShellOptions {
+@@ -641,6 +715,9 @@ class ShellOptions {
    DisallowReassignment<bool> expose_fast_api = {"expose-fast-api", false};
    DisallowReassignment<size_t> max_serializer_memory = {"max-serializer-memory",
                                                          1 * i::MB};
@@ -3852,7 +4025,7 @@ index 0c7ad50a..97d9ebf0 100644
    DisallowReassignment<bool> bundle = {"bundle", false};
  };
  
-@@ -713,6 +784,21 @@ class Shell : public i::AllStatic {
+@@ -713,6 +790,21 @@ class Shell : public i::AllStatic {
  
    static bool HandleUnhandledPromiseRejections(Isolate* isolate);
  
@@ -3874,7 +4047,7 @@ index 0c7ad50a..97d9ebf0 100644
    static std::unique_ptr<SerializationData> SerializeValue(
        Isolate* isolate, Local<Value> value, Local<Value> transfer);
    static MaybeLocal<Value> DeserializeValue(
-@@ -1007,6 +1093,33 @@ class Shell : public i::AllStatic {
+@@ -1007,6 +1099,41 @@ class Shell : public i::AllStatic {
    static Local<ObjectTemplate> GetOrCreateGlobalTemplate(Isolate* isolate);
    static Local<ObjectTemplate> CreateOSTemplate(Isolate* isolate);
    static Local<FunctionTemplate> CreateWorkerTemplate(Isolate* isolate);
@@ -3894,6 +4067,14 @@ index 0c7ad50a..97d9ebf0 100644
 +  static void RegionIsRegionObject(
 +      const v8::FunctionCallbackInfo<v8::Value>& info);
 +  static void RegionInfo(const v8::FunctionCallbackInfo<v8::Value>& info);
++  static void RegionEnter(const v8::FunctionCallbackInfo<v8::Value>& info);
++  static void RegionScopeExit(const v8::FunctionCallbackInfo<v8::Value>& info);
++  static void RegionNewObject(const v8::FunctionCallbackInfo<v8::Value>& info);
++  static void RegionNewArray(const v8::FunctionCallbackInfo<v8::Value>& info);
++  static void RegionCurrentObject(
++      const v8::FunctionCallbackInfo<v8::Value>& info);
++  static void RegionCurrentArray(
++      const v8::FunctionCallbackInfo<v8::Value>& info);
 +  static void RegionFree(const v8::FunctionCallbackInfo<v8::Value>& info);
 +  static void RegionDispose(const v8::FunctionCallbackInfo<v8::Value>& info);
 +  static void RegionFreed(const v8::FunctionCallbackInfo<v8::Value>& info);
@@ -3909,7 +4090,7 @@ index 0c7ad50a..97d9ebf0 100644
    static Local<ObjectTemplate> CreatePerformanceTemplate(Isolate* isolate);
    static Local<ObjectTemplate> CreateRealmTemplate(Isolate* isolate);
 diff --git a/src/diagnostics/objects-debug.cc b/src/diagnostics/objects-debug.cc
-index 28f4d0c8..db99a143 100644
+index 28f4d0c8..12ac3919 100644
 --- a/src/diagnostics/objects-debug.cc
 +++ b/src/diagnostics/objects-debug.cc
 @@ -91,6 +91,7 @@
@@ -3920,7 +4101,7 @@ index 28f4d0c8..db99a143 100644
  #include "src/objects/module-inl.h"
  #include "src/objects/oddball-inl.h"
  #include "src/objects/promise-inl.h"
-@@ -3111,6 +3112,34 @@ void JSModuleNamespace::JSModuleNamespaceVerify(Isolate* isolate) {
+@@ -3111,6 +3112,39 @@ void JSModuleNamespace::JSModuleNamespaceVerify(Isolate* isolate) {
    CHECK(IsModule(module()));
  }
  
@@ -3937,6 +4118,11 @@ index 28f4d0c8..db99a143 100644
 +    Tagged<FixedArray> keys = Cast<FixedArray>(this->keys());
 +    CHECK(HeapLayout::InAnySharedSpace(keys));
 +    CHECK_EQ(keys->length(), values()->length());
++  } else {
++    CHECK_LE(array_length(), values()->ulength().value());
++    for (uint32_t i = array_length(); i < values()->ulength().value(); i++) {
++      CHECK(IsUndefined(values()->get(i)));
++    }
 +  }
 +}
 +
@@ -4138,7 +4324,7 @@ index edb398ee..10574ed4 100644
    {
      // Allows handle derefs for all threads/isolates from this thread.
 diff --git a/src/ic/accessor-assembler.cc b/src/ic/accessor-assembler.cc
-index c4fa533d..a66a3b35 100644
+index c4fa533d..1b4553bc 100644
 --- a/src/ic/accessor-assembler.cc
 +++ b/src/ic/accessor-assembler.cc
 @@ -24,6 +24,7 @@
@@ -4164,7 +4350,7 @@ index c4fa533d..a66a3b35 100644
    GotoIf(Word32Equal(handler_kind, LOAD_KIND(kConstantFromPrototype)),
           &constant);
  
-@@ -873,6 +877,53 @@ void AccessorAssembler::HandleLoadICSmiHandlerLoadNamedCase(
+@@ -873,6 +877,58 @@ void AccessorAssembler::HandleLoadICSmiHandlerLoadNamedCase(
                      miss, exit_point);
    }
  
@@ -4199,7 +4385,8 @@ index c4fa533d..a66a3b35 100644
 +        LoadFixedArrayElement(values, Signed(ChangeUint32ToWord(index))));
 +
 +    BIND(&array_length);
-+    exit_point->Return(SmiTag(LoadFixedArrayBaseLength(values)));
++    exit_point->Return(
++        LoadObjectField(object, offsetof(JSRegionObject, array_length_)));
 +
 +    BIND(&element);
 +    {
@@ -4209,7 +4396,11 @@ index c4fa533d..a66a3b35 100644
 +                &slow);
 +      TNode<IntPtrT> element_index = TryToIntptr(p->name(), &slow);
 +      GotoIf(IntPtrLessThan(element_index, IntPtrConstant(0)), &slow);
-+      GotoIfNot(IntPtrLessThan(element_index, LoadFixedArrayBaseLength(values)),
++      // values() may be longer than the array.
++      GotoIfNot(IntPtrLessThan(
++                    element_index,
++                    SmiUntag(LoadObjectField<Smi>(
++                        object, offsetof(JSRegionObject, array_length_)))),
 +                &slow);
 +      return_unless_typed_array(LoadFixedArrayElement(values, element_index));
 +    }
@@ -4218,7 +4409,7 @@ index c4fa533d..a66a3b35 100644
    BIND(&nonexistent);
    // This is a handler for a load of a non-existent value.
    if (on_nonexistent == OnNonExistent::kThrowReferenceError) {
-@@ -1211,7 +1262,8 @@ void AccessorAssembler::HandleLoadICSmiHandlerHasNamedCase(
+@@ -1211,7 +1267,8 @@ void AccessorAssembler::HandleLoadICSmiHandlerHasNamedCase(
      CSA_DCHECK(this,
                 Word32Any(Word32Equal(handler_kind, LOAD_KIND(kInterceptor)),
                           Word32Equal(handler_kind, LOAD_KIND(kProxy)),
@@ -4228,7 +4419,7 @@ index c4fa533d..a66a3b35 100644
      exit_point->ReturnCallBuiltin(Builtin::kHasProperty, p->context(),
                                    p->receiver(), p->name());
    }
-@@ -1551,6 +1603,81 @@ void AccessorAssembler::HandleStoreICSmiHandlerJSSharedStructFieldCase(
+@@ -1551,6 +1608,81 @@ void AccessorAssembler::HandleStoreICSmiHandlerJSSharedStructFieldCase(
    Return(value);
  }
  
@@ -4310,7 +4501,7 @@ index c4fa533d..a66a3b35 100644
  void AccessorAssembler::HandleStoreICHandlerCase(
      const StoreICParameters* p, TNode<MaybeObject> handler, Label* miss,
      ICMode ic_mode, ElementSupport support_elements) {
-@@ -1629,9 +1756,12 @@ void AccessorAssembler::HandleStoreICHandlerCase(
+@@ -1629,9 +1761,12 @@ void AccessorAssembler::HandleStoreICHandlerCase(
      }
      BIND(&if_fast_smi);
      {
@@ -4324,7 +4515,7 @@ index c4fa533d..a66a3b35 100644
        Branch(Word32Equal(handler_kind, STORE_KIND(kSharedStructField)),
               &shared_struct_field, &data);
  
-@@ -1642,6 +1772,14 @@ void AccessorAssembler::HandleStoreICHandlerCase(
+@@ -1642,6 +1777,14 @@ void AccessorAssembler::HandleStoreICHandlerCase(
        HandleStoreICSmiHandlerJSSharedStructFieldCase(p->context(), handler_word,
                                                       CAST(holder), p->value());
  
@@ -4814,7 +5005,7 @@ index 60c22c3b..e86d39ef 100644
    inline void set_detach_key(Tagged<Cell> value,
                               WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
 diff --git a/src/objects/js-objects.cc b/src/objects/js-objects.cc
-index deb7420b..f46f7f6b 100644
+index deb7420b..780042aa 100644
 --- a/src/objects/js-objects.cc
 +++ b/src/objects/js-objects.cc
 @@ -62,6 +62,7 @@
@@ -4882,18 +5073,16 @@ index deb7420b..f46f7f6b 100644
        case LookupIterator::INTERCEPTOR: {
          Maybe<PropertyAttributes> result =
              JSObject::GetPropertyAttributesWithInterceptor(it);
-@@ -1090,6 +1106,10 @@ Maybe<bool> JSReceiver::DeleteProperty(LookupIterator* it,
+@@ -1090,6 +1106,8 @@ Maybe<bool> JSReceiver::DeleteProperty(LookupIterator* it,
        case LookupIterator::WASM_OBJECT:
          RETURN_FAILURE(isolate, kThrowOnError,
                         NewTypeError(MessageTemplate::kWasmObjectsAreOpaque));
 +      case LookupIterator::REGION_OBJECT:
-+        RETURN_FAILURE(isolate, kThrowOnError,
-+                       NewTypeError(MessageTemplate::kRegionNotExtensible,
-+                                    it->GetName()));
++        return JSRegionObject::DeleteProperty(it);
        case LookupIterator::ACCESS_CHECK:
          if (it->HasAccess()) continue;
          RETURN_ON_EXCEPTION_VALUE(
-@@ -1950,6 +1970,10 @@ Maybe<bool> JSReceiver::AddPrivateField(LookupIterator* it,
+@@ -1950,6 +1968,10 @@ Maybe<bool> JSReceiver::AddPrivateField(LookupIterator* it,
        case LookupIterator::WASM_OBJECT:
          RETURN_FAILURE(isolate, kThrowOnError,
                         NewTypeError(MessageTemplate::kWasmObjectsAreOpaque));
@@ -4904,7 +5093,7 @@ index deb7420b..f46f7f6b 100644
        case LookupIterator::MODULE_NAMESPACE:
        case LookupIterator::DATA:
        case LookupIterator::INTERCEPTOR:
-@@ -2740,6 +2764,10 @@ int JSObject::GetHeaderSize(InstanceType type) {
+@@ -2740,6 +2762,10 @@ int JSObject::GetHeaderSize(InstanceType type) {
        return JSModuleNamespace::kHeaderSize;
      case JS_DEFERRED_MODULE_NAMESPACE_TYPE:
        return JSDeferredModuleNamespace::kHeaderSize;
@@ -4915,7 +5104,7 @@ index deb7420b..f46f7f6b 100644
      case JS_SHARED_STRUCT_TYPE:
        return JSSharedStruct::kHeaderSize;
  #ifdef V8_TEMPORAL_SUPPORT
-@@ -3856,6 +3884,10 @@ Maybe<bool> JSObject::DefineOwnPropertyIgnoreAttributes(
+@@ -3856,6 +3882,10 @@ Maybe<bool> JSObject::DefineOwnPropertyIgnoreAttributes(
          UNREACHABLE();
        case LookupIterator::WASM_OBJECT:
          continue;  // {AddDataProperty} will throw if no other case is hit.
@@ -4928,10 +5117,10 @@ index deb7420b..f46f7f6b 100644
          if (!it->HasAccess()) {
 diff --git a/src/objects/js-region-inl.h b/src/objects/js-region-inl.h
 new file mode 100644
-index 00000000..892242cf
+index 00000000..844041ef
 --- /dev/null
 +++ b/src/objects/js-region-inl.h
-@@ -0,0 +1,80 @@
+@@ -0,0 +1,88 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -4978,6 +5167,14 @@ index 00000000..892242cf
 +
 +bool JSRegionObject::is_array() const { return IsUndefined(keys()); }
 +
++uint32_t JSRegionObject::array_length() const {
++  return static_cast<uint32_t>(array_length_.load().value());
++}
++
++void JSRegionObject::set_array_length(uint32_t value) {
++  array_length_.store(this, Smi::FromInt(static_cast<int>(value)));
++}
++
 +DEF_CAST_TRAITS(JSRegionTypedArray)
 +
 +int JSRegionTypedArray::backing_store_id() const {
@@ -5014,10 +5211,10 @@ index 00000000..892242cf
 +#endif  // V8_OBJECTS_JS_REGION_INL_H_
 diff --git a/src/objects/js-region.cc b/src/objects/js-region.cc
 new file mode 100644
-index 00000000..0cdd9a60
+index 00000000..5bb446cb
 --- /dev/null
 +++ b/src/objects/js-region.cc
-@@ -0,0 +1,1056 @@
+@@ -0,0 +1,1256 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -5410,6 +5607,7 @@ index 00000000..0cdd9a60
 +      Tagged<FixedArray> empty = ReadOnlyRoots(heap->isolate()).empty_fixed_array();
 +      if (!freed->is_array()) freed->set_keys(empty, SKIP_WRITE_BARRIER);
 +      freed->set_values(empty, SKIP_WRITE_BARRIER);
++      freed->set_array_length(0);
 +      if (IsJSRegionTypedArray(object)) {
 +        Tagged<JSRegionTypedArray> holder = Cast<JSRegionTypedArray>(object);
 +        holder->Initialize(-1, holder->element_type(), Smi::zero(), Smi::zero());
@@ -5542,9 +5740,7 @@ index 00000000..0cdd9a60
 +  if (object->is_array()) {
 +    if (!it->IsElement()) return -1;
 +    size_t index = it->index();
-+    return index < static_cast<size_t>(LengthOf(object->values()))
-+               ? static_cast<int>(index)
-+               : -1;
++    return index < object->array_length() ? static_cast<int>(index) : -1;
 +  }
 +  DirectHandle<Name> name = it->GetName();
 +  if (!IsString(*name)) return -1;
@@ -5561,7 +5757,8 @@ index 00000000..0cdd9a60
 +                                      DirectHandle<JSRegionObject> object,
 +                                      LookupIterator* it) {
 +  if (IsArrayLength(isolate, *object, it)) {
-+    return handle(Smi::FromInt(LengthOf(object->values())), isolate);
++    return handle(Smi::FromInt(static_cast<int>(object->array_length())),
++                  isolate);
 +  }
 +  int index = FindIndex(object, it);
 +  if (index < 0) return isolate->factory()->undefined_value();
@@ -5596,7 +5793,8 @@ index 00000000..0cdd9a60
 +        region_(region),
 +        transfer_(transfer),
 +        transfer_all_(transfer_all),
-+        copies_(isolate->heap()) {}
++        copies_(isolate->heap()),
++        map_shapes_(isolate->heap()) {}
 +
 +  MaybeDirectHandle<Object> Copy(DirectHandle<Object> value) {
 +    if (IsSmi(*value)) return value;
@@ -5694,6 +5892,7 @@ index 00000000..0cdd9a60
 +      holder->set_region_id(region_);
 +      holder->set_keys(empty);
 +      holder->set_values(empty);
++      holder->set_array_length(0);
 +      bytes_ += JSRegionTypedArray::kHeaderSize;
 +      holder->Initialize(store, source->type(),
 +                         Smi::FromInt(static_cast<int>(region_offset)),
@@ -5725,6 +5924,13 @@ index 00000000..0cdd9a60
 +    }
 +
 +    bool is_array = IsJSArray(*source);
++    if (is_array && IsFastElementsKind(source->GetElementsKind())) {
++      return CopyFastArray(Cast<JSArray>(source));
++    }
++    if (!is_array) {
++      int shape = FastShapeOf(source);
++      if (shape >= 0) return CopyFastObject(source, shape);
++    }
 +    DirectHandle<FixedArray> source_keys;
 +    int length;
 +    if (is_array) {
@@ -5782,6 +5988,119 @@ index 00000000..0cdd9a60
 +    return target;
 +  }
 +
++  // The shape for objects of `source`'s map, if its own properties are plain
++  // enumerable data fields with string keys and it has no elements: then
++  // their values can be read by field index, without looking keys up. -1
++  // otherwise.
++  int FastShapeOf(DirectHandle<JSObject> source) {
++    Tagged<Map> map = source->map();
++    if (int* cached = map_shapes_.Find(map)) return *cached;
++    if (map->is_dictionary_map() || source->elements()->ulength().value() != 0) {
++      return -1;
++    }
++    int count = map->NumberOfOwnDescriptors();
++    DirectHandle<FixedArray> keys = factory_->NewFixedArray(count);
++    {
++      DisallowGarbageCollection no_gc;
++      // The allocation above may have moved the map.
++      Tagged<DescriptorArray> descriptors =
++          source->map()->instance_descriptors();
++      for (InternalIndex i : InternalIndex::Range(count)) {
++        PropertyDetails details = descriptors->GetDetails(i);
++        Tagged<Name> key = descriptors->GetKey(i);
++        if (details.kind() != PropertyKind::kData ||
++            details.location() != PropertyLocation::kField ||
++            (details.attributes() & DONT_ENUM) || !IsString(key)) {
++          return -1;
++        }
++        keys->set(i.as_int(), key);
++      }
++    }
++    int shape = ShapeIndexFor(keys);
++    map_shapes_.Insert(source->map(), shape);
++    return shape;
++  }
++
++  MaybeDirectHandle<Object> CopyFastObject(DirectHandle<JSObject> source,
++                                           int shape) {
++    DirectHandle<FixedArray> keys = shapes_[shape].keys;
++    DirectHandle<Map> map = shapes_[shape].map;
++    int length = LengthOf(*keys);
++    DirectHandle<FixedArray> values =
++        factory_->NewFixedArray(length, AllocationType::kSharedOld);
++    bytes_ += JSRegionObject::kHeaderSize + FixedArray::SizeFor(length);
++    DirectHandle<JSRegionObject> target = NewRegionObject(map, keys, values);
++    copies_.Insert(source, static_cast<int>(copied_.size()));
++    copied_.push_back(indirect_handle(target, isolate_));
++
++    DirectHandle<Map> source_map(source->map(), isolate_);
++    DirectHandle<DescriptorArray> descriptors(
++        source_map->instance_descriptors(), isolate_);
++    for (InternalIndex i : InternalIndex::Range(length)) {
++      // Copying a nested value never runs JS on this path, but a getter of a
++      // value copied the slow way could change the source.
++      if (source->map() != *source_map) {
++        THROW_NEW_ERROR(isolate_,
++                        NewTypeError(MessageTemplate::kRegionCannotMove, source));
++      }
++      PropertyDetails details = descriptors->GetDetails(i);
++      DirectHandle<Object> value = JSObject::FastPropertyAt(
++          isolate_, source, details.representation(),
++          FieldIndex::ForDetails(*source_map, details));
++      DirectHandle<Object> copy;
++      ASSIGN_RETURN_ON_EXCEPTION(isolate_, copy, Copy(value));
++      values->set(i.as_int(), *copy);
++    }
++    return target;
++  }
++
++  // Arrays with fast elements are read from their backing store directly.
++  MaybeDirectHandle<Object> CopyFastArray(DirectHandle<JSArray> source) {
++    uint32_t array_length;
++    CHECK(Object::ToArrayLength(source->length(), &array_length));
++    if (array_length > static_cast<uint32_t>(FixedArray::kMaxLength)) {
++      THROW_NEW_ERROR(isolate_,
++                      NewRangeError(MessageTemplate::kInvalidArrayLength));
++    }
++    int length = static_cast<int>(array_length);
++    if (array_map_.is_null()) {
++      array_map_ = indirect_handle(NewRegionMap(), isolate_);
++    }
++    DirectHandle<FixedArray> values =
++        factory_->NewFixedArray(length, AllocationType::kSharedOld);
++    bytes_ += JSRegionObject::kHeaderSize + FixedArray::SizeFor(length);
++    DirectHandle<JSRegionObject> target =
++        NewRegionObject(array_map_, factory_->undefined_value(), values);
++    copies_.Insert(source, static_cast<int>(copied_.size()));
++    copied_.push_back(indirect_handle(target, isolate_));
++
++    ElementsKind kind = source->GetElementsKind();
++    DirectHandle<FixedArrayBase> elements(source->elements(), isolate_);
++    for (int i = 0; i < length; i++) {
++      if (source->elements() != *elements ||
++          source->GetElementsKind() != kind) {
++        THROW_NEW_ERROR(isolate_,
++                        NewTypeError(MessageTemplate::kRegionCannotMove, source));
++      }
++      DirectHandle<Object> value = factory_->undefined_value();
++      if (i < static_cast<int>(elements->ulength().value())) {
++        if (IsDoubleElementsKind(kind)) {
++          Tagged<FixedDoubleArray> doubles = Cast<FixedDoubleArray>(*elements);
++          if (!doubles->is_the_hole(i)) {
++            value = factory_->NewNumber(doubles->get_scalar(i));
++          }
++        } else {
++          Tagged<Object> element = Cast<FixedArray>(*elements)->get(i);
++          if (!IsTheHole(element)) value = direct_handle(element, isolate_);
++        }
++      }
++      DirectHandle<Object> copy;
++      ASSIGN_RETURN_ON_EXCEPTION(isolate_, copy, Copy(value));
++      values->set(i, *copy);
++    }
++    return target;
++  }
++
 +  // Only plain objects and arrays can be copied: anything with another
 +  // prototype, e.g. a class instance, would lose its class in the region.
 +  bool IsPlainObjectOrArray(Tagged<Object> value) const {
@@ -5807,8 +6126,12 @@ index 00000000..0cdd9a60
 +  };
 +
 +  const Shape& ShapeFor(DirectHandle<FixedArray> source_keys) {
-+    for (const Shape& shape : shapes_) {
-+      if (SameKeys(*shape.keys, *source_keys)) return shape;
++    return shapes_[ShapeIndexFor(source_keys)];
++  }
++
++  int ShapeIndexFor(DirectHandle<FixedArray> source_keys) {
++    for (size_t i = 0; i < shapes_.size(); i++) {
++      if (SameKeys(*shapes_[i].keys, *source_keys)) return static_cast<int>(i);
 +    }
 +    int length = LengthOf(*source_keys);
 +    DirectHandle<FixedArray> keys =
@@ -5823,7 +6146,7 @@ index 00000000..0cdd9a60
 +    }
 +    shapes_.push_back({indirect_handle(keys, isolate_),
 +                       indirect_handle(NewRegionMap(), isolate_)});
-+    return shapes_.back();
++    return static_cast<int>(shapes_.size()) - 1;
 +  }
 +
 +  static bool SameKeys(Tagged<FixedArray> keys, Tagged<FixedArray> other) {
@@ -5850,6 +6173,7 @@ index 00000000..0cdd9a60
 +    object->set_region_id(region_);
 +    object->set_keys(*keys);
 +    object->set_values(*values);
++    object->set_array_length(values->ulength().value());
 +    return object;
 +  }
 +
@@ -5876,6 +6200,8 @@ index 00000000..0cdd9a60
 +  Handle<Map> array_map_;
 +  std::vector<Shape> shapes_;
 +  IdentityMap<int, FreeStoreAllocationPolicy> copies_;
++  // Shape index by the map of fast source objects.
++  IdentityMap<int, FreeStoreAllocationPolicy> map_shapes_;
 +  std::vector<Handle<JSRegionObject>> copied_;
 +};
 +
@@ -6052,9 +6378,30 @@ index 00000000..0cdd9a60
 +  DirectHandle<JSRegionObject> object = it->GetHolder<JSRegionObject>();
 +  if (!CheckAccess(isolate, *object, Access::kWrite)) return Nothing<bool>();
 +
-+  int index =
-+      IsArrayLength(isolate, *object, it) ? -1 : FindIndex(object, it);
-+  if (index < 0) {
++  // Arrays grow and shrink: through `length`, and by writing at or past the
++  // end, which is what push() does. Objects keep their shape.
++  if (IsArrayLength(isolate, *object, it)) {
++    uint32_t new_length;
++    if (!Object::ToArrayLength(*value, &new_length)) {
++      RETURN_FAILURE(isolate, kThrowOnError,
++                     NewRangeError(MessageTemplate::kInvalidArrayLength));
++    }
++    if (new_length > static_cast<uint32_t>(FixedArray::kMaxLength)) {
++      RETURN_FAILURE(isolate, kThrowOnError,
++                     NewRangeError(MessageTemplate::kInvalidArrayLength));
++    }
++    EnsureArrayCapacity(isolate, object, new_length);
++    Tagged<FixedArray> values = object->values();
++    for (uint32_t i = new_length; i < object->array_length(); i++) {
++      values->set(i, ReadOnlyRoots(isolate).undefined_value());
++    }
++    object->set_array_length(new_length);
++    return Just(true);
++  }
++  int index = FindIndex(object, it);
++  bool append = index < 0 && object->is_array() && it->IsElement() &&
++                it->index() < static_cast<size_t>(FixedArray::kMaxLength);
++  if (index < 0 && !append) {
 +    RETURN_FAILURE(isolate, kThrowOnError,
 +                   NewTypeError(MessageTemplate::kRegionNotExtensible,
 +                                it->GetName()));
@@ -6068,18 +6415,68 @@ index 00000000..0cdd9a60
 +  ASSIGN_RETURN_ON_EXCEPTION_VALUE(
 +      isolate, shared,
 +      Evacuator(isolate, object->region_id()).Copy(value), Nothing<bool>());
++  if (append) {
++    index = static_cast<int>(it->index());
++    EnsureArrayCapacity(isolate, object, index + 1);
++    object->set_array_length(index + 1);
++  }
 +  object->values()->set(index, *shared);
 +  return Just(true);
++}
++
++// static
++void JSRegionObject::EnsureArrayCapacity(Isolate* isolate,
++                                         DirectHandle<JSRegionObject> array,
++                                         uint32_t capacity) {
++  uint32_t old_capacity = array->values()->ulength().value();
++  if (capacity <= old_capacity) return;
++  // Grow by half, like JSArray, so that a series of push() stays linear.
++  uint32_t new_capacity =
++      std::min(static_cast<uint32_t>(FixedArray::kMaxLength),
++               std::max(capacity, old_capacity + old_capacity / 2 + 16));
++  DirectHandle<FixedArray> values = isolate->factory()->NewFixedArray(
++      new_capacity, AllocationType::kSharedOld);
++  DisallowGarbageCollection no_gc;
++  Tagged<FixedArray> old_values = array->values();
++  for (uint32_t i = 0; i < array->array_length(); i++) {
++    values->set(i, old_values->get(i));
++  }
++  array->set_values(*values);
++  RegionRegistry::AddBytes(array->region_id(),
++                           FixedArray::SizeFor(new_capacity) -
++                               FixedArray::SizeFor(old_capacity));
++}
++
++// static
++Maybe<bool> JSRegionObject::DeleteProperty(LookupIterator* it) {
++  Isolate* isolate = it->isolate();
++  DirectHandle<JSRegionObject> object = it->GetHolder<JSRegionObject>();
++  if (!CheckAccess(isolate, *object, Access::kWrite)) return Nothing<bool>();
++  // An element of an array becomes undefined, which is what pop() and
++  // splice() need; holes are not kept. Properties of objects stay.
++  if (object->is_array() && it->IsElement()) {
++    int index = FindIndex(object, it);
++    if (index >= 0) {
++      object->values()->set(index, ReadOnlyRoots(isolate).undefined_value());
++    }
++    return Just(true);
++  }
++  if (FindIndex(object, it) < 0 && !IsArrayLength(isolate, *object, it)) {
++    return Just(true);
++  }
++  RETURN_FAILURE(isolate, kThrowOnError,
++                 NewTypeError(MessageTemplate::kRegionNotExtensible,
++                              it->GetName()));
 +}
 +
 +}  // namespace internal
 +}  // namespace v8
 diff --git a/src/objects/js-region.h b/src/objects/js-region.h
 new file mode 100644
-index 00000000..9b2a053e
+index 00000000..5421d4c9
 --- /dev/null
 +++ b/src/objects/js-region.h
-@@ -0,0 +1,236 @@
+@@ -0,0 +1,245 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -6221,6 +6618,14 @@ index 00000000..9b2a053e
 +                         WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
 +
 +  inline bool is_array() const;
++  // Length of an array; values() can be longer, so that arrays can grow.
++  inline uint32_t array_length() const;
++  inline void set_array_length(uint32_t value);
++  // Makes room for `capacity` elements, keeping the first array_length().
++  static void EnsureArrayCapacity(Isolate* isolate,
++                                  DirectHandle<JSRegionObject> array,
++                                  uint32_t capacity);
++  static Maybe<bool> DeleteProperty(LookupIterator* it);
 +
 +  // Copies the graph reachable from `value` into `region` and returns the
 +  // copy. Primitives are shared, region objects of the same region are kept.
@@ -6281,6 +6686,7 @@ index 00000000..9b2a053e
 +  TaggedMember<Smi> region_id_;
 +  TaggedMember<Union<FixedArray, Undefined>> keys_;
 +  TaggedMember<FixedArray> values_;
++  TaggedMember<Smi> array_length_;
 +} V8_OBJECT_END;
 +
 +inline constexpr int JSRegionObject::kHeaderSize = sizeof(JSRegionObject);
@@ -6318,10 +6724,10 @@ index 00000000..9b2a053e
 +#endif  // V8_OBJECTS_JS_REGION_H_
 diff --git a/src/objects/js-region.tq b/src/objects/js-region.tq
 new file mode 100644
-index 00000000..35b58e9c
+index 00000000..171de1a5
 --- /dev/null
 +++ b/src/objects/js-region.tq
-@@ -0,0 +1,23 @@
+@@ -0,0 +1,26 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -6333,6 +6739,9 @@ index 00000000..35b58e9c
 +  region_id: Smi;
 +  keys: FixedArray|Undefined;
 +  values: FixedArray;
++  // Length of an array; values() may have room for more elements, which hold
++  // undefined. Unused by objects.
++  array_length: Smi;
 +}
 +
 +// A typed array in a region. Its bytes live outside the heap in a backing
@@ -6346,7 +6755,7 @@ index 00000000..35b58e9c
 +  length: Number;
 +}
 diff --git a/src/objects/keys.cc b/src/objects/keys.cc
-index 341386ce..3d2171b5 100644
+index 341386ce..10d29be8 100644
 --- a/src/objects/keys.cc
 +++ b/src/objects/keys.cc
 @@ -3,6 +3,7 @@
@@ -6368,7 +6777,7 @@ index 341386ce..3d2171b5 100644
 +  if (!JSRegionObject::CheckReadAccess(isolate_, object)) return Nothing<bool>();
 +  if (filter_ & SKIP_STRINGS) return Just(true);
 +  if (object->is_array()) {
-+    uint32_t length = object->values()->ulength().value();
++    uint32_t length = object->array_length();
 +    if (!skip_indices_) {
 +      for (uint32_t index = 0; index < length; index++) {
 +        RETURN_NOTHING_IF_NOT_SUCCESSFUL(AddKey(Smi::FromInt(index)));

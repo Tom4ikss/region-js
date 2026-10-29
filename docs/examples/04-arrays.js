@@ -23,7 +23,17 @@ tryIt('запись по индексу', () => {
   scores[0] = 9;
   return scores[0];
 });
-tryIt('push', () => scores.push(2));
+tryIt('push', () => scores.push(2, 6));
+tryIt('pop', () => scores.pop() + ', длина ' + scores.length);
+tryIt('splice', () => scores.splice(1, 2).join(',') + ' → ' + scores.join(','));
+tryIt('length = 2', () => {
+  scores.length = 2;
+  return scores.join(',');
+});
+tryIt('новое поле у объекта', () => {
+  const user = region.run(() => ({ name: 'Ann' }));
+  user.age = 30;
+});
 
 // Перечисление ключей и JSON работают как у обычных объектов.
 const point = region.run(() => ({ x: 1, y: 2 }));

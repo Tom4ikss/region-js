@@ -130,7 +130,7 @@ id региона: 0 | владелец (isolate): 0</pre></figure>
 </div>
 
 <h2 id="arrays">3. Массивы и методы</h2>
-<p>У объектов региона нет своего прототипа. Когда вы обращаетесь к полю, которого нет в самом объекте, движок ищет его в <code>Array.prototype</code> или <code>Object.prototype</code> того потока, который сейчас читает. Поэтому работают <code>for...of</code>, spread, <code>map</code>, <code>filter</code>, <code>slice</code>, <code>includes</code> и другие методы, которые ничего не меняют в исходном массиве. А методы, меняющие длину (<code>push</code>, <code>pop</code>, <code>splice</code>), бросают ошибку: длина массива тоже часть формы.</p>
+<p>У объектов региона нет своего прототипа. Когда вы обращаетесь к полю, которого нет в самом объекте, движок ищет его в <code>Array.prototype</code> или <code>Object.prototype</code> того потока, который сейчас читает. Поэтому работают <code>for...of</code>, spread, <code>map</code>, <code>filter</code>, <code>slice</code>, <code>includes</code> и другие методы массивов. Массивы региона растут и укорачиваются: <code>push</code>, <code>pop</code>, <code>splice</code>, запись за концом и <code>length = n</code> работают. Лишнее место под элементы массив держит про запас, как обычный массив JS, так что серия <code>push</code> не копирует его каждый раз. Форма объектов, наоборот, фиксирована: новое поле у объекта региона добавить нельзя.</p>
 
 <figure class="example"><div class="ex-head"><span class="file"><a href="examples/04-arrays.js">examples/04-arrays.js</a></span><button class="copy" type="button">Копировать</button></div><pre class="code"><code><span class="tok-comment">// Массивы в регионе: что работает, что нет.</span>
 <span class="tok-keyword">const</span> tryIt = (label, fn) =&gt; {
@@ -157,7 +157,17 @@ id региона: 0 | владелец (isolate): 0</pre></figure>
   scores[<span class="tok-number">0</span>] = <span class="tok-number">9</span>;
   <span class="tok-keyword">return</span> scores[<span class="tok-number">0</span>];
 });
-<span class="tok-fn">tryIt</span>(<span class="tok-string">'push'</span>, () =&gt; scores.<span class="tok-fn">push</span>(<span class="tok-number">2</span>));
+<span class="tok-fn">tryIt</span>(<span class="tok-string">'push'</span>, () =&gt; scores.<span class="tok-fn">push</span>(<span class="tok-number">2</span>, <span class="tok-number">6</span>));
+<span class="tok-fn">tryIt</span>(<span class="tok-string">'pop'</span>, () =&gt; scores.<span class="tok-fn">pop</span>() + <span class="tok-string">', длина '</span> + scores.length);
+<span class="tok-fn">tryIt</span>(<span class="tok-string">'splice'</span>, () =&gt; scores.<span class="tok-fn">splice</span>(<span class="tok-number">1</span>, <span class="tok-number">2</span>).<span class="tok-api">join</span>(<span class="tok-string">','</span>) + <span class="tok-string">' → '</span> + scores.<span class="tok-api">join</span>(<span class="tok-string">','</span>));
+<span class="tok-fn">tryIt</span>(<span class="tok-string">'length = 2'</span>, () =&gt; {
+  scores.length = <span class="tok-number">2</span>;
+  <span class="tok-keyword">return</span> scores.<span class="tok-api">join</span>(<span class="tok-string">','</span>);
+});
+<span class="tok-fn">tryIt</span>(<span class="tok-string">'новое поле у объекта'</span>, () =&gt; {
+  <span class="tok-keyword">const</span> user = region.<span class="tok-api">run</span>(() =&gt; ({ name: <span class="tok-string">'Ann'</span> }));
+  user.age = <span class="tok-number">30</span>;
+});
 
 <span class="tok-comment">// Перечисление ключей и JSON работают как у обычных объектов.</span>
 <span class="tok-keyword">const</span> point = region.<span class="tok-api">run</span>(() =&gt; ({ x: <span class="tok-number">1</span>, y: <span class="tok-number">2</span> }));
@@ -184,12 +194,16 @@ map/filter: 30,40,50
 slice: 1,4
 includes: true
 запись по индексу: 9
-<span class="err">push: TypeError: Cannot add property 5, region objects have a fixed shape</span>
+push: 7
+pop: 6, длина 6
+splice: 1,4 → 9,1,5,2
+length = 2: 9,1
+<span class="err">новое поле у объекта: TypeError: Cannot add property age, region objects have a fixed shape</span>
 Array.isArray: true
 Object.keys: ["x","y"]
 Object.entries: [["x",1],["y",2]]
 for...in: x,y
-JSON.stringify: {"point":{"x":1,"y":2},"scores":[9,1,4,1,5]}
+JSON.stringify: {"point":{"x":1,"y":2},"scores":[9,1]}
 flat: 1,2,3
 spread объекта: {"x":1,"y":2,"z":3}
 деструктуризация: 3</pre></figure>
@@ -633,6 +647,45 @@ view после free: 0
 
 <p><code>region.byteSize</code> показывает, сколько байт региону досталось при копировании: объекты, их массивы, строки и память типизированных массивов. Это приблизительная цифра, она не учитывает то, что записали в регион позже. <code>Region.stats()</code> показывает, сколько регионов живо, сколько освобождено, но ещё не собрано, и сколько байт держат живые.</p>
 
+<h2 id="direct">11. Писать прямо в регион</h2>
+<p><code>region.run(fn)</code> удобен, когда данные уже есть или их проще собрать обычным кодом: всё, что вернёт <code>fn</code>, копируется в регион одним махом. Но иногда хочется складывать данные в регион по ходу работы, не собирая сначала копию. Для этого регион делают текущим через <code>region.enter()</code>, а объекты создают прямо в нём: <code>Region.object({...})</code> и <code>Region.array(...)</code>.</p>
+
+<figure class="example"><div class="ex-head"><span class="file"><a href="examples/35-direct.js">examples/35-direct.js</a></span><button class="copy" type="button">Копировать</button></div><pre class="code"><code><span class="tok-comment">// d8-flags: --module</span>
+<span class="tok-comment">// Писать прямо в регион: enter() делает его текущим, Region.object() и</span>
+<span class="tok-comment">// Region.array() создают объекты в нём, массивы растут.</span>
+<span class="tok-keyword">const</span> region = <span class="tok-keyword">new</span> <span class="tok-api">Region</span>();
+<span class="tok-keyword">let</span> shop;
+{
+  <span class="tok-keyword">using</span> _ = region.<span class="tok-api">enter</span>();
+  shop = <span class="tok-api">Region</span>.<span class="tok-api">object</span>({ orders: <span class="tok-api">Region</span>.<span class="tok-api">array</span>(), total: <span class="tok-number">0</span> });
+  <span class="tok-keyword">for</span> (<span class="tok-keyword">let</span> id = <span class="tok-number">1</span>; id &lt;= <span class="tok-number">3</span>; id++) {
+    shop.orders.<span class="tok-fn">push</span>(<span class="tok-api">Region</span>.<span class="tok-api">object</span>({ id, price: id * <span class="tok-number">10</span>, tags: <span class="tok-api">Region</span>.<span class="tok-api">array</span>(<span class="tok-string">'новый'</span>) }));
+    shop.total += id * <span class="tok-number">10</span>;
+  }
+}
+<span class="tok-fn">print</span>(<span class="tok-string">'заказов:'</span>, shop.orders.length, <span class="tok-string">'| сумма:'</span>, shop.total);
+<span class="tok-fn">print</span>(<span class="tok-string">'всё в одном регионе:'</span>, <span class="tok-api">Region</span>.<span class="tok-keyword">of</span>(shop.orders[<span class="tok-number">2</span>]).<span class="tok-api">id</span> === region.<span class="tok-api">id</span>);
+
+<span class="tok-keyword">try</span> {
+  shop.orders.<span class="tok-fn">push</span>({ id: <span class="tok-number">4</span> });
+} <span class="tok-keyword">catch</span> (e) {
+  <span class="tok-fn">print</span>(<span class="tok-string">'обычный объект:'</span>, e.message);
+}
+
+<span class="tok-comment">// Регион целиком уезжает в задачу и обратно; внутри задачи регион называют явно.</span>
+<span class="tok-keyword">const</span> count = <span class="tok-keyword">await</span> <span class="tok-api">spawn</span>(() =&gt; {
+  <span class="tok-keyword">const</span> r = <span class="tok-api">Region</span>.<span class="tok-keyword">of</span>(shop);
+  shop.orders.<span class="tok-fn">push</span>(r.<span class="tok-api">object</span>({ id: <span class="tok-number">4</span>, price: <span class="tok-number">40</span>, tags: r.<span class="tok-api">array</span>() }));
+  <span class="tok-keyword">return</span> shop.orders.length;
+});
+<span class="tok-fn">print</span>(<span class="tok-string">'после задачи:'</span>, count, <span class="tok-string">'| последний заказ:'</span>, JSON.<span class="tok-fn">stringify</span>(shop.orders[<span class="tok-number">3</span>]));</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8 --module</span></div><pre class="out">заказов: 3 | сумма: 60
+всё в одном регионе: true
+<span class="err">обычный объект: OwnershipError: a region object cannot reference objects outside its region; copy them in with Region.object() or Region.array()</span>
+после задачи: 4 | последний заказ: {"id":4,"price":40,"tags":[]}</pre></figure>
+
+<p><code>enter()</code> возвращает скоуп: объявленный через <code>using</code>, он заканчивается вместе с блоком, и текущим снова становится предыдущий регион. Внутри <code>run(fn)</code> регион тоже текущий. Без текущего региона <code>Region.object()</code> бросает ошибку. У самого региона те же методы есть и без <code>enter</code>: <code>region.object(...)</code> и <code>region.array(...)</code>. В задаче <code>spawn</code> текущего региона нет, ведь туда может приехать несколько регионов сразу. Там удобнее <code>Region.of(obj).object(...)</code>.</p>
+<p>Обычный объект в поле региона по-прежнему не кладётся: регион хранит только свои объекты. Ошибка подскажет обернуть значение в <code>Region.object()</code>. Сам литерал <code>{...}</code> при этом всё ещё создаётся в памяти потока и копируется в регион, только неглубоко и по быстрому пути. Создание объектов прямо в общей памяти, вообще без копии, — следующий шаг (<a href="limits.html#roadmap">планы</a>).</p>
+
 <h2 id="reference">Всё API на одной странице</h2>
 <div class="table-wrap">
 <table>
@@ -652,6 +705,9 @@ view после free: 0
 <tr><td><code>region.frozenHere</code></td><td>Есть ли у текущего потока право разморозить регион.</td></tr>
 <tr><td><code>region.borrow()</code></td><td>Билет читателя. У билета есть <code>release()</code>, и его можно объявить через <code>using</code>.</td></tr>
 <tr><td><code>region.borrowWhile(fn)</code></td><td>Держит билет, пока выполняется <code>fn</code> или пока не выполнится её промис. Возвращает результат <code>fn</code>.</td></tr>
+<tr><td><code>using _ = region.enter()</code></td><td>Сделать регион текущим до конца блока.</td></tr>
+<tr><td><code>Region.object(obj)</code>, <code>Region.array(...items)</code></td><td>Объект или массив в текущем регионе.</td></tr>
+<tr><td><code>region.object(obj)</code>, <code>region.array(...items)</code></td><td>То же в этом регионе, без <code>enter</code>.</td></tr>
 <tr><td><code>region.free()</code>, <code>using region = new Region()</code></td><td>Освободить регион: обращения к нему запрещены навсегда, память типизированных массивов отдаётся сразу, объекты опустошаются при сборке.</td></tr>
 <tr><td><code>region.freed</code>, <code>region.byteSize</code>, <code>Region.stats()</code></td><td>Освобождён ли регион, сколько байт в него скопировано, и сводка по всем регионам процесса.</td></tr>
 <tr><td><code>spawn(fn, ...args)</code></td><td>Запустить функцию в отдельном потоке. См. <a href="spawn.html">следующую страницу</a>.</td></tr>
@@ -672,8 +728,8 @@ view после free: 0
 <tr><td><code>OwnershipError: region N was freed</code></td><td>Обращение к освобождённому региону.</td></tr>
 <tr><td><code>OwnershipError: region N is being moved between isolates</code></td><td>Регион отправлен, но ещё не получен.</td></tr>
 <tr><td><code>OwnershipError: region N is frozen; thaw it before writing</code></td><td>Запись в замороженный регион, в том числе владельцем.</td></tr>
-<tr><td><code>OwnershipError: a region object cannot reference objects outside its region</code></td><td>Запись в поле обычного объекта или объекта из другого региона.</td></tr>
-<tr><td><code>Cannot add property X, region objects have a fixed shape</code></td><td>Новое свойство, <code>push</code>, запись за концом массива, изменение <code>length</code>.</td></tr>
+<tr><td><code>OwnershipError: a region object cannot reference objects outside its region; copy them in with Region.object() or Region.array()</code></td><td>Запись в поле обычного объекта или объекта из другого региона.</td></tr>
+<tr><td><code>Cannot add property X, region objects have a fixed shape</code></td><td>Новое свойство у объекта региона.</td></tr>
 <tr><td><code>… cannot be moved into a region</code></td><td>В <code>run</code> попала функция, <code>Map</code>, <code>Date</code>, <code>DataView</code>, массив поверх <code>SharedArrayBuffer</code>, экземпляр класса, наследник <code>Array</code> и т. п.</td></tr>
 <tr><td><code>Region is not frozen by this isolate</code></td><td><code>thaw()</code> в потоке, у которого нет права разморозить.</td></tr>
 <tr><td><code>Region was frozen by another isolate</code></td><td>Замороженный регион в списке transfer у потока без права разморозить.</td></tr>

@@ -26,7 +26,7 @@ type RegionData =
   | number
   | string
   | RegionTypedArray
-  | readonly RegionData[]
+  | RegionData[]
   | { readonly [key: string]: RegionData };
 
 /** Thrown when a thread touches a region it does not own, writes into a frozen
@@ -63,6 +63,19 @@ declare class Region implements Disposable {
    */
   run<T extends RegionData>(fn: () => T, transfer?: ArrayBuffer[]): T;
 
+  /** Makes the region current until the scope is disposed:
+   * `using _ = region.enter()`. Region.object() and Region.array() then
+   * create objects in it. run() makes the region current too. */
+  enter(): RegionScope;
+  /** A plain object copied into this region. Its shape is fixed. */
+  object<T extends { readonly [key: string]: RegionData }>(value: T): T;
+  /** An array of `items` in this region. Region arrays grow and shrink:
+   * push, pop, splice and length work. */
+  array<T extends RegionData>(...items: T[]): T[];
+  /** The same in the current region (see enter()). */
+  static object<T extends { readonly [key: string]: RegionData }>(value: T): T;
+  static array<T extends RegionData>(...items: T[]): T[];
+
   /** Everyone may read, nobody may write. Detaches the owner's typed array
    * views; readers get immutable views. */
   freeze(): void;
@@ -98,6 +111,11 @@ declare class Region implements Disposable {
   static of(value: object): Region;
   /** Whether `value` is an object of some region; never throws. */
   static isRegionObject(value: unknown): boolean;
+}
+
+interface RegionScope extends Disposable {
+  /** Leaves the scope early; `using` calls it at the end of the block. */
+  exit(): void;
 }
 
 interface RegionBorrow extends Disposable {

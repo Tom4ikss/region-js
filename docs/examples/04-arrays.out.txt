@@ -4,12 +4,16 @@ map/filter: 30,40,50
 slice: 1,4
 includes: true
 запись по индексу: 9
-push: TypeError: Cannot add property 5, region objects have a fixed shape
+push: 7
+pop: 6, длина 6
+splice: 1,4 → 9,1,5,2
+length = 2: 9,1
+новое поле у объекта: TypeError: Cannot add property age, region objects have a fixed shape
 Array.isArray: true
 Object.keys: ["x","y"]
 Object.entries: [["x",1],["y",2]]
 for...in: x,y
-JSON.stringify: {"point":{"x":1,"y":2},"scores":[9,1,4,1,5]}
+JSON.stringify: {"point":{"x":1,"y":2},"scores":[9,1]}
 flat: 1,2,3
 spread объекта: {"x":1,"y":2,"z":3}
 деструктуризация: 3

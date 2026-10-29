@@ -40,7 +40,7 @@
 </div>
 
 <h2 id="arrays">3. Массивы и методы</h2>
-<p>У объектов региона нет своего прототипа. Когда вы обращаетесь к полю, которого нет в самом объекте, движок ищет его в <code>Array.prototype</code> или <code>Object.prototype</code> того потока, который сейчас читает. Поэтому работают <code>for...of</code>, spread, <code>map</code>, <code>filter</code>, <code>slice</code>, <code>includes</code> и другие методы, которые ничего не меняют в исходном массиве. А методы, меняющие длину (<code>push</code>, <code>pop</code>, <code>splice</code>), бросают ошибку: длина массива тоже часть формы.</p>
+<p>У объектов региона нет своего прототипа. Когда вы обращаетесь к полю, которого нет в самом объекте, движок ищет его в <code>Array.prototype</code> или <code>Object.prototype</code> того потока, который сейчас читает. Поэтому работают <code>for...of</code>, spread, <code>map</code>, <code>filter</code>, <code>slice</code>, <code>includes</code> и другие методы массивов. Массивы региона растут и укорачиваются: <code>push</code>, <code>pop</code>, <code>splice</code>, запись за концом и <code>length = n</code> работают. Лишнее место под элементы массив держит про запас, как обычный массив JS, так что серия <code>push</code> не копирует его каждый раз. Форма объектов, наоборот, фиксирована: новое поле у объекта региона добавить нельзя.</p>
 
 <!--ex:04-arrays.js-->
 
@@ -128,6 +128,14 @@
 
 <p><code>region.byteSize</code> показывает, сколько байт региону досталось при копировании: объекты, их массивы, строки и память типизированных массивов. Это приблизительная цифра, она не учитывает то, что записали в регион позже. <code>Region.stats()</code> показывает, сколько регионов живо, сколько освобождено, но ещё не собрано, и сколько байт держат живые.</p>
 
+<h2 id="direct">11. Писать прямо в регион</h2>
+<p><code>region.run(fn)</code> удобен, когда данные уже есть или их проще собрать обычным кодом: всё, что вернёт <code>fn</code>, копируется в регион одним махом. Но иногда хочется складывать данные в регион по ходу работы, не собирая сначала копию. Для этого регион делают текущим через <code>region.enter()</code>, а объекты создают прямо в нём: <code>Region.object({...})</code> и <code>Region.array(...)</code>.</p>
+
+<!--ex:35-direct.js-->
+
+<p><code>enter()</code> возвращает скоуп: объявленный через <code>using</code>, он заканчивается вместе с блоком, и текущим снова становится предыдущий регион. Внутри <code>run(fn)</code> регион тоже текущий. Без текущего региона <code>Region.object()</code> бросает ошибку. У самого региона те же методы есть и без <code>enter</code>: <code>region.object(...)</code> и <code>region.array(...)</code>. В задаче <code>spawn</code> текущего региона нет, ведь туда может приехать несколько регионов сразу. Там удобнее <code>Region.of(obj).object(...)</code>.</p>
+<p>Обычный объект в поле региона по-прежнему не кладётся: регион хранит только свои объекты. Ошибка подскажет обернуть значение в <code>Region.object()</code>. Сам литерал <code>{...}</code> при этом всё ещё создаётся в памяти потока и копируется в регион, только неглубоко и по быстрому пути. Создание объектов прямо в общей памяти, вообще без копии, — следующий шаг (<a href="limits.html#roadmap">планы</a>).</p>
+
 <h2 id="reference">Всё API на одной странице</h2>
 <div class="table-wrap">
 <table>
@@ -147,6 +155,9 @@
 <tr><td><code>region.frozenHere</code></td><td>Есть ли у текущего потока право разморозить регион.</td></tr>
 <tr><td><code>region.borrow()</code></td><td>Билет читателя. У билета есть <code>release()</code>, и его можно объявить через <code>using</code>.</td></tr>
 <tr><td><code>region.borrowWhile(fn)</code></td><td>Держит билет, пока выполняется <code>fn</code> или пока не выполнится её промис. Возвращает результат <code>fn</code>.</td></tr>
+<tr><td><code>using _ = region.enter()</code></td><td>Сделать регион текущим до конца блока.</td></tr>
+<tr><td><code>Region.object(obj)</code>, <code>Region.array(...items)</code></td><td>Объект или массив в текущем регионе.</td></tr>
+<tr><td><code>region.object(obj)</code>, <code>region.array(...items)</code></td><td>То же в этом регионе, без <code>enter</code>.</td></tr>
 <tr><td><code>region.free()</code>, <code>using region = new Region()</code></td><td>Освободить регион: обращения к нему запрещены навсегда, память типизированных массивов отдаётся сразу, объекты опустошаются при сборке.</td></tr>
 <tr><td><code>region.freed</code>, <code>region.byteSize</code>, <code>Region.stats()</code></td><td>Освобождён ли регион, сколько байт в него скопировано, и сводка по всем регионам процесса.</td></tr>
 <tr><td><code>spawn(fn, ...args)</code></td><td>Запустить функцию в отдельном потоке. См. <a href="spawn.html">следующую страницу</a>.</td></tr>
@@ -167,8 +178,8 @@
 <tr><td><code>OwnershipError: region N was freed</code></td><td>Обращение к освобождённому региону.</td></tr>
 <tr><td><code>OwnershipError: region N is being moved between isolates</code></td><td>Регион отправлен, но ещё не получен.</td></tr>
 <tr><td><code>OwnershipError: region N is frozen; thaw it before writing</code></td><td>Запись в замороженный регион, в том числе владельцем.</td></tr>
-<tr><td><code>OwnershipError: a region object cannot reference objects outside its region</code></td><td>Запись в поле обычного объекта или объекта из другого региона.</td></tr>
-<tr><td><code>Cannot add property X, region objects have a fixed shape</code></td><td>Новое свойство, <code>push</code>, запись за концом массива, изменение <code>length</code>.</td></tr>
+<tr><td><code>OwnershipError: a region object cannot reference objects outside its region; copy them in with Region.object() or Region.array()</code></td><td>Запись в поле обычного объекта или объекта из другого региона.</td></tr>
+<tr><td><code>Cannot add property X, region objects have a fixed shape</code></td><td>Новое свойство у объекта региона.</td></tr>
 <tr><td><code>… cannot be moved into a region</code></td><td>В <code>run</code> попала функция, <code>Map</code>, <code>Date</code>, <code>DataView</code>, массив поверх <code>SharedArrayBuffer</code>, экземпляр класса, наследник <code>Array</code> и т. п.</td></tr>
 <tr><td><code>Region is not frozen by this isolate</code></td><td><code>thaw()</code> в потоке, у которого нет права разморозить.</td></tr>
 <tr><td><code>Region was frozen by another isolate</code></td><td>Замороженный регион в списке transfer у потока без права разморозить.</td></tr>

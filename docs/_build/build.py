@@ -95,7 +95,7 @@ API_METHODS = {'run', 'freeze', 'thaw', 'borrow', 'release', 'join', 'of', 'post
                'getMessage', 'terminate', 'frozen', 'readers', 'owner', 'id', 'poolSize',
                'frozenHere', 'borrowWhile', 'idle', 'send', 'recv', 'sendSync',
                'recvSync', 'select', 'selectSync', 'close', 'free', 'freed', 'byteSize',
-               'stats'}
+               'stats', 'enter', 'object', 'array'}
 
 TOKEN = re.compile(r'''
    (?P<comment>//[^\n]*|/\*[\s\S]*?\*/)
