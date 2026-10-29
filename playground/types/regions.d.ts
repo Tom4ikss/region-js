@@ -191,8 +191,9 @@ interface D8WorkerOptions {
 /** d8's Worker. Unlike the browser one it has a blocking getMessage(). */
 declare class Worker {
   constructor(source: string | (() => void), options?: D8WorkerOptions);
-  /** Regions and ArrayBuffers in `transfer` move to the worker. */
-  postMessage(message: unknown, transfer?: (Region | ArrayBuffer)[]): void;
+  /** Regions (or any object of a region) and ArrayBuffers in `transfer` move
+   * to the worker. */
+  postMessage(message: unknown, transfer?: (Region | ArrayBuffer | object)[]): void;
   /** Blocks until the worker posts a message (d8 only). */
   getMessage(): any;
   onmessage: ((event: { data: any }) => void) | null;
@@ -200,6 +201,6 @@ declare class Worker {
 }
 
 /** Inside a worker: send a message to the parent. */
-declare function postMessage(message: unknown, transfer?: (Region | ArrayBuffer)[]): void;
+declare function postMessage(message: unknown, transfer?: (Region | ArrayBuffer | object)[]): void;
 /** Inside a worker: messages from the parent. */
 declare var onmessage: ((event: { data: any }) => void) | null;

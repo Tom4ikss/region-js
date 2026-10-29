@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
-<meta name="description" content="Region, region.run, правила чтения и записи, переезд через postMessage, Region.of, freeze, borrow, рассылка и типизированные массивы. Каждый шаг с запущенным примером.">
+<meta name="description" content="Region, region.run, правила чтения и записи, переезд через postMessage, Region.of, freeze, borrow, рассылка, типизированные массивы и free. Каждый шаг с запущенным примером.">
 <title>API шаг за шагом · Регионы владения в V8</title>
 <link rel="stylesheet" href="assets/style.css">
 </head>
@@ -36,7 +36,7 @@
 <article class="content">
 <p class="eyebrow">Глава 3</p>
 <h1>API шаг за шагом</h1>
-<p class="lead">Здесь всё, что есть в прототипе, кроме <code>spawn</code> (ему отдана <a href="spawn.html">отдельная страница</a>). Каждый пример — файл из папки <code>examples/</code>, запущенный в собранном d8. Под кодом — его настоящий вывод.</p>
+<p class="lead">Здесь всё, что есть в прототипе, кроме <code>spawn</code> и каналов: им отданы отдельные страницы, <a href="spawn.html">про spawn</a> и <a href="channels.html">про каналы</a>. Каждый пример — файл из папки <code>examples/</code>, запущенный в собранном d8. Под кодом — его настоящий вывод.</p>
 
 <div class="callout aside">
 <span class="callout-title">Как читать примеры</span>
@@ -303,7 +303,7 @@ worker.<span class="tok-api">terminate</span>();</code></pre><div class="out-hea
 <p><code>postMessage</code> со списком transfer — самый низкий уровень, на нём построено всё остальное. Обычно удобнее <a href="spawn.html"><code>spawn</code></a> и <a href="channels.html">каналы</a>: они перемещают регионы сами, без списка transfer, а <code>spawn</code> к тому же идёт мимо <code>postMessage</code>, через свою очередь, и обходится дешевле.</p>
 
 <h2 id="of">6. Вернуть регион обратно: <code>Region.of</code></h2>
-<p>В воркере нет переменной <code>region</code>, есть только полученные объекты. <code>Region.of(obj)</code> находит регион по любому его объекту. С ним воркер может вернуть данные тем же способом.</p>
+<p>В воркере нет переменной <code>region</code>, есть только полученные объекты. <code>Region.of(obj)</code> находит регион по любому его объекту. С ним воркер может вернуть данные тем же способом. Для списка transfer хватит и самого объекта (<a href="#move">раздел 5</a>), а <code>Region.of</code> нужен, чтобы вызвать методы региона: <code>borrow()</code>, <code>freeze()</code>, <code>free()</code>. Проверить, лежит ли значение в регионе, не ловя ошибку, можно через <code>Region.isRegionObject(value)</code>.</p>
 
 <figure class="example"><div class="ex-head"><span class="file"><a href="examples/07-ping-pong.js">examples/07-ping-pong.js</a></span><button class="copy" type="button">Копировать</button></div><pre class="code"><code><span class="tok-comment">// Отправить объект туда и обратно. Region.of(obj) находит регион объекта.</span>
 <span class="tok-keyword">const</span> region = <span class="tok-keyword">new</span> <span class="tok-api">Region</span>();
@@ -489,7 +489,7 @@ thaw с читателем: Region is still borrowed by 1 reader(s)
 разморожено, apple = 55
 borrow незамороженного: Region must be frozen to borrow it</pre></figure>
 
-<p>Брать билет можно в любом потоке, в том числе в воркере: <code>Region.of(obj).borrow()</code>. Читать замороженный регион можно и без билета. Билет нужен как гарантия, что регион не разморозят посреди вашего чтения.</p>
+<p>Брать билет можно в любом потоке, в том числе в воркере: <code>Region.of(obj).borrow()</code>. Читать обычные поля замороженного региона можно и без билета, а типизированные массивы — нет (<a href="#typed-borrow">раздел 9</a>). Билет нужен как гарантия, что регион не разморозят посреди вашего чтения.</p>
 <p><code>region.borrowWhile(fn)</code> берёт билет, вызывает <code>fn</code> и сдаёт билет, когда <code>fn</code> закончилась. Если <code>fn</code> вернула промис, билет сдаётся, когда промис выполнится или отклонится. <code>borrowWhile</code> возвращает то, что вернула <code>fn</code> (для асинхронной функции — промис с её результатом). Внутри задач <code>spawn</code> для асинхронной работы нужен именно он, потому что обычный билет живёт не дольше задачи (<a href="spawn.html#borrow">подробнее на странице про spawn</a>).</p>
 
 <h2 id="typed">9. Типизированные массивы</h2>
@@ -643,7 +643,8 @@ view после free: 0
 <tr><td><code>region.run(fn, [buffer])</code></td><td>То же, но память типизированных массивов с этими <code>ArrayBuffer</code> переезжает без копии, а исходные буферы отсоединяются.</td></tr>
 <tr><td><code>region.id</code>, <code>region.owner</code></td><td>Номер региона и номер потока-владельца.</td></tr>
 <tr><td><code>Region.of(obj)</code></td><td>Регион, в котором лежит <code>obj</code>. Для обычного объекта — ошибка.</td></tr>
-<tr><td><code>worker.postMessage(msg, [region])</code></td><td>Переезд: получатель становится владельцем, отправитель теряет доступ.</td></tr>
+<tr><td><code>Region.isRegionObject(value)</code></td><td>Лежит ли значение в каком-нибудь регионе. Ошибок не бросает.</td></tr>
+<tr><td><code>worker.postMessage(msg, [region])</code></td><td>Переезд: получатель становится владельцем, отправитель теряет доступ. Вместо <code>region</code> можно указать любой его объект.</td></tr>
 <tr><td><code>worker.postMessage(msg)</code></td><td>Для объектов замороженного региона — рассылка без копии.</td></tr>
 <tr><td><code>worker.postMessage(msg, [frozenRegion])</code></td><td>Для замороженного региона — передать право разморозить.</td></tr>
 <tr><td><code>region.freeze()</code>, <code>region.thaw()</code></td><td>Заморозить (читают все, не пишет никто) и разморозить (только тот, кто заморозил или получил право, и только без читателей).</td></tr>
@@ -656,6 +657,7 @@ view после free: 0
 <tr><td><code>spawn(fn, ...args)</code></td><td>Запустить функцию в отдельном потоке. См. <a href="spawn.html">следующую страницу</a>.</td></tr>
 <tr><td><code>spawn.poolSize</code></td><td>Сколько воркеров в пуле <code>spawn</code>, по умолчанию 4.</td></tr>
 <tr><td><code>spawn.idle()</code></td><td>Промис, который выполнится, когда закончатся все задачи, запущенные этим потоком.</td></tr>
+<tr><td><code>new Channel(capacity)</code></td><td>Канал между потоками: <code>send</code>, <code>recv</code>, <code>close</code>, <code>Channel.select</code> и блокирующие версии. См. <a href="channels.html">страницу про каналы</a>.</td></tr>
 </tbody>
 </table>
 </div>

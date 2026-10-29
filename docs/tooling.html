@@ -76,7 +76,7 @@
 </div>
 
 <h2 id="types">Типы</h2>
-<p>Файл <code>types/regions.d.ts</code> описывает <code>Region</code>, <code>spawn</code> и глобальные функции d8 (<code>print</code>, <code>Worker</code> с его <code>getMessage</code>). Встроенный в VS Code TypeScript читает его через <code>jsconfig.json</code>, ставить ничего не нужно. Это даёт автодополнение и проверку того, что кладётся в регион: результат <code>run</code> и аргументы <code>spawn</code> должны быть данными (примитивы, простые объекты, массивы, типизированные массивы).</p>
+<p>Файл <code>types/regions.d.ts</code> описывает <code>Region</code>, <code>spawn</code>, <code>Channel</code> и глобальные функции d8 (<code>print</code>, <code>Worker</code> с его <code>getMessage</code>). Встроенный в VS Code TypeScript читает его через <code>jsconfig.json</code>, ставить ничего не нужно. Это даёт автодополнение и проверку того, что кладётся в регион: результат <code>run</code> и аргументы <code>spawn</code> должны быть данными (примитивы, простые объекты, массивы, типизированные массивы).</p>
 <div class="versus">
 <figure class="snippet bad"><div class="snippet-head"><span class="mark" aria-hidden="true"></span>Плохо</div><pre class="code"><code>region.<span class="tok-api">run</span>(() =&gt; <span class="tok-keyword">new</span> <span class="tok-fn">Map</span>());
 region.<span class="tok-fn">frezee</span>();
@@ -87,7 +87,7 @@ state.total = <span class="tok-number">1</span>;</code></pre></figure>
 error TS2551: Property 'frezee' does not exist on type 'Region'. Did you mean 'freeze'?
 error TS2339: Property 'total' does not exist on type '{ count: number; }'.</pre>
 <p>Последняя ошибка — та же фиксированная форма, что и в d8 (<a href="guide.html#rules">раздел 2 про API</a>): тип результата <code>run</code> знает только поля, которые были при создании.</p>
-<p>Чего типы не знают. Типизированный массив поверх <code>SharedArrayBuffer</code> для них такой же, как любой другой, а d8 его отклонит. В текущей версии <code>regions.d.ts</code> ещё нет <code>region.frozenHere</code> и <code>spawn.idle()</code>: редактор подчеркнёт их как несуществующие, хотя в d8 они работают.</p>
+<p>Чего типы не знают. Типизированный массив поверх <code>SharedArrayBuffer</code> для них такой же, как любой другой, а d8 его отклонит. Что можно отправить в канал, типы не проверяют: у <code>Channel</code> без параметра тип значения <code>any</code>.</p>
 
 <h2 id="biome">Biome</h2>
 <p>Правила Biome лежат в <code>rules/*.grit</code> и подключены в <code>biome.json</code>. Они ищут шаблоны в коде и не следят за порядком выполнения. Четыре правила повторяют проверки, которые <code>spawn</code> делает при вызове, только раньше, в редакторе.</p>

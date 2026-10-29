@@ -142,7 +142,7 @@
 <span class="callout-title">Ограничения spawn</span>
 <ul>
   <li>Классы не поддерживаются, <code>super</code>, <code>new.target</code> и <code>import</code> в колбэке не работают.</li>
-  <li>Если воркер завершился, так и не ответив, <code>await</code> будет ждать вечно: тайм-аута нет.</li>
+  <li>Если воркер пула умер посреди задачи, её <code>join()</code> и <code>await</code> заканчиваются ошибкой <code>spawn() worker exited without a result</code>. Тайм-аута у задач нет: задача, которая работает бесконечно, ждётся бесконечно.</li>
   <li>Как и всё остальное, <code>spawn</code> есть только в d8 с флагом <code>--harmony-regions</code>.</li>
 </ul>
 </div>
