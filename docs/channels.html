@@ -232,8 +232,8 @@ ping.<span class="tok-api">close</span>();
 <span class="tok-keyword">const</span> perMessage = (performance.<span class="tok-fn">now</span>() - t) * <span class="tok-number">1000</span> / N;
 worker.<span class="tok-api">terminate</span>();
 <span class="tok-fn">print</span>(<span class="tok-string">'канал, круг:'</span>, perTrip.<span class="tok-fn">toFixed</span>(<span class="tok-number">1</span>), <span class="tok-string">'µs'</span>);
-<span class="tok-fn">print</span>(<span class="tok-string">'postMessage + getMessage, круг:'</span>, perMessage.<span class="tok-fn">toFixed</span>(<span class="tok-number">1</span>), <span class="tok-string">'µs'</span>);</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8 --module; время у вас будет другим</span></div><pre class="out">канал, круг: 5.2 µs
-postMessage + getMessage, круг: 3.1 µs</pre></figure>
+<span class="tok-fn">print</span>(<span class="tok-string">'postMessage + getMessage, круг:'</span>, perMessage.<span class="tok-fn">toFixed</span>(<span class="tok-number">1</span>), <span class="tok-string">'µs'</span>);</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8 --module; время у вас будет другим</span></div><pre class="out">канал, круг: 5.0 µs
+postMessage + getMessage, круг: 3.0 µs</pre></figure>
 
 <p>Это единицы микросекунд, а у горутин в Go — доли микросекунды. Если гонять через канал по одному числу, больше 200 000 значений в секунду не выйдет, и в горячем цикле пересылка легко займёт больше времени, чем сама работа. Каналы подходят, чтобы передавать порции работы: заказ, кусок файла, пачку строк. Объединяйте мелкие значения в пачки, как и для <code>spawn</code> (<a href="practices.html#batch">подробнее</a>).</p>
 <nav class="pager" aria-label="Соседние страницы"><a class="prev" href="spawn.html"><span>← Назад</span>spawn: задачи в потоках</a><a class="next" href="practices.html"><span>Дальше →</span>Как делать и как не делать</a></nav>

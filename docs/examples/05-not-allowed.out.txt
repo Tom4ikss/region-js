@@ -2,7 +2,7 @@
 Map: TypeError: #<Map> cannot be moved into a region
 Date: TypeError: [object Date] cannot be moved into a region
 BigInt: TypeError: 10 cannot be shared
-объект другого региона: TypeError: OwnershipError: a region object cannot reference objects outside its region
+объект другого региона: TypeError: OwnershipError: a region object cannot reference objects outside its region; copy them in with Region.object() or Region.array()
 Uint8Array: ok
 ArrayBuffer: TypeError: #<ArrayBuffer> cannot be moved into a region
 DataView: TypeError: #<DataView> cannot be moved into a region

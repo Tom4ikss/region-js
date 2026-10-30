@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
-<meta name="description" content="Region, region.run, правила чтения и записи, переезд через postMessage, Region.of, freeze, borrow, рассылка, типизированные массивы и free. Каждый шаг с запущенным примером.">
+<meta name="description" content="Region, region.run, правила чтения и записи, переезд через postMessage, Region.of, freeze, borrow, рассылка, типизированные массивы, free, запись прямо в регион и литералы #{}. Каждый шаг с запущенным примером.">
 <title>API шаг за шагом · Регионы владения в V8</title>
 <link rel="stylesheet" href="assets/style.css">
 </head>
@@ -46,7 +46,7 @@
 </div>
 
 <h2 id="region">1. Создать регион</h2>
-<p><code>new Region()</code> создаёт пустой регион, владелец — текущий поток. Положить в него данные можно через <code>region.run(fn)</code>: функция выполняется как обычно, а то, что она вернула, копируется в регион вместе со всем, на что ссылается. <code>run</code> возвращает уже копию, которая лежит в регионе.</p>
+<p><code>new Region()</code> создаёт пустой регион, владелец — текущий поток. Положить в него данные можно через <code>region.run(fn)</code>: функция выполняется как обычно, а то, что она вернула, копируется в регион вместе со всем, на что ссылается. <code>run</code> возвращает уже копию, которая лежит в регионе. Второй способ — создавать объекты сразу в регионе через <code>Region.object()</code> и <code>Region.array()</code>, о нём <a href="#direct">раздел 11</a>.</p>
 
 <figure class="example"><div class="ex-head"><span class="file"><a href="examples/01-first-region.js">examples/01-first-region.js</a></span><button class="copy" type="button">Копировать</button></div><pre class="code"><code><span class="tok-comment">// Первый регион: создать, прочитать, изменить.</span>
 <span class="tok-keyword">const</span> region = <span class="tok-keyword">new</span> <span class="tok-api">Region</span>();
@@ -82,7 +82,7 @@ id региона: 0 | владелец (isolate): 0</pre></figure>
 <ul>
   <li>в поле можно записать число, строку, <code>true</code>/<code>false</code>, <code>null</code>, <code>undefined</code> или объект <em>из того же региона</em>;</li>
   <li>обычный объект из своего потока записать нельзя: он живёт вне региона, и другой поток не смог бы его прочитать. Исключение — типизированный массив: он копируется в регион (<a href="#typed">раздел 9</a>);</li>
-  <li>набор полей фиксирован: добавить новое свойство нельзя. Отсутствующее поле читается как <code>undefined</code>.</li>
+  <li>набор полей у объекта фиксирован: добавить новое свойство нельзя. Отсутствующее поле читается как <code>undefined</code>. Массивы при этом растут и укорачиваются (<a href="#arrays">раздел 3</a>).</li>
 </ul>
 
 <figure class="example"><div class="ex-head"><span class="file"><a href="examples/03-read-write.js">examples/03-read-write.js</a></span><button class="copy" type="button">Копировать</button></div><pre class="code"><code><span class="tok-comment">// Правила чтения и записи для владельца.</span>
@@ -117,7 +117,7 @@ id региона: 0 | владелец (isolate): 0</pre></figure>
 <span class="tok-fn">tryIt</span>(<span class="tok-string">'цикл сохранился'</span>, () =&gt; graph.a.peer.peer === graph.a);</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8</span></div><pre class="out">число: 42
 строка: позвонить до 18:00
 объект из того же региона: 2
-<span class="err">обычный локальный объект: TypeError: OwnershipError: a region object cannot reference objects outside its region</span>
+<span class="err">обычный локальный объект: TypeError: OwnershipError: a region object cannot reference objects outside its region; copy them in with Region.object() or Region.array()</span>
 <span class="err">новое свойство: TypeError: Cannot add property discount, region objects have a fixed shape</span>
 чтение несуществующего: undefined
 цикл сохранился: true</pre></figure>
@@ -255,7 +255,7 @@ spread объекта: {"x":1,"y":2,"z":3}
 <span class="err">Map: TypeError: #&lt;Map&gt; cannot be moved into a region</span>
 <span class="err">Date: TypeError: [object Date] cannot be moved into a region</span>
 <span class="err">BigInt: TypeError: 10 cannot be shared</span>
-<span class="err">объект другого региона: TypeError: OwnershipError: a region object cannot reference objects outside its region</span>
+<span class="err">объект другого региона: TypeError: OwnershipError: a region object cannot reference objects outside its region; copy them in with Region.object() or Region.array()</span>
 Uint8Array: ok
 <span class="err">ArrayBuffer: TypeError: #&lt;ArrayBuffer&gt; cannot be moved into a region</span>
 <span class="err">DataView: TypeError: #&lt;DataView&gt; cannot be moved into a region</span>
@@ -355,7 +355,7 @@ worker.<span class="tok-api">terminate</span>();</code></pre><div class="out-hea
 }
 worker.<span class="tok-api">terminate</span>();</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8; время у вас будет другим</span></div><pre class="out">тот же самый объект: true
 ходов: 2000 | последний писал: воркер
-один круг туда-обратно: 10.7 µs
+один круг туда-обратно: 10.2 µs
 Region.of для обычного объекта: Region.of() expects an object from a region</pre></figure>
 
 <p>Тысяча кругов «туда и обратно», и в конце в руках тот же самый объект: <code>current === state</code>. Один круг — два переезда и две пересылки сообщения — занимает около 10–11 микросекунд, от запуска к запуску по-разному.</p>
@@ -543,7 +543,7 @@ start = performance.<span class="tok-fn">now</span>();
 тот же объект? false | те же байты? true
 это обычный Uint8Array: true 4
 новая длина: 16
-8 МБ копией: 0.49 ms, через transfer: 0.04 ms
+8 МБ копией: 0.44 ms, через transfer: 0.03 ms
 исходный после transfer: 0 | в регионе: 1000000 1000000</pre></figure>
 
 <ul>
@@ -638,14 +638,14 @@ region.<span class="tok-api">free</span>();
 } <span class="tok-keyword">catch</span> (e) {
   <span class="tok-fn">print</span>(<span class="tok-string">'после блока using:'</span>, e.message);
 }
-<span class="tok-fn">print</span>(<span class="tok-string">'живых регионов:'</span>, <span class="tok-api">Region</span>.<span class="tok-api">stats</span>().regions, <span class="tok-string">'| освобождённых:'</span>, <span class="tok-api">Region</span>.<span class="tok-api">stats</span>().<span class="tok-api">freed</span>);</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8 --module --expose-gc</span></div><pre class="out">байт в регионе: 8828792
+<span class="tok-fn">print</span>(<span class="tok-string">'живых регионов:'</span>, <span class="tok-api">Region</span>.<span class="tok-api">stats</span>().regions, <span class="tok-string">'| освобождённых:'</span>, <span class="tok-api">Region</span>.<span class="tok-api">stats</span>().<span class="tok-api">freed</span>);</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8 --module --expose-gc</span></div><pre class="out">байт в регионе: 8868772
 освобождён: true | байт после: 0
 view после free: 0
 <span class="err">обращение после free: OwnershipError: region 0 was freed</span>
 <span class="err">после блока using: OwnershipError: region 1 was freed</span>
 живых регионов: 0 | освобождённых: 2</pre></figure>
 
-<p><code>region.byteSize</code> показывает, сколько байт региону досталось при копировании: объекты, их массивы, строки и память типизированных массивов. Это приблизительная цифра, она не учитывает то, что записали в регион позже. <code>Region.stats()</code> показывает, сколько регионов живо, сколько освобождено, но ещё не собрано, и сколько байт держат живые.</p>
+<p><code>region.byteSize</code> показывает, сколько байт региону досталось при копировании: объекты, их массивы, строки и память типизированных массивов. Это приблизительная цифра: объекты из <code>Region.object()</code> и <code>Region.array()</code> и рост массивов в неё входят, а строки, записанные в поля позже, нет. <code>Region.stats()</code> показывает, сколько регионов живо, сколько освобождено, но ещё не собрано, и сколько байт держат живые.</p>
 
 <h2 id="direct">11. Писать прямо в регион</h2>
 <p><code>region.run(fn)</code> удобен, когда данные уже есть или их проще собрать обычным кодом: всё, что вернёт <code>fn</code>, копируется в регион одним махом. Но иногда хочется складывать данные в регион по ходу работы, не собирая сначала копию. Для этого регион делают текущим через <code>region.enter()</code>, а объекты создают прямо в нём: <code>Region.object({...})</code> и <code>Region.array(...)</code>.</p>
@@ -684,7 +684,79 @@ view после free: 0
 после задачи: 4 | последний заказ: {"id":4,"price":40,"tags":[]}</pre></figure>
 
 <p><code>enter()</code> возвращает скоуп: объявленный через <code>using</code>, он заканчивается вместе с блоком, и текущим снова становится предыдущий регион. Внутри <code>run(fn)</code> регион тоже текущий. Без текущего региона <code>Region.object()</code> бросает ошибку. У самого региона те же методы есть и без <code>enter</code>: <code>region.object(...)</code> и <code>region.array(...)</code>. В задаче <code>spawn</code> текущего региона нет, ведь туда может приехать несколько регионов сразу. Там удобнее <code>Region.of(obj).object(...)</code>.</p>
-<p>Обычный объект в поле региона по-прежнему не кладётся: регион хранит только свои объекты. Ошибка подскажет обернуть значение в <code>Region.object()</code>. Сам литерал <code>{...}</code> при этом всё ещё создаётся в памяти потока и копируется в регион, только неглубоко и по быстрому пути. Создание объектов прямо в общей памяти, вообще без копии, — следующий шаг (<a href="limits.html#roadmap">планы</a>).</p>
+<p>Обычный объект в поле региона по-прежнему не кладётся: регион хранит только свои объекты. Ошибка подскажет обернуть значение в <code>Region.object()</code>. Сам литерал <code>{...}</code> при этом всё ещё создаётся в памяти потока и копируется в регион по быстрому пути. Объекты, которые уже лежат в регионе, заново не копируются. Поэтому, если вложенные значения уже созданы через <code>Region.object()</code> и <code>Region.array()</code>, копируется только сам литерал. Обычные объекты внутри литерала копируются вместе с ним. Создавать объекты прямо в общей памяти, вообще без копии, умеют литералы <code>#{}</code> и <code>#[]</code> (<a href="#literals">раздел 12</a>).</p>
+<p>Для больших объёмов этот способ медленнее <code>run</code>. Каждый вызов <code>Region.object()</code> — отдельная копия, и 200 000 объектов, созданных по одному, создаются в 2,4 раза дольше, чем через один <code>run</code>: 475 мс против 198. Читаются они потом так же быстро, потому что объекты с одинаковыми ключами получают одну форму, как бы их ни создали (<a href="practices.html#build">практика 12</a>). Поэтому <code>Region.object()</code> хорош, чтобы добавлять данные в регион по ходу работы. Большой набор, который известен сразу, быстрее собрать обычными объектами и скопировать одним <code>run</code>.</p>
+
+<h2 id="literals">12. Литералы <code>#{}</code> и <code>#[]</code></h2>
+<p><code>Region.object({...})</code> всё ещё создаёт литерал в куче потока и копирует его в регион. Литералы <code>#{...}</code> и <code>#[...]</code> создают объект или массив сразу в текущем регионе, без промежуточного объекта и без копии. Они включаются отдельным флагом <code>--harmony-region-literals</code>, который сам включает и <code>--harmony-regions</code>. Без флага <code>#{</code> — синтаксическая ошибка. Пример ниже запущен с этим флагом.</p>
+
+<figure class="example"><div class="ex-head"><span class="file"><a href="examples/37-literals.js">examples/37-literals.js</a></span><button class="copy" type="button">Копировать</button></div><pre class="code"><code><span class="tok-comment">// d8-flags: --module --harmony-region-literals</span>
+<span class="tok-comment">// Литералы #{} и #[]: объект или массив создаётся сразу в текущем регионе, без копии.</span>
+<span class="tok-keyword">const</span> region = <span class="tok-keyword">new</span> <span class="tok-api">Region</span>();
+<span class="tok-keyword">let</span> shop;
+{
+  <span class="tok-keyword">using</span> _ = region.<span class="tok-api">enter</span>();
+  <span class="tok-keyword">const</span> currency = <span class="tok-string">'EUR'</span>;
+  shop = #{ currency, <span class="tok-string">'opened-at'</span>: <span class="tok-number">9</span>, total: <span class="tok-number">0</span>, orders: #[] };
+  <span class="tok-keyword">for</span> (<span class="tok-keyword">let</span> id = <span class="tok-number">1</span>; id &lt;= <span class="tok-number">3</span>; id++) {
+    shop.orders.<span class="tok-fn">push</span>(#{ id, price: id * <span class="tok-number">10</span>, tags: #[<span class="tok-string">'новый'</span>] });
+    shop.total += id * <span class="tok-number">10</span>;
+  }
+}
+<span class="tok-fn">print</span>(<span class="tok-string">'в регионе:'</span>, <span class="tok-api">Region</span>.<span class="tok-keyword">of</span>(shop.orders[<span class="tok-number">2</span>].tags).<span class="tok-api">id</span> === region.<span class="tok-api">id</span>, <span class="tok-string">'| сумма:'</span>, shop.total);
+<span class="tok-fn">print</span>(JSON.<span class="tok-fn">stringify</span>(shop.orders[<span class="tok-number">0</span>]));
+
+<span class="tok-comment">// Внутри run() регион тоже текущий.</span>
+<span class="tok-keyword">const</span> point = region.<span class="tok-api">run</span>(() =&gt; #{ x: <span class="tok-number">1</span>, y: <span class="tok-number">2</span> });
+<span class="tok-fn">print</span>(<span class="tok-string">'из run:'</span>, <span class="tok-api">Region</span>.<span class="tok-keyword">of</span>(point).<span class="tok-api">id</span> === region.<span class="tok-api">id</span>);
+
+<span class="tok-keyword">const</span> tryIt = (label, fn) =&gt; {
+  <span class="tok-keyword">try</span> {
+    <span class="tok-fn">fn</span>();
+    <span class="tok-fn">print</span>(<span class="tok-string">`${</span>label<span class="tok-string">}: работает`</span>);
+  } <span class="tok-keyword">catch</span> (e) {
+    <span class="tok-fn">print</span>(<span class="tok-string">`${</span>label<span class="tok-string">}: ${</span>e.name<span class="tok-string">}: ${</span>e.message<span class="tok-string">}`</span>);
+  }
+};
+<span class="tok-fn">tryIt</span>(<span class="tok-string">'без текущего региона'</span>, () =&gt; #{ a: <span class="tok-number">1</span> });
+{
+  <span class="tok-keyword">using</span> _ = region.<span class="tok-api">enter</span>();
+  <span class="tok-fn">tryIt</span>(<span class="tok-string">'#{} внутри #{}'</span>, () =&gt; #{ nested: #{ a: <span class="tok-number">1</span> } });
+  <span class="tok-fn">tryIt</span>(<span class="tok-string">'обычный объект внутри'</span>, () =&gt; #{ nested: { a: <span class="tok-number">1</span> } });
+}
+
+<span class="tok-comment">// В задаче spawn текущего региона нет: входят в регион, который приехал с данными.</span>
+<span class="tok-keyword">const</span> count = <span class="tok-keyword">await</span> <span class="tok-api">spawn</span>(() =&gt; {
+  <span class="tok-keyword">using</span> _ = <span class="tok-api">Region</span>.<span class="tok-keyword">of</span>(shop).<span class="tok-api">enter</span>();
+  shop.orders.<span class="tok-fn">push</span>(#{ id: <span class="tok-number">4</span>, price: <span class="tok-number">40</span>, tags: #[] });
+  <span class="tok-keyword">return</span> shop.orders.length;
+});
+<span class="tok-fn">print</span>(<span class="tok-string">'после задачи:'</span>, count, <span class="tok-string">'| последний заказ:'</span>, JSON.<span class="tok-fn">stringify</span>(shop.orders[<span class="tok-number">3</span>]));
+
+<span class="tok-comment">// Spread, вычисляемые ключи, методы и дырки — синтаксическая ошибка.</span>
+<span class="tok-keyword">for</span> (<span class="tok-keyword">const</span> source <span class="tok-keyword">of</span> [<span class="tok-string">'#{ ...x }'</span>, <span class="tok-string">'#{ [key]: 1 }'</span>, <span class="tok-string">'#{ total() {} }'</span>, <span class="tok-string">'#[1, , 3]'</span>]) {
+  <span class="tok-fn">tryIt</span>(source, () =&gt; <span class="tok-keyword">new</span> <span class="tok-fn">Function</span>(source));
+}</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8 --module --harmony-region-literals</span></div><pre class="out">в регионе: true | сумма: 60
+{"id":1,"price":10,"tags":["новый"]}
+из run: true
+<span class="err">без текущего региона: TypeError: #{} and #[] need a current region: use region.enter() or region.run()</span>
+#{} внутри #{}: работает
+<span class="err">обычный объект внутри: TypeError: #{} and #[] hold primitives and objects of their region; write nested objects as #{} and arrays as #[]</span>
+после задачи: 4 | последний заказ: {"id":4,"price":40,"tags":[]}
+<span class="err">#{ ...x }: SyntaxError: Unexpected token '...'</span>
+<span class="err">#{ [key]: 1 }: SyntaxError: Unexpected token '['</span>
+<span class="err">#{ total() {} }: SyntaxError: Unexpected token '('</span>
+<span class="err">#[1, , 3]: SyntaxError: Unexpected token ','</span></pre></figure>
+
+<p>Текущий регион нужен так же, как для <code>Region.object()</code>: литерал работает внутри <code>enter()</code> или <code>run()</code>. В задаче <code>spawn</code> текущего региона нет, туда входят явно: <code>using _ = Region.of(x).enter()</code>.</p>
+<ul>
+  <li><strong>Ключи</strong> — имена, строки в кавычках и короткая запись <code>#{ id }</code>.</li>
+  <li><strong>Значения</strong> — примитивы, объекты того же региона (в том числе другие <code>#{}</code> и <code>#[]</code>) и типизированные массивы, которые копируются. Литерал ничего не копирует за вас, поэтому обычный <code>{}</code> или <code>[]</code> внутри него — ошибка: вложенные объекты тоже пишутся как <code>#{}</code>, массивы — как <code>#[]</code>. Объект другого региона внутри даёт <code>OwnershipError</code>, как при записи в поле.</li>
+  <li><strong>Нельзя:</strong> spread, дырки в массиве, методы и вычисляемые ключи. Это синтаксическая ошибка.</li>
+  <li>Форма объекта фиксирована, как у любого объекта региона. Массив растёт через <code>push</code>.</li>
+</ul>
+<p>Цена сегодня — вызов рантайма на каждый литерал: около 0,5 мкс на <code>#{}</code> с двумя полями и около 0,3 мкс на <code>#[]</code>. Быстрого пути в машинном коде, как у обычных литералов, пока нет, это следующий шаг. 200 000 товаров литералами и <code>push</code> создаются за 311 мс: быстрее, чем через <code>Region.object()</code> (543 мс), но дольше одного <code>run</code> (198 мс). Замер — на странице <a href="numbers.html#create">«Цифры»</a>.</p>
+<p>TypeScript, Biome и ESLint синтаксис <code>#{}</code> пока не понимают (<a href="tooling.html#literals">подробнее</a>).</p>
 
 <h2 id="reference">Всё API на одной странице</h2>
 <div class="table-wrap">
@@ -707,6 +779,7 @@ view после free: 0
 <tr><td><code>region.borrowWhile(fn)</code></td><td>Держит билет, пока выполняется <code>fn</code> или пока не выполнится её промис. Возвращает результат <code>fn</code>.</td></tr>
 <tr><td><code>using _ = region.enter()</code></td><td>Сделать регион текущим до конца блока.</td></tr>
 <tr><td><code>Region.object(obj)</code>, <code>Region.array(...items)</code></td><td>Объект или массив в текущем регионе.</td></tr>
+<tr><td><code>#{ key: value }</code>, <code>#[a, b]</code></td><td>Объект или массив сразу в текущем регионе, без копии. Нужен флаг <code>--harmony-region-literals</code>.</td></tr>
 <tr><td><code>region.object(obj)</code>, <code>region.array(...items)</code></td><td>То же в этом регионе, без <code>enter</code>.</td></tr>
 <tr><td><code>region.free()</code>, <code>using region = new Region()</code></td><td>Освободить регион: обращения к нему запрещены навсегда, память типизированных массивов отдаётся сразу, объекты опустошаются при сборке.</td></tr>
 <tr><td><code>region.freed</code>, <code>region.byteSize</code>, <code>Region.stats()</code></td><td>Освобождён ли регион, сколько байт в него скопировано, и сводка по всем регионам процесса.</td></tr>
@@ -730,11 +803,15 @@ view после free: 0
 <tr><td><code>OwnershipError: region N is frozen; thaw it before writing</code></td><td>Запись в замороженный регион, в том числе владельцем.</td></tr>
 <tr><td><code>OwnershipError: a region object cannot reference objects outside its region; copy them in with Region.object() or Region.array()</code></td><td>Запись в поле обычного объекта или объекта из другого региона.</td></tr>
 <tr><td><code>Cannot add property X, region objects have a fixed shape</code></td><td>Новое свойство у объекта региона.</td></tr>
+<tr><td><code>Region.object() needs a current region: use region.enter() or region.object()</code></td><td><code>Region.object()</code> вне <code>enter()</code> и <code>run()</code>, в том числе в задаче <code>spawn</code>. У <code>Region.array()</code> текст такой же, со своим именем.</td></tr>
+<tr><td><code>… expects a plain object; use array() for arrays</code></td><td>Массив или функция в <code>Region.object()</code> или <code>region.object()</code>.</td></tr>
 <tr><td><code>… cannot be moved into a region</code></td><td>В <code>run</code> попала функция, <code>Map</code>, <code>Date</code>, <code>DataView</code>, массив поверх <code>SharedArrayBuffer</code>, экземпляр класса, наследник <code>Array</code> и т. п.</td></tr>
 <tr><td><code>Region is not frozen by this isolate</code></td><td><code>thaw()</code> в потоке, у которого нет права разморозить.</td></tr>
 <tr><td><code>Region was frozen by another isolate</code></td><td>Замороженный регион в списке transfer у потока без права разморозить.</td></tr>
 <tr><td><code>Region is still borrowed by N reader(s)</code></td><td><code>thaw()</code>, пока не сданы билеты.</td></tr>
 <tr><td><code>Region must be frozen to borrow it</code></td><td><code>borrow()</code> у незамороженного региона.</td></tr>
+<tr><td><code>#{} and #[] need a current region: use region.enter() or region.run()</code></td><td>Литерал вне <code>enter()</code> и <code>run()</code>.</td></tr>
+<tr><td><code>#{} and #[] hold primitives and objects of their region; write nested objects as #{} and arrays as #[]</code></td><td>Обычный объект или массив внутри литерала.</td></tr>
 <tr><td><code>Region.of() expects an object from a region</code></td><td><code>Region.of</code> для обычного объекта.</td></tr>
 </tbody>
 </table>

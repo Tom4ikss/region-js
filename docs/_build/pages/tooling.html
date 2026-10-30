@@ -10,7 +10,7 @@
 <table>
 <thead><tr><th>Ошибка</th><th>Чем ловится</th></tr></thead>
 <tbody>
-<tr><td>Функция, <code>Map</code>, экземпляр класса, <code>DataView</code> в <code>region.run</code> или в аргументе <code>spawn</code></td><td>типы</td></tr>
+<tr><td>Функция, <code>Map</code>, экземпляр класса, <code>DataView</code> в <code>region.run</code>, <code>Region.object()</code> или в аргументе <code>spawn</code></td><td>типы</td></tr>
 <tr><td>Опечатка в методе региона, новое поле у объекта региона</td><td>типы</td></tr>
 <tr><td><code>class</code>, <code>eval</code> или <code>with</code> в колбэке <code>spawn</code></td><td>Biome, ошибка</td></tr>
 <tr><td>Метод объекта как колбэк: <code>spawn(Math.max)</code></td><td>Biome, ошибка</td></tr>
@@ -42,7 +42,7 @@
 </div>
 
 <h2 id="types">Типы</h2>
-<p>Файл <code>types/regions.d.ts</code> описывает <code>Region</code>, <code>spawn</code>, <code>Channel</code> и глобальные функции d8 (<code>print</code>, <code>Worker</code> с его <code>getMessage</code>). Встроенный в VS Code TypeScript читает его через <code>jsconfig.json</code>, ставить ничего не нужно. Это даёт автодополнение и проверку того, что кладётся в регион: результат <code>run</code> и аргументы <code>spawn</code> должны быть данными (примитивы, простые объекты, массивы, типизированные массивы).</p>
+<p>Файл <code>types/regions.d.ts</code> описывает <code>Region</code>, <code>spawn</code>, <code>Channel</code> и глобальные функции d8 (<code>print</code>, <code>Worker</code> с его <code>getMessage</code>). Встроенный в VS Code TypeScript читает его через <code>jsconfig.json</code>, ставить ничего не нужно. Это даёт автодополнение и проверку того, что кладётся в регион: результат <code>run</code>, аргументы <code>Region.object()</code>, <code>Region.array()</code> и <code>spawn</code> должны быть данными (примитивы, простые объекты, массивы, типизированные массивы).</p>
 <div class="versus">
 <js-bad>
 region.run(() => new Map());
@@ -117,7 +117,7 @@ await spawn(() => { config.retries = 5; });
 error  This spawn() runs repeatedly and every task wants to move 'counter': only the first one gets it, the next ones throw OwnershipError. Await each task, freeze the region to share it read-only, or give every task its own data
 error  'config' is in a frozen region: tasks can read it but writing throws OwnershipError. Thaw it first, or let one task own it instead of freezing</pre>
 <p>Правило понимает, что задача закончилась, если её ждут через <code>await</code> (в том числе в <code>Promise.all</code>) или <code>join()</code>, и что замороженный регион не уезжает, а становится общим. Заморозку оно отслеживает по вызовам <code>freeze()</code> и <code>thaw()</code> до <code>spawn</code>.</p>
-<p>Анализ простой, и у него есть границы. Регионом правило считает переменную, созданную через <code>что-то.run(...)</code>. Объекты региона, полученные иначе (результат задачи, поле другого объекта), оно не отслеживает. С опцией <code>checkAllCaptures</code> оно проверяет все захваченные переменные, но тогда будет ругаться и на обычные данные, которые просто копируются. Обращения из колбэков, которые выполнятся позже (таймеры, обработчики), правило не отмечает: оно не знает, закончится ли задача к тому времени.</p>
+<p>Анализ простой, и у него есть границы. Регионом правило считает переменную, созданную через <code>что-то.run(...)</code>. Объекты региона, полученные иначе (результат задачи, поле другого объекта, <code>Region.object()</code>), оно не отслеживает. С опцией <code>checkAllCaptures</code> оно проверяет все захваченные переменные, но тогда будет ругаться и на обычные данные, которые просто копируются. Обращения из колбэков, которые выполнятся позже (таймеры, обработчики), правило не отмечает: оно не знает, закончится ли задача к тому времени.</p>
 
 <h3 id="no-floating-borrow-while"><code>regions/no-floating-borrow-while</code></h3>
 <p><code>borrowWhile</code> с асинхронной функцией держит билет, пока не выполнится её промис. Если этот промис не вернуть из задачи и не дождаться, задача закончится раньше, и билет сдадут посреди работы (<a href="spawn.html#borrow">подробнее</a>).</p>
@@ -140,6 +140,9 @@ await spawn(() =>
 </div>
 <pre class="shell wrap">error  borrowWhile() returns a promise here and nobody waits for it: a spawn() task ends without waiting, and its borrow is released before this work is done. Return or await it</pre>
 <p>Голый <code>borrow()</code> с отложенным чтением правило не видит. Такой билет d8 сдаёт в конце задачи сам и печатает предупреждение в воркере.</p>
+
+<h2 id="literals">Литералы <code>#{}</code> редактор не разберёт</h2>
+<p>TypeScript, Biome и ESLint не знают синтаксис <code>#{...}</code> и <code>#[...]</code> (<a href="guide.html#literals">литералы регионов</a>). Для них это ошибка разбора, и в таком файле не работают ни типы, ни правила. Пока держите код с литералами в отдельных файлах за пределами <code>playground/</code>, где их никто не проверяет, и запускайте в d8 с флагом <code>--harmony-region-literals</code>. <code>Region.object()</code> и <code>Region.array()</code> типы знают, с ними проверки работают как обычно.</p>
 
 <h2 id="runtime">Что видно только при запуске</h2>
 <p>Некоторые ошибки нельзя найти, не выполняя код:</p>

@@ -1,7 +1,7 @@
 число: 42
 строка: позвонить до 18:00
 объект из того же региона: 2
-обычный локальный объект: TypeError: OwnershipError: a region object cannot reference objects outside its region
+обычный локальный объект: TypeError: OwnershipError: a region object cannot reference objects outside its region; copy them in with Region.object() or Region.array()
 новое свойство: TypeError: Cannot add property discount, region objects have a fixed shape
 чтение несуществующего: undefined
 цикл сохранился: true

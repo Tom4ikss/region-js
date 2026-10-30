@@ -172,10 +172,10 @@ index 8226ac48..5a21d9d3 100644
    V(address_of_double_neg_constant, "double_negate_constant")                  \
    V(address_of_enable_experimental_regexp_engine,                              \
 diff --git a/src/common/message-template.h b/src/common/message-template.h
-index ce7c8efa..0424746c 100644
+index ce7c8efa..6c7129b9 100644
 --- a/src/common/message-template.h
 +++ b/src/common/message-template.h
-@@ -739,6 +739,21 @@ namespace internal {
+@@ -739,6 +739,26 @@ namespace internal {
    T(WasmSuspendJSFrames, "trying to suspend JS frames")                        \
    T(WasmExceptionError, "wasm exception")                                      \
    T(WasmObjectsAreOpaque, "WebAssembly objects are opaque")                    \
@@ -186,6 +186,11 @@ index ce7c8efa..0424746c 100644
 +  T(RegionFrozen,                                                              \
 +    "OwnershipError: region % is frozen; thaw it before writing")            \
 +  T(RegionFreed, "OwnershipError: region % was freed")                         \
++  T(RegionLiteralNoRegion,                                                     \
++    "#{} and #[] need a current region: use region.enter() or region.run()")  \
++  T(RegionLiteralPlainValue,                                                   \
++    "#{} and #[] hold primitives and objects of their region; write nested "   \
++    "objects as #{} and arrays as #[]")                                        \
 +  T(RegionBorrowRequired,                                                      \
 +    "OwnershipError: region % is frozen; borrow it to read its typed arrays")  \
 +  T(RegionCrossReference,                                                      \
@@ -1880,7 +1885,7 @@ index 00000000..bd767012
 +
 +#endif  // V8_D8_D8_PORT_H_
 diff --git a/src/d8/d8.cc b/src/d8/d8.cc
-index 49121fe1..a9ef26a9 100644
+index 49121fe1..bca2524e 100644
 --- a/src/d8/d8.cc
 +++ b/src/d8/d8.cc
 @@ -14,6 +14,7 @@
@@ -2067,7 +2072,7 @@ index 49121fe1..a9ef26a9 100644
  
    // Prevent fuzzers from creating side effects.
    if (!i::v8_flags.fuzzing) {
-@@ -4899,6 +4991,993 @@ Local<FunctionTemplate> Shell::CreateWorkerTemplate(Isolate* isolate) {
+@@ -4899,6 +4991,988 @@ Local<FunctionTemplate> Shell::CreateWorkerTemplate(Isolate* isolate) {
    return worker_fun_template;
  }
  
@@ -2882,13 +2887,13 @@ index 49121fe1..a9ef26a9 100644
 +  }
 +  // Inside fn the region is the current one, for Region.object() and
 +  // Region.array().
-+  std::vector<int>& current = PerIsolateData::Get(isolate)->current_regions();
-+  current.push_back(RegionIdOf(info));
++  int region = RegionIdOf(info);
++  i::JSRegionObject::PushCurrent(i_isolate, region);
 +  Local<Value> result;
 +  bool called = info[0].As<Function>()
 +                    ->Call(context, Undefined(isolate), 0, nullptr)
 +                    .ToLocal(&result);
-+  current.pop_back();
++  i::JSRegionObject::PopCurrent(i_isolate, region);
 +  if (!called) return;
 +  i::DirectHandle<i::Object> evacuated;
 +  if (!i::JSRegionObject::Evacuate(i_isolate, RegionIdOf(info),
@@ -2949,9 +2954,9 @@ index 49121fe1..a9ef26a9 100644
 +
 +int CurrentRegion(const v8::FunctionCallbackInfo<v8::Value>& info,
 +                  const char* name) {
-+  std::vector<int>& current =
-+      PerIsolateData::Get(info.GetIsolate())->current_regions();
-+  if (current.empty()) {
++  int region = i::JSRegionObject::Current(
++      reinterpret_cast<i::Isolate*>(info.GetIsolate()));
++  if (region < 0) {
 +    std::string message = std::string("Region.") + name +
 +                          "() needs a current region: use region.enter() or "
 +                          "region." + name + "()";
@@ -2960,7 +2965,7 @@ index 49121fe1..a9ef26a9 100644
 +            .ToLocalChecked()));
 +    return -1;
 +  }
-+  return current.back();
++  return region;
 +}
 +
 +}  // namespace
@@ -3021,7 +3026,8 @@ index 49121fe1..a9ef26a9 100644
 +           .ToLocal(&scope)) {
 +    return;
 +  }
-+  data->current_regions_.push_back(region);
++  i::JSRegionObject::PushCurrent(reinterpret_cast<i::Isolate*>(isolate),
++                                 region);
 +  scope->SetInternalField(0, Int32::New(isolate, region));
 +  info.GetReturnValue().Set(scope);
 +}
@@ -3033,14 +3039,8 @@ index 49121fe1..a9ef26a9 100644
 +  if (!field->IsInt32()) return;  // Already left.
 +  int region = field.As<Int32>()->Value();
 +  scope->SetInternalField(0, Undefined(info.GetIsolate()));
-+  std::vector<int>& current =
-+      PerIsolateData::Get(info.GetIsolate())->current_regions();
-+  for (auto it = current.rbegin(); it != current.rend(); ++it) {
-+    if (*it == region) {
-+      current.erase(std::next(it).base());
-+      return;
-+    }
-+  }
++  i::JSRegionObject::PopCurrent(
++      reinterpret_cast<i::Isolate*>(info.GetIsolate()), region);
 +}
 +
 +// Region.toJS(value) turns a typed array in a region, e.g. received from a
@@ -3061,7 +3061,7 @@ index 49121fe1..a9ef26a9 100644
  Local<ObjectTemplate> Shell::CreateAsyncHookTemplate(Isolate* isolate) {
    Local<ObjectTemplate> async_hooks_templ = ObjectTemplate::New(isolate);
    async_hooks_templ->Set(isolate, "createHook",
-@@ -5376,9 +6455,593 @@ MaybeLocal<Context> Shell::CreateEvaluationContext(Isolate* isolate) {
+@@ -5376,9 +6450,593 @@ MaybeLocal<Context> Shell::CreateEvaluationContext(Isolate* isolate) {
    }
  #endif  // V8_ENABLE_HARDWARE_WATCHPOINT_SUPPORT
  
@@ -3655,7 +3655,7 @@ index 49121fe1..a9ef26a9 100644
  namespace {
  int LineFromOffset(Local<debug::Script> script, int offset) {
    debug::Location location = script->GetSourceLocation(offset);
-@@ -6538,6 +8201,7 @@ void SourceGroup::JoinThread(const i::ParkedScope& parked) {
+@@ -6538,6 +8196,7 @@ void SourceGroup::JoinThread(const i::ParkedScope& parked) {
  void SerializationDataQueue::Enqueue(std::unique_ptr<SerializationData> data) {
    base::MutexGuard lock_guard(&mutex_);
    data_.push_back(std::move(data));
@@ -3663,7 +3663,7 @@ index 49121fe1..a9ef26a9 100644
  }
  
  bool SerializationDataQueue::Dequeue(
-@@ -6547,6 +8211,7 @@ bool SerializationDataQueue::Dequeue(
+@@ -6547,6 +8206,7 @@ bool SerializationDataQueue::Dequeue(
    if (data_.empty()) return false;
    *out_data = std::move(data_[0]);
    data_.erase(data_.begin());
@@ -3671,7 +3671,7 @@ index 49121fe1..a9ef26a9 100644
    return true;
  }
  
-@@ -6558,6 +8223,7 @@ bool SerializationDataQueue::IsEmpty() {
+@@ -6558,6 +8218,7 @@ bool SerializationDataQueue::IsEmpty() {
  void SerializationDataQueue::Clear() {
    base::MutexGuard lock_guard(&mutex_);
    data_.clear();
@@ -3679,7 +3679,7 @@ index 49121fe1..a9ef26a9 100644
  }
  
  Worker::Worker(Isolate* parent_isolate, const char* script)
-@@ -6668,6 +8334,12 @@ std::unique_ptr<SerializationData> Worker::GetMessage(Isolate* requester) {
+@@ -6668,6 +8329,12 @@ std::unique_ptr<SerializationData> Worker::GetMessage(Isolate* requester) {
        out_queue_.Dequeue(&result);
        break;
      }
@@ -3692,7 +3692,7 @@ index 49121fe1..a9ef26a9 100644
      out_semaphore_.ParkedWait(
          reinterpret_cast<i::Isolate*>(requester)->main_thread_local_isolate());
    }
-@@ -6705,6 +8377,8 @@ void Worker::Terminate() {
+@@ -6705,6 +8372,8 @@ void Worker::Terminate() {
    // returning to the event queue. Since we checked the state before, and we are
    // holding the {worker_mutex_}, it's safe to access the isolate.
    isolate_->TerminateExecution();
@@ -3701,7 +3701,7 @@ index 49121fe1..a9ef26a9 100644
  }
  
  void Worker::EnterTerminatedState() {
-@@ -7310,6 +8984,9 @@ bool Shell::SetOptions(int argc, char* argv[]) {
+@@ -7310,6 +8979,9 @@ bool Shell::SetOptions(int argc, char* argv[]) {
                                    argv, &i)) {
        // Value is expressed in MB.
        options.max_serializer_memory = atoi(flag_value) * i::MB;
@@ -3711,7 +3711,7 @@ index 49121fe1..a9ef26a9 100644
      } else if (FlagMatches("--bundle", &argv[i])) {
        options.bundle = true;
  #ifdef V8_FUZZILLI
-@@ -7921,6 +9598,27 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7921,6 +9593,27 @@ class Serializer : public ValueSerializer::Delegate {
      return true;
    }
  
@@ -3739,7 +3739,7 @@ index 49121fe1..a9ef26a9 100644
   private:
    Maybe<bool> PrepareTransfer(Local<Context> context, Local<Value> transfer) {
      if (transfer->IsArray()) {
-@@ -7929,6 +9627,22 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7929,6 +9622,22 @@ class Serializer : public ValueSerializer::Delegate {
        for (uint32_t i = 0; i < length; ++i) {
          Local<Value> element;
          if (transfer_array->Get(context, i).ToLocal(&element)) {
@@ -3762,7 +3762,7 @@ index 49121fe1..a9ef26a9 100644
            if (!element->IsArrayBuffer()) {
              ThrowError(isolate_,
                         "Transfer array elements must be an ArrayBuffer");
-@@ -7961,7 +9675,48 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7961,7 +9670,48 @@ class Serializer : public ValueSerializer::Delegate {
      }
    }
  
@@ -3811,7 +3811,7 @@ index 49121fe1..a9ef26a9 100644
      for (const auto& global_array_buffer : array_buffers_) {
        Local<ArrayBuffer> array_buffer =
            Local<ArrayBuffer>::New(isolate_, global_array_buffer);
-@@ -7987,6 +9742,7 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7987,6 +9737,7 @@ class Serializer : public ValueSerializer::Delegate {
    ValueSerializer serializer_;
    std::unique_ptr<SerializationData> data_;
    std::vector<Global<ArrayBuffer>> array_buffers_;
@@ -3819,7 +3819,7 @@ index 49121fe1..a9ef26a9 100644
    std::vector<Global<SharedArrayBuffer>> shared_array_buffers_;
    std::vector<Global<WasmModuleObject>> wasm_modules_;
    std::vector<std::shared_ptr<v8::BackingStore>> backing_stores_;
-@@ -8013,6 +9769,21 @@ class Deserializer : public ValueDeserializer::Delegate {
+@@ -8013,6 +9764,21 @@ class Deserializer : public ValueDeserializer::Delegate {
        return MaybeLocal<Value>();
      }
  
@@ -3841,7 +3841,7 @@ index 49121fe1..a9ef26a9 100644
      uint32_t index = 0;
      for (const auto& backing_store : data_->backing_stores()) {
        Local<ArrayBuffer> array_buffer =
-@@ -8049,6 +9820,21 @@ class Deserializer : public ValueDeserializer::Delegate {
+@@ -8049,6 +9815,21 @@ class Deserializer : public ValueDeserializer::Delegate {
      return nullptr;
    }
  
@@ -3863,7 +3863,7 @@ index 49121fe1..a9ef26a9 100644
   private:
    Isolate* isolate_;
    ValueDeserializer deserializer_;
-@@ -8309,6 +10095,8 @@ int Shell::Main(int argc, char* argv[]) {
+@@ -8309,6 +10090,8 @@ int Shell::Main(int argc, char* argv[]) {
    // The platform is owned by wrapper platform despite the `std::move` below.
    START_IGNORE_LIFETIME_SAFETY_WARNINGS()
    g_default_platform = g_platform.get();
@@ -3873,7 +3873,7 @@ index 49121fe1..a9ef26a9 100644
    if (i::v8_flags.predictable) {
      g_platform = MakePredictablePlatform(std::move(g_platform));
 diff --git a/src/d8/d8.h b/src/d8/d8.h
-index 0c7ad50a..ea122080 100644
+index 0c7ad50a..98f687c6 100644
 --- a/src/d8/d8.h
 +++ b/src/d8/d8.h
 @@ -8,6 +8,7 @@
@@ -3953,12 +3953,10 @@ index 0c7ad50a..ea122080 100644
    std::vector<std::unique_ptr<SerializationData>> data_;
  };
  
-@@ -432,8 +460,24 @@ class PerIsolateData {
+@@ -432,8 +460,22 @@ class PerIsolateData {
    Local<FunctionTemplate> GetDomNodeCtor() const;
    void SetDomNodeCtor(Local<FunctionTemplate> ctor);
  
-+  // Regions entered with region.enter() or region.run(), innermost last.
-+  std::vector<int>& current_regions() { return current_regions_; }
 +  Local<FunctionTemplate> GetRegionCtor() const;
 +  void SetRegionCtor(Local<FunctionTemplate> ctor);
 +  Local<FunctionTemplate> GetRegionBorrowCtor() const;
@@ -3978,7 +3976,7 @@ index 0c7ad50a..ea122080 100644
    void SubscribeWorkerOnMessage(const std::shared_ptr<Worker>& worker,
                                  Local<Context> context,
                                  Local<Function> callback);
-@@ -457,6 +501,36 @@ class PerIsolateData {
+@@ -457,6 +499,33 @@ class PerIsolateData {
    std::unordered_set<DynamicImportData*> import_data_;
    Global<FunctionTemplate> test_api_object_ctor_;
    Global<FunctionTemplate> dom_node_ctor_;
@@ -4005,9 +4003,6 @@ index 0c7ad50a..ea122080 100644
 +    std::vector<std::string> names;
 +  };
 +  std::unordered_map<std::string, int> spawn_code_ids_;
-+  // Regions entered with region.enter() or region.run(), innermost last:
-+  // Region.object() and Region.array() create objects in the last one.
-+  std::vector<int> current_regions_;
 +  Global<FunctionTemplate> region_scope_ctor_;
 +  std::vector<SpawnCode> spawn_codes_;
 +  struct RegionHandle;
@@ -4015,7 +4010,7 @@ index 0c7ad50a..ea122080 100644
    // See Shell::GetOrCreateLeafInterfaceTypeTemplate.
    Global<FunctionTemplate> leaf_interface_type_template_;
    // The template of the global object of all contexts that d8 creates in this
-@@ -641,6 +715,9 @@ class ShellOptions {
+@@ -641,6 +710,9 @@ class ShellOptions {
    DisallowReassignment<bool> expose_fast_api = {"expose-fast-api", false};
    DisallowReassignment<size_t> max_serializer_memory = {"max-serializer-memory",
                                                          1 * i::MB};
@@ -4025,7 +4020,7 @@ index 0c7ad50a..ea122080 100644
    DisallowReassignment<bool> bundle = {"bundle", false};
  };
  
-@@ -713,6 +790,21 @@ class Shell : public i::AllStatic {
+@@ -713,6 +785,21 @@ class Shell : public i::AllStatic {
  
    static bool HandleUnhandledPromiseRejections(Isolate* isolate);
  
@@ -4047,7 +4042,7 @@ index 0c7ad50a..ea122080 100644
    static std::unique_ptr<SerializationData> SerializeValue(
        Isolate* isolate, Local<Value> value, Local<Value> transfer);
    static MaybeLocal<Value> DeserializeValue(
-@@ -1007,6 +1099,41 @@ class Shell : public i::AllStatic {
+@@ -1007,6 +1094,41 @@ class Shell : public i::AllStatic {
    static Local<ObjectTemplate> GetOrCreateGlobalTemplate(Isolate* isolate);
    static Local<ObjectTemplate> CreateOSTemplate(Isolate* isolate);
    static Local<FunctionTemplate> CreateWorkerTemplate(Isolate* isolate);
@@ -4199,10 +4194,10 @@ index e98604b7..7021922f 100644
  
  #ifdef V8_ENABLE_REGEXP_DIAGNOSTICS
 diff --git a/src/flags/flag-definitions.h b/src/flags/flag-definitions.h
-index f47b7006..c38845b5 100644
+index f47b7006..cb8a3233 100644
 --- a/src/flags/flag-definitions.h
 +++ b/src/flags/flag-definitions.h
-@@ -1306,6 +1306,12 @@ DEFINE_WEAK_IMPLICATION(trace_baseline, trace_baseline_batch_compilation)
+@@ -1306,6 +1306,15 @@ DEFINE_WEAK_IMPLICATION(trace_baseline, trace_baseline_batch_compilation)
  // Internalize into a shared string table in the shared isolate
  DEFINE_BOOL(shared_strings, false, "allow sharing of strings")
  DEFINE_IMPLICATION(shared_strings, shared_heap)
@@ -4212,6 +4207,9 @@ index f47b7006..c38845b5 100644
 +DEFINE_IMPLICATION(harmony_regions, shared_strings)
 +// Readers of frozen regions get immutable typed array views.
 +DEFINE_IMPLICATION(harmony_regions, js_immutable_arraybuffer)
++DEFINE_BOOL(harmony_region_literals, false,
++            "#{} and #[] literals that create objects in the current region")
++DEFINE_IMPLICATION(harmony_region_literals, harmony_regions)
  DEFINE_BOOL_READONLY(
      harmony_struct, false,
      "DEPRECATED. harmony structs, shared structs, and shared arrays")
@@ -4324,7 +4322,7 @@ index edb398ee..10574ed4 100644
    {
      // Allows handle derefs for all threads/isolates from this thread.
 diff --git a/src/ic/accessor-assembler.cc b/src/ic/accessor-assembler.cc
-index c4fa533d..1b4553bc 100644
+index c4fa533d..4e86e283 100644
 --- a/src/ic/accessor-assembler.cc
 +++ b/src/ic/accessor-assembler.cc
 @@ -24,6 +24,7 @@
@@ -4350,7 +4348,7 @@ index c4fa533d..1b4553bc 100644
    GotoIf(Word32Equal(handler_kind, LOAD_KIND(kConstantFromPrototype)),
           &constant);
  
-@@ -873,6 +877,58 @@ void AccessorAssembler::HandleLoadICSmiHandlerLoadNamedCase(
+@@ -873,6 +877,62 @@ void AccessorAssembler::HandleLoadICSmiHandlerLoadNamedCase(
                      miss, exit_point);
    }
  
@@ -4396,11 +4394,15 @@ index c4fa533d..1b4553bc 100644
 +                &slow);
 +      TNode<IntPtrT> element_index = TryToIntptr(p->name(), &slow);
 +      GotoIf(IntPtrLessThan(element_index, IntPtrConstant(0)), &slow);
-+      // values() may be longer than the array.
++      // values() may be longer than the array. A reader of a frozen region
++      // can race with a thaw and a push that replaces values(): it may see
++      // the old, shorter values() with the new length, so check both.
 +      GotoIfNot(IntPtrLessThan(
 +                    element_index,
 +                    SmiUntag(LoadObjectField<Smi>(
 +                        object, offsetof(JSRegionObject, array_length_)))),
++                &slow);
++      GotoIfNot(IntPtrLessThan(element_index, LoadFixedArrayBaseLength(values)),
 +                &slow);
 +      return_unless_typed_array(LoadFixedArrayElement(values, element_index));
 +    }
@@ -4409,7 +4411,7 @@ index c4fa533d..1b4553bc 100644
    BIND(&nonexistent);
    // This is a handler for a load of a non-existent value.
    if (on_nonexistent == OnNonExistent::kThrowReferenceError) {
-@@ -1211,7 +1267,8 @@ void AccessorAssembler::HandleLoadICSmiHandlerHasNamedCase(
+@@ -1211,7 +1271,8 @@ void AccessorAssembler::HandleLoadICSmiHandlerHasNamedCase(
      CSA_DCHECK(this,
                 Word32Any(Word32Equal(handler_kind, LOAD_KIND(kInterceptor)),
                           Word32Equal(handler_kind, LOAD_KIND(kProxy)),
@@ -4419,7 +4421,7 @@ index c4fa533d..1b4553bc 100644
      exit_point->ReturnCallBuiltin(Builtin::kHasProperty, p->context(),
                                    p->receiver(), p->name());
    }
-@@ -1551,6 +1608,81 @@ void AccessorAssembler::HandleStoreICSmiHandlerJSSharedStructFieldCase(
+@@ -1551,6 +1612,81 @@ void AccessorAssembler::HandleStoreICSmiHandlerJSSharedStructFieldCase(
    Return(value);
  }
  
@@ -4501,7 +4503,7 @@ index c4fa533d..1b4553bc 100644
  void AccessorAssembler::HandleStoreICHandlerCase(
      const StoreICParameters* p, TNode<MaybeObject> handler, Label* miss,
      ICMode ic_mode, ElementSupport support_elements) {
-@@ -1629,9 +1761,12 @@ void AccessorAssembler::HandleStoreICHandlerCase(
+@@ -1629,9 +1765,12 @@ void AccessorAssembler::HandleStoreICHandlerCase(
      }
      BIND(&if_fast_smi);
      {
@@ -4515,7 +4517,7 @@ index c4fa533d..1b4553bc 100644
        Branch(Word32Equal(handler_kind, STORE_KIND(kSharedStructField)),
               &shared_struct_field, &data);
  
-@@ -1642,6 +1777,14 @@ void AccessorAssembler::HandleStoreICHandlerCase(
+@@ -1642,6 +1781,14 @@ void AccessorAssembler::HandleStoreICHandlerCase(
        HandleStoreICSmiHandlerJSSharedStructFieldCase(p->context(), handler_word,
                                                       CAST(holder), p->value());
  
@@ -5211,10 +5213,10 @@ index 00000000..844041ef
 +#endif  // V8_OBJECTS_JS_REGION_INL_H_
 diff --git a/src/objects/js-region.cc b/src/objects/js-region.cc
 new file mode 100644
-index 00000000..5bb446cb
+index 00000000..46849b25
 --- /dev/null
 +++ b/src/objects/js-region.cc
-@@ -0,0 +1,1256 @@
+@@ -0,0 +1,1524 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -5762,8 +5764,14 @@ index 00000000..5bb446cb
 +  }
 +  int index = FindIndex(object, it);
 +  if (index < 0) return isolate->factory()->undefined_value();
-+  return JSRegionObject::ToJSValue(isolate,
-+                                   handle(object->values()->get(index), isolate));
++  // Load values() once and check the index against it: a reader of a frozen
++  // region racing with a thaw and a push may see a length newer than the
++  // values() it loads.
++  Tagged<FixedArray> values = object->values();
++  if (static_cast<uint32_t>(index) >= values->ulength().value()) {
++    return isolate->factory()->undefined_value();
++  }
++  return JSRegionObject::ToJSValue(isolate, handle(values->get(index), isolate));
 +}
 +
 +// Region objects have no prototype of their own, so properties missing from
@@ -5780,6 +5788,156 @@ index 00000000..5bb446cb
 +  }
 +  return LookupIterator(isolate, it->GetReceiver(), it->GetName(), prototype);
 +}
++
++DirectHandle<Map> NewRegionMapFor(Isolate* isolate, InstanceType type,
++                                  int instance_size) {
++  DirectHandle<Map> map = isolate->factory()->NewContextlessMap(
++      type, instance_size, DICTIONARY_ELEMENTS, 0, AllocationType::kSharedMap);
++  DisallowGarbageCollection no_gc;
++  map->SetInObjectUnusedPropertyFields(0);
++  map->set_is_extensible(false);
++  map->set_prototype_validity_cell(Map::kNoValidityCellSentinel, kRelaxedStore,
++                                   SKIP_WRITE_BARRIER);
++  return map;
++}
++
++// Per-isolate state of region literals: the stack of current regions and the
++// shapes of #{} literals, so that every literal with the same keys gets the
++// same map and inline caches stay monomorphic.
++class RegionLiterals {
++ public:
++  struct Shape {
++    Address* keys;  // Global handles of this isolate.
++    Address* map;
++  };
++  struct State {
++    std::vector<int> current;
++    std::unordered_map<uint32_t, std::vector<Shape>> shapes;
++    // The shapes used last, checked first by comparing key pointers: keys
++    // come from the constant pool, so a literal passes the same strings.
++    static constexpr int kRecent = 8;
++    Shape recent[kRecent] = {};
++    int next_recent = 0;
++    Address* array_map = nullptr;
++  };
++
++  // The entry of an isolate never moves, and an isolate runs on one thread
++  // at a time, so the last one looked up on this thread is remembered.
++  static State& Of(Isolate* isolate) {
++    thread_local Isolate* cached_isolate = nullptr;
++    thread_local State* cached_state = nullptr;
++    if (cached_isolate == isolate) return *cached_state;
++    base::MutexGuard guard(Mutex());
++    cached_isolate = isolate;
++    cached_state = &(*All())[isolate];
++    return *cached_state;
++  }
++
++  static void Forget(Isolate* isolate) {
++    base::MutexGuard guard(Mutex());
++    auto it = All()->find(isolate);
++    if (it == All()->end()) return;
++    for (auto& [hash, shapes] : it->second.shapes) {
++      for (Shape& shape : shapes) {
++        GlobalHandles::Destroy(shape.keys);
++        GlobalHandles::Destroy(shape.map);
++      }
++    }
++    if (it->second.array_map) GlobalHandles::Destroy(it->second.array_map);
++    // Keep the entry: a thread may still have it cached, and a new isolate
++    // at the same address starts from an empty state.
++    it->second = State();
++  }
++
++
++  // The keys array and map for objects with `keys`, shared by every object
++  // with these keys that this isolate creates in a region: by run(),
++  // Region.object() and #{}. One map per shape keeps inline caches
++  // monomorphic.
++  static std::pair<DirectHandle<FixedArray>, DirectHandle<Map>> ShapeFor(
++      Isolate* isolate, const DirectHandleVector<String>& keys) {
++    State& state = Of(isolate);
++    int length = static_cast<int>(keys.size());
++    for (const Shape& shape : state.recent) {
++      if (!shape.keys) continue;
++      Tagged<FixedArray> known = Cast<FixedArray>(Tagged<Object>(*shape.keys));
++      if (static_cast<int>(known->ulength().value()) != length) continue;
++      bool same = true;
++      for (int i = 0; i < length && same; i++) same = known->get(i) == *keys[i];
++      if (same) return Unpack(isolate, shape);
++    }
++    uint32_t hash = static_cast<uint32_t>(length);
++    for (DirectHandle<String> key : keys) hash = hash * 31 + key->EnsureHash();
++    std::vector<Shape>& candidates = state.shapes[hash];
++    for (const Shape& shape : candidates) {
++      Tagged<FixedArray> known = Cast<FixedArray>(Tagged<Object>(*shape.keys));
++      if (static_cast<int>(known->ulength().value()) != length) continue;
++      bool same = true;
++      for (int i = 0; i < length && same; i++) {
++        same = Cast<String>(known->get(i))->Equals(*keys[i]);
++      }
++      if (same) {
++        Remember(state, shape);
++        return Unpack(isolate, shape);
++      }
++    }
++    Factory* factory = isolate->factory();
++    DirectHandle<FixedArray> new_keys =
++        factory->NewFixedArray(length, AllocationType::kSharedOld);
++    for (int i = 0; i < length; i++) {
++      DirectHandle<String> key = String::Share(isolate, keys[i]);
++      // Shared strings must be hashed before other isolates can see them.
++      key->EnsureHash();
++      new_keys->set(i, *key);
++    }
++    DirectHandle<Map> map =
++        NewRegionMapFor(isolate, JS_REGION_OBJECT_TYPE, JSRegionObject::kHeaderSize);
++    Shape shape{isolate->global_handles()->Create(*new_keys).location(),
++                isolate->global_handles()->Create(*map).location()};
++    // Of() may have been invalidated by nothing else; `candidates` is still
++    // the vector of this hash.
++    candidates.push_back(shape);
++    Remember(state, shape);
++    return {new_keys, map};
++  }
++
++  // The map of region arrays of this isolate.
++  static DirectHandle<Map> ArrayMap(Isolate* isolate) {
++    State& state = Of(isolate);
++    if (!state.array_map) {
++      state.array_map =
++          isolate->global_handles()
++              ->Create(*NewRegionMapFor(isolate, JS_REGION_OBJECT_TYPE,
++                                        JSRegionObject::kHeaderSize))
++              .location();
++    }
++    return direct_handle(Cast<Map>(Tagged<Object>(*state.array_map)), isolate);
++  }
++
++ private:
++  static std::pair<DirectHandle<FixedArray>, DirectHandle<Map>> Unpack(
++      Isolate* isolate, const Shape& shape) {
++    return {direct_handle(Cast<FixedArray>(Tagged<Object>(*shape.keys)), isolate),
++            direct_handle(Cast<Map>(Tagged<Object>(*shape.map)), isolate)};
++  }
++  static void Remember(State& state, const Shape& shape) {
++    state.recent[state.next_recent] = shape;
++    state.next_recent = (state.next_recent + 1) % State::kRecent;
++  }
++
++ public:
++ private:
++  static base::Mutex* Mutex() {
++    static base::LeakyObject<base::Mutex> mutex;
++    return mutex.get();
++  }
++  static std::unordered_map<Isolate*, State>* All() {
++    static base::LeakyObject<std::unordered_map<Isolate*, State>> all;
++    return all.get();
++  }
++};
++
++
 +
 +// Copies a graph of plain objects and arrays into shared space, tagging every
 +// copy with the region id. Cycles and shared substructure are preserved.
@@ -5955,7 +6113,7 @@ index 00000000..5bb446cb
 +    DirectHandle<Map> map;
 +    if (is_array) {
 +      if (array_map_.is_null()) {
-+        array_map_ = indirect_handle(NewRegionMap(), isolate_);
++        array_map_ = indirect_handle(RegionLiterals::ArrayMap(isolate_), isolate_);
 +      }
 +      map = array_map_;
 +    } else {
@@ -6064,7 +6222,7 @@ index 00000000..5bb446cb
 +    }
 +    int length = static_cast<int>(array_length);
 +    if (array_map_.is_null()) {
-+      array_map_ = indirect_handle(NewRegionMap(), isolate_);
++      array_map_ = indirect_handle(RegionLiterals::ArrayMap(isolate_), isolate_);
 +    }
 +    DirectHandle<FixedArray> values =
 +        factory_->NewFixedArray(length, AllocationType::kSharedOld);
@@ -6133,19 +6291,15 @@ index 00000000..5bb446cb
 +    for (size_t i = 0; i < shapes_.size(); i++) {
 +      if (SameKeys(*shapes_[i].keys, *source_keys)) return static_cast<int>(i);
 +    }
-+    int length = LengthOf(*source_keys);
-+    DirectHandle<FixedArray> keys =
-+        factory_->NewFixedArray(length, AllocationType::kSharedOld);
-+    bytes_ += FixedArray::SizeFor(length);
-+    for (int i = 0; i < length; i++) {
-+      DirectHandle<String> key = String::Share(
-+          isolate_, direct_handle(Cast<String>(source_keys->get(i)), isolate_));
-+      // Shared strings must be hashed before other isolates can see them.
-+      key->EnsureHash();
-+      keys->set(i, *key);
++    // Not seen in this copy: the isolate-wide shape, so that objects with the
++    // same keys share a map across copies and literals.
++    DirectHandleVector<String> keys(isolate_);
++    for (int i = 0; i < LengthOf(*source_keys); i++) {
++      keys.push_back(direct_handle(Cast<String>(source_keys->get(i)), isolate_));
 +    }
-+    shapes_.push_back({indirect_handle(keys, isolate_),
-+                       indirect_handle(NewRegionMap(), isolate_)});
++    auto [shape_keys, map] = RegionLiterals::ShapeFor(isolate_, keys);
++    shapes_.push_back({indirect_handle(shape_keys, isolate_),
++                       indirect_handle(map, isolate_)});
 +    return static_cast<int>(shapes_.size()) - 1;
 +  }
 +
@@ -6287,11 +6441,117 @@ index 00000000..5bb446cb
 +  DetachViews(isolate, region);
 +}
 +
++namespace {
++void ForgetRegionLiterals(Isolate* isolate);
++}  // namespace
++
 +// static
 +void JSRegionObject::ForgetIsolate(Isolate* isolate) {
 +  for (Address* location : RegionViews::Take(isolate, -1)) {
 +    GlobalHandles::Destroy(location);
 +  }
++  ForgetRegionLiterals(isolate);
++}
++
++namespace {
++
++void ForgetRegionLiterals(Isolate* isolate) { RegionLiterals::Forget(isolate); }
++
++MaybeDirectHandle<Object> LiteralValue(Isolate* isolate, int region,
++                                       DirectHandle<Object> value) {
++  if (IsSmi(*value)) return value;
++  if (IsJSRegionObject(*value)) {
++    if (Cast<JSRegionObject>(*value)->region_id() == region) return value;
++    THROW_NEW_ERROR(isolate,
++                    NewTypeError(MessageTemplate::kRegionCrossReference));
++  }
++  // Typed arrays have their bytes outside the heap; those are copied.
++  if (IsJSTypedArray(*value)) return Evacuator(isolate, region).Copy(value);
++  if (IsJSReceiver(*value)) {
++    THROW_NEW_ERROR(isolate,
++                    NewTypeError(MessageTemplate::kRegionLiteralPlainValue));
++  }
++  return Object::Share(isolate, value, kThrowOnError);
++}
++
++}  // namespace
++
++// static
++void JSRegionObject::PushCurrent(Isolate* isolate, int region) {
++  RegionLiterals::Of(isolate).current.push_back(region);
++}
++
++// static
++void JSRegionObject::PopCurrent(Isolate* isolate, int region) {
++  std::vector<int>& current = RegionLiterals::Of(isolate).current;
++  for (auto it = current.rbegin(); it != current.rend(); ++it) {
++    if (*it == region) {
++      current.erase(std::next(it).base());
++      return;
++    }
++  }
++}
++
++// static
++int JSRegionObject::Current(Isolate* isolate) {
++  std::vector<int>& current = RegionLiterals::Of(isolate).current;
++  return current.empty() ? -1 : current.back();
++}
++
++// static
++MaybeDirectHandle<JSRegionObject> JSRegionObject::NewLiteral(
++    Isolate* isolate, DirectHandleVector<String>* keys,
++    const DirectHandleVector<Object>& values) {
++  Factory* factory = isolate->factory();
++  int region = Current(isolate);
++  if (region < 0) {
++    THROW_NEW_ERROR(isolate,
++                    NewTypeError(MessageTemplate::kRegionLiteralNoRegion));
++  }
++  if (!RegionRegistry::IsOwner(region, isolate)) {
++    ThrowAccessError(isolate, region, Access::kWrite);
++    return {};
++  }
++  int length = static_cast<int>(values.size());
++
++  // The shape: the same keys get the same keys array and map.
++  DirectHandle<Union<FixedArray, Undefined>> shape_keys =
++      factory->undefined_value();
++  DirectHandle<Map> map;
++  if (keys) {
++    auto [known_keys, known_map] = RegionLiterals::ShapeFor(isolate, *keys);
++    shape_keys = known_keys;
++    map = known_map;
++  } else {
++    map = RegionLiterals::ArrayMap(isolate);
++  }
++
++  DirectHandle<FixedArray> object_values =
++      factory->NewFixedArray(length, AllocationType::kSharedOld);
++  size_t bytes = 0;
++  for (int i = 0; i < length; i++) {
++    DirectHandle<Object> value;
++    ASSIGN_RETURN_ON_EXCEPTION(isolate, value,
++                               LiteralValue(isolate, region, values[i]));
++    // Count strings copied into shared space, as region.run() does.
++    if (IsString(*value) && *value != *values[i]) {
++      bytes += Cast<String>(*value)->Size();
++    }
++    object_values->set(i, *value);
++  }
++  SharedObjectSafePublishGuard publish_guard;
++  DirectHandle<JSRegionObject> object =
++      Cast<JSRegionObject>(factory->NewJSObjectFromMap(
++          map, AllocationType::kSharedOld, {},
++          NewJSObjectType::kMaybeEmbedderFieldsAndApiWrapper));
++  DisallowGarbageCollection no_gc;
++  object->set_region_id(region);
++  object->set_keys(*shape_keys);
++  object->set_values(*object_values);
++  object->set_array_length(static_cast<uint32_t>(length));
++  RegionRegistry::AddBytes(region,
++                           bytes + kHeaderSize + FixedArray::SizeFor(length));
++  return object;
 +}
 +
 +bool IsJSRegionArray(Tagged<HeapObject> object) {
@@ -6411,10 +6671,20 @@ index 00000000..5bb446cb
 +    RETURN_FAILURE(isolate, kThrowOnError,
 +                   NewTypeError(MessageTemplate::kRegionCrossReference));
 +  }
-+  DirectHandle<Object> shared;
-+  ASSIGN_RETURN_ON_EXCEPTION_VALUE(
-+      isolate, shared,
-+      Evacuator(isolate, object->region_id()).Copy(value), Nothing<bool>());
++  // Numbers, shared primitives and objects of the region go in as they are;
++  // only the rest needs the evacuator (strings to share, typed arrays).
++  DirectHandle<Object> shared = value;
++  bool as_is = IsSmi(*value) ||
++               (IsJSRegionObject(*value) &&
++                Cast<JSRegionObject>(*value)->region_id() == object->region_id()) ||
++               (!IsJSReceiver(*value) &&
++                (HeapLayout::InReadOnlySpace(Cast<HeapObject>(*value)) ||
++                 HeapLayout::InAnySharedSpace(Cast<HeapObject>(*value))));
++  if (!as_is) {
++    ASSIGN_RETURN_ON_EXCEPTION_VALUE(
++        isolate, shared,
++        Evacuator(isolate, object->region_id()).Copy(value), Nothing<bool>());
++  }
 +  if (append) {
 +    index = static_cast<int>(it->index());
 +    EnsureArrayCapacity(isolate, object, index + 1);
@@ -6473,10 +6743,10 @@ index 00000000..5bb446cb
 +}  // namespace v8
 diff --git a/src/objects/js-region.h b/src/objects/js-region.h
 new file mode 100644
-index 00000000..5421d4c9
+index 00000000..93b44e7d
 --- /dev/null
 +++ b/src/objects/js-region.h
-@@ -0,0 +1,245 @@
+@@ -0,0 +1,256 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -6676,6 +6946,17 @@ index 00000000..5421d4c9
 +  static void ReleaseBackingStores(int region);
 +  // Drops the view bookkeeping of an isolate that is being torn down.
 +  static void ForgetIsolate(Isolate* isolate);
++
++  // The current region of an isolate: region.enter() and region.run() push
++  // it, #{} and #[] create their objects in the innermost one. -1 if none.
++  static void PushCurrent(Isolate* isolate, int region);
++  static void PopCurrent(Isolate* isolate, int region);
++  static int Current(Isolate* isolate);
++  // #{...} with `keys`, or #[...] without, in the current region. Values must
++  // be primitives, objects of the same region or typed arrays (copied).
++  static MaybeDirectHandle<JSRegionObject> NewLiteral(
++      Isolate* isolate, DirectHandleVector<String>* keys,
++      const DirectHandleVector<Object>& values);
 +
 +  DECL_PRINTER(JSRegionObject)
 +  DECL_VERIFIER(JSRegionObject)
@@ -7001,6 +7282,172 @@ index 3de06302..9e6a7db3 100644
  #if V8_ENABLE_WEBASSEMBLY
      case WASM_MODULE_OBJECT_TYPE:
        return WriteWasmModule(Cast<WasmModuleObject>(receiver));
+diff --git a/src/parsing/parser-base.h b/src/parsing/parser-base.h
+index 0aa6bf06..49d2f0f0 100644
+--- a/src/parsing/parser-base.h
++++ b/src/parsing/parser-base.h
+@@ -1357,6 +1357,7 @@ class ParserBase {
+ 
+   ExpressionT ParseProperty(ParsePropertyInfo* prop_info);
+   ExpressionT ParseObjectLiteral();
++  ExpressionT ParseRegionLiteral();
+   V8_INLINE bool VerifyCanHaveAutoAccessorOrThrow(ParsePropertyInfo* prop_info,
+                                                   ExpressionT name_expression,
+                                                   int name_token_position);
+@@ -2218,6 +2219,10 @@ ParserBase<Impl>::ParsePrimaryExpression() {
+     case Token::kLeftBrace:
+       return ParseObjectLiteral();
+ 
++    case Token::kRegionLeftBrace:
++    case Token::kRegionLeftBracket:
++      return ParseRegionLiteral();
++
+     case Token::kLeftParen: {
+       Consume(Token::kLeftParen);
+ 
+@@ -2412,6 +2417,64 @@ ParserBase<Impl>::ParseArrowParametersWithRest(
+   return impl()->ExpressionListToExpression(*list);
+ }
+ 
++// RegionObjectLiteral ::
++//   '#{' (RegionProperty (',' RegionProperty)* ','?)? '}'
++// RegionProperty ::
++//   (IdentifierName | StringLiteral) ':' AssignmentExpression
++//   IdentifierReference
++// RegionArrayLiteral ::
++//   '#[' (AssignmentExpression (',' AssignmentExpression)* ','?)? ']'
++//
++// Both create their object directly in the current region. They become a
++// runtime call with the keys and values interleaved, or the elements.
++template <typename Impl>
++typename ParserBase<Impl>::ExpressionT ParserBase<Impl>::ParseRegionLiteral() {
++  int pos = peek_position();
++  bool is_object = peek() == Token::kRegionLeftBrace;
++  Consume(peek());
++  Token::Value close = is_object ? Token::kRightBrace : Token::kRightBracket;
++  ExpressionListT args(pointer_buffer());
++  AcceptINScope accept_in(this, true);
++  while (!Check(close)) {
++    if (is_object) {
++      Token::Value token = peek();
++      if (!Token::IsPropertyName(token) && token != Token::kString) {
++        ReportUnexpectedToken(Next());
++        return impl()->FailureExpression();
++      }
++      Consume(token);
++      int key_pos = position();
++      // GetIdentifier(): the preparser needs the name of a shorthand
++      // property to record the variable it refers to.
++      IdentifierT name = token == Token::kString ? impl()->GetSymbol()
++                                                 : impl()->GetIdentifier();
++      args.Add(factory()->NewStringLiteral(name, key_pos));
++      if (token != Token::kString && Token::IsAnyIdentifier(token) &&
++          (peek() == Token::kComma || peek() == close)) {
++        // Shorthand: #{ name } is #{ name: name }.
++        args.Add(impl()->ExpressionFromIdentifier(name, key_pos));
++      } else {
++        Expect(Token::kColon);
++        args.Add(ParseAssignmentExpression());
++      }
++    } else {
++      if (peek() == Token::kComma || peek() == Token::kEllipsis) {
++        ReportUnexpectedToken(Next());
++        return impl()->FailureExpression();
++      }
++      args.Add(ParseAssignmentExpression());
++    }
++    if (peek() != close) {
++      Expect(Token::kComma);
++      if (has_error()) return impl()->FailureExpression();
++    }
++  }
++  expression_scope()->RecordPatternError(
++      Scanner::Location(pos, end_position()),
++      MessageTemplate::kInvalidDestructuringTarget);
++  return impl()->NewRegionLiteral(is_object, args, pos);
++}
++
+ template <typename Impl>
+ typename ParserBase<Impl>::ExpressionT ParserBase<Impl>::ParseArrayLiteral() {
+   // ArrayLiteral ::
+diff --git a/src/parsing/parser.h b/src/parsing/parser.h
+index f6c42cde..4a79c6c4 100644
+--- a/src/parsing/parser.h
++++ b/src/parsing/parser.h
+@@ -898,6 +898,16 @@ class V8_EXPORT_PRIVATE Parser : public NON_EXPORTED_BASE(ParserBase<Parser>) {
+ 
+   Expression* ExpressionListToExpression(const ScopedPtrList<Expression>& args);
+ 
++  // #{...} and #[...]: a call that creates the object in the current region.
++  V8_INLINE Expression* NewRegionLiteral(bool is_object,
++                                         const ScopedPtrList<Expression>& args,
++                                         int pos) {
++    return factory()->NewCallRuntime(
++        is_object ? Runtime::kCreateRegionObjectLiteral
++                  : Runtime::kCreateRegionArrayLiteral,
++        args, pos);
++  }
++
+   void SetFunctionNameFromPropertyName(LiteralProperty* property,
+                                        const AstRawString* name,
+                                        const AstRawString* prefix = nullptr);
+diff --git a/src/parsing/preparser.h b/src/parsing/preparser.h
+index fc6d8003..1405a07f 100644
+--- a/src/parsing/preparser.h
++++ b/src/parsing/preparser.h
+@@ -1602,6 +1602,12 @@ class PreParser : public ParserBase<PreParser> {
+       const Scanner::Location& params_loc) {
+   }
+ 
++  V8_INLINE PreParserExpression
++  NewRegionLiteral(bool is_object, const PreParserExpressionList& args,
++                   int pos) {
++    return PreParserExpression::Default();
++  }
++
+   V8_INLINE PreParserExpression
+   ExpressionListToExpression(const PreParserExpressionList& args) {
+     return PreParserExpression::Default();
+diff --git a/src/parsing/scanner.cc b/src/parsing/scanner.cc
+index 38e9dbfe..90ce78d7 100644
+--- a/src/parsing/scanner.cc
++++ b/src/parsing/scanner.cc
+@@ -6,6 +6,8 @@
+ 
+ #include "src/parsing/scanner.h"
+ 
++#include "src/flags/flags.h"
++
+ #include <stdint.h>
+ 
+ #include <cmath>
+@@ -609,6 +611,12 @@ Token::Value Scanner::ScanPrivateName() {
+   DCHECK(!IsIdentifierStart(kEndOfInput));
+   int pos = source_pos();
+   Advance();
++  if (v8_flags.harmony_region_literals && (c0_ == '{' || c0_ == '[')) {
++    Token::Value token =
++        c0_ == '{' ? Token::kRegionLeftBrace : Token::kRegionLeftBracket;
++    Advance();
++    return token;
++  }
+   if (IsIdentifierStart(c0_) ||
+       (CombineSurrogatePair() && IsIdentifierStart(c0_))) {
+     AddLiteralChar('#');
+diff --git a/src/parsing/token.h b/src/parsing/token.h
+index a851946a..0058f7be 100644
+--- a/src/parsing/token.h
++++ b/src/parsing/token.h
+@@ -199,6 +199,9 @@ namespace internal {
+   K(kExtends, "extends", 0)                                                   \
+   K(kImport, "import", 0)                                                     \
+   T(kPrivateName, nullptr, 0)                                                 \
++  /* Region literals, --harmony-region-literals. */                           \
++  T(kRegionLeftBrace, "#{", 0)                                                \
++  T(kRegionLeftBracket, "#[", 0)                                              \
+                                                                               \
+   /* Illegal token - not able to scan. */                                     \
+   T(kIllegal, "ILLEGAL", 0)                                                   \
 diff --git a/src/runtime/runtime-forin.cc b/src/runtime/runtime-forin.cc
 index 2ab60bab..433e7430 100644
 --- a/src/runtime/runtime-forin.cc
@@ -7031,10 +7478,48 @@ index 2ab60bab..433e7430 100644
          result = JSObject::GetPropertyAttributesWithInterceptor(&it);
          if (result.IsNothing()) return MaybeDirectHandle<Object>();
 diff --git a/src/runtime/runtime-object.cc b/src/runtime/runtime-object.cc
-index 96c1c2f4..3eb7a1dd 100644
+index 96c1c2f4..89d0f9b7 100644
 --- a/src/runtime/runtime-object.cc
 +++ b/src/runtime/runtime-object.cc
-@@ -221,6 +221,7 @@ RUNTIME_FUNCTION(Runtime_HasOwnConstDataProperty) {
+@@ -15,6 +15,7 @@
+ #include "src/handles/maybe-handles.h"
+ #include "src/objects/dictionary-inl.h"
+ #include "src/objects/map-updater.h"
++#include "src/objects/js-region-inl.h"
+ #include "src/objects/property-descriptor-object.h"
+ #include "src/objects/property-descriptor.h"
+ #include "src/objects/property-details.h"
+@@ -87,6 +88,29 @@ Maybe<bool> Runtime::DeleteObjectProperty(Isolate* isolate,
+ }
+ 
+ // https://tc39.es/ecma262/#sec-object.keys
++// #{ key: value, ... }: keys and values interleaved.
++RUNTIME_FUNCTION(Runtime_CreateRegionObjectLiteral) {
++  HandleScope scope(isolate);
++  DCHECK_EQ(0, args.length() % 2);
++  DirectHandleVector<String> keys(isolate);
++  DirectHandleVector<Object> values(isolate);
++  for (int i = 0; i < args.length(); i += 2) {
++    keys.push_back(args.at<String>(i));
++    values.push_back(args.at(i + 1));
++  }
++  RETURN_RESULT_OR_FAILURE(isolate,
++                           JSRegionObject::NewLiteral(isolate, &keys, values));
++}
++
++// #[ element, ... ]
++RUNTIME_FUNCTION(Runtime_CreateRegionArrayLiteral) {
++  HandleScope scope(isolate);
++  DirectHandleVector<Object> values(isolate);
++  for (int i = 0; i < args.length(); i++) values.push_back(args.at(i));
++  RETURN_RESULT_OR_FAILURE(isolate,
++                           JSRegionObject::NewLiteral(isolate, nullptr, values));
++}
++
+ RUNTIME_FUNCTION(Runtime_ObjectKeys) {
+   HandleScope scope(isolate);
+   DirectHandle<Object> object = args.at(0);
+@@ -221,6 +245,7 @@ RUNTIME_FUNCTION(Runtime_HasOwnConstDataProperty) {
        case LookupIterator::ACCESS_CHECK:
        case LookupIterator::JSPROXY:
        case LookupIterator::WASM_OBJECT:
@@ -7042,3 +7527,16 @@ index 96c1c2f4..3eb7a1dd 100644
        case LookupIterator::TYPED_ARRAY_INDEX_NOT_FOUND:
        case LookupIterator::ACCESSOR:
        case LookupIterator::MODULE_NAMESPACE:
+diff --git a/src/runtime/runtime.h b/src/runtime/runtime.h
+index 8be2dd32..3cbebbd3 100644
+--- a/src/runtime/runtime.h
++++ b/src/runtime/runtime.h
+@@ -395,6 +395,8 @@ constexpr bool CanTriggerGC(T... properties) {
+   F(HasOwnConstDataProperty, 2, 1)                                     \
+   F(ObjectIsExtensible, 1, 1)                                          \
+   F(ObjectKeys, 1, 1)                                                  \
++  F(CreateRegionObjectLiteral, -1 /* keys and values */, 1)            \
++  F(CreateRegionArrayLiteral, -1 /* elements */, 1)                    \
+   F(ObjectValues, 1, 1)                                                \
+   F(ObjectValuesSkipFastPath, 1, 1)                                    \
+   F(OptimizeObjectForAddingMultipleProperties, 2, 1)                   \
