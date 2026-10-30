@@ -3728,10 +3728,10 @@ index 00000000..9446d334
 +#endif  // V8_D8_D8_CHANNEL_H_
 diff --git a/src/d8/d8-port.cc b/src/d8/d8-port.cc
 new file mode 100644
-index 00000000..74d70d9c
+index 00000000..30a45be7
 --- /dev/null
 +++ b/src/d8/d8-port.cc
-@@ -0,0 +1,1109 @@
+@@ -0,0 +1,1123 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -3870,6 +3870,10 @@ index 00000000..74d70d9c
 +  std::unordered_map<PortState*, Handler> listening;
 +  // Ports created here, i.e. where this isolate is the client.
 +  std::vector<std::shared_ptr<PortState>> clients;
++  // The port object checked last and its state: a pool sends every task
++  // through one port, so FromValue() rarely needs the template check.
++  Global<Object> last_object;
++  std::shared_ptr<PortState> last_state;
 +};
 +
 +base::LazyMutex isolates_mutex = LAZY_MUTEX_INITIALIZER;
@@ -4715,12 +4719,20 @@ index 00000000..74d70d9c
 +                                            Local<Value> value) {
 +  IsolatePorts& data = DataOf(isolate);
 +  if (data.ctor.IsEmpty() || !value->IsObject()) return nullptr;
++  if (!data.last_object.IsEmpty() && data.last_object.Get(isolate) == value) {
++    return data.last_state;
++  }
 +  if (!data.ctor.Get(isolate)->HasInstance(value)) return nullptr;
 +  Local<Data> field = value.As<Object>()->GetInternalField(0);
 +  if (!field->IsValue() || !field.As<Value>()->IsExternal()) return nullptr;
-+  return static_cast<PortHandle*>(
-+             field.As<Value>().As<External>()->Value(kPortTag))
-+      ->state;
++  std::shared_ptr<PortState> state =
++      static_cast<PortHandle*>(
++          field.As<Value>().As<External>()->Value(kPortTag))
++          ->state;
++  data.last_object.Reset(isolate, value.As<Object>());
++  data.last_object.SetWeak();
++  data.last_state = state;
++  return state;
 +}
 +
 +// static
@@ -4833,6 +4845,8 @@ index 00000000..74d70d9c
 +  }
 +  data.handles.clear();
 +  data.ctor.Reset();
++  data.last_object.Reset();
++  data.last_state.reset();
 +  if (PerIsolateData* per_isolate = PerIsolateData::Get(isolate)) {
 +    per_isolate->ports_data = nullptr;
 +  }
