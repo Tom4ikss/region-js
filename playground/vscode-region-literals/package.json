@@ -1,18 +1,31 @@
 {
   "name": "region-literals",
   "displayName": "Region literals",
-  "description": "Highlights the #{ } and #[ ] region literals of region-js in JavaScript.",
+  "description": "Highlights the #{ } and #[ ] region literals of region-js and lets TypeScript read them as { } and [ ].",
   "version": "0.0.1",
   "publisher": "region-js",
   "license": "BSD-3-Clause",
-  "engines": { "vscode": "^1.70.0" },
-  "categories": ["Programming Languages"],
+  "engines": {
+    "vscode": "^1.70.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
   "contributes": {
     "grammars": [
       {
         "scopeName": "region-literals.injection",
         "path": "./syntaxes/injection.json",
-        "injectTo": ["source.js", "source.js.jsx"]
+        "injectTo": [
+          "source.js",
+          "source.js.jsx"
+        ]
+      }
+    ],
+    "typescriptServerPlugins": [
+      {
+        "name": "region-literals-ts-plugin",
+        "enableForWorkspaceTypeScriptVersions": true
       }
     ]
   }

@@ -141,8 +141,10 @@ await spawn(() =>
 <pre class="shell wrap">error  borrowWhile() returns a promise here and nobody waits for it: a spawn() task ends without waiting, and its borrow is released before this work is done. Return or await it</pre>
 <p>Голый <code>borrow()</code> с отложенным чтением правило не видит. Такой билет d8 сдаёт в конце задачи сам и печатает предупреждение в воркере.</p>
 
-<h2 id="literals">Литералы <code>#{}</code> редактор не разберёт</h2>
-<p>TypeScript, Biome и ESLint не знают синтаксис <code>#{...}</code> и <code>#[...]</code> (<a href="guide.html#literals">литералы регионов</a>). Для них это ошибка разбора, и в таком файле не работают ни типы, ни правила. Пока держите код с литералами в отдельных файлах за пределами <code>playground/</code>, где их никто не проверяет, и запускайте в d8 с флагом <code>--harmony-region-literals</code>. <code>Region.object()</code> и <code>Region.array()</code> типы знают, с ними проверки работают как обычно.</p>
+<h2 id="literals">Литералы <code>#{}</code> в редакторе</h2>
+<p>Синтаксиса <code>#{...}</code> и <code>#[...]</code> (<a href="guide.html#literals">литералы регионов</a>) нет в JavaScript, поэтому сами по себе инструменты его не знают. Для VS Code в <code>playground/vscode-region-literals</code> лежит расширение. Оно подсвечивает <code>#</code> как оператор и подключает к TypeScript плагин: тот заменяет <code>#</code> перед <code>{</code> и <code>[</code> пробелом до разбора файла. Длина текста не меняется, поэтому ошибки, подсказки и автодополнение стоят на своих местах, а литерал получает тип такого же обычного литерала. Ставится оно символической ссылкой (команда в README расширения), после чего нужен «Developer: Reload Window».</p>
+<p>Одна особенность от самого TypeScript: пустой <code>#[]</code> для него — пустой <code>[]</code>, то есть <code>never[]</code>, и <code>push</code> в него подсвечивается как ошибка. Подскажите тип: <code>/** @type {Order[]} */ (#[])</code>.</p>
+<p>Biome и ESLint литералы не разбирают. В <code>playground/</code> файлы с литералами лежат в <code>experimental/</code>, который оба пропускают, а TypeScript проверяет. Запускайте их в d8 с флагом <code>--harmony-region-literals</code>.</p>
 
 <h2 id="runtime">Что видно только при запуске</h2>
 <p>Некоторые ошибки нельзя найти, не выполняя код:</p>

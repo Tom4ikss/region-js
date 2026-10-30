@@ -82,8 +82,8 @@
   <span class="tok-fn">print</span>(<span class="tok-string">'главный поток после переезда:'</span>, e.message);
 }
 worker.<span class="tok-api">terminate</span>();</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8; время у вас будет другим</span></div><pre class="out">узлов в дереве: 131071
-копия (structured clone): 122.16 ms
-переезд региона:          0.06 ms
+копия (structured clone): 123.63 ms
+переезд региона:          0.09 ms
 <span class="err">главный поток после переезда: OwnershipError: region 0 is owned by isolate 1, not by isolate 0</span></pre></figure>
 
 <p>Копия заняла больше сотни миллисекунд, переезд — сотые доли миллисекунды. И время переезда почти не растёт с размером: для дерева из миллиона узлов оно около 0,12 мс, а копия такого дерева идёт почти секунду.</p>

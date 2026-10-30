@@ -133,11 +133,11 @@
 <span class="tok-fn">measure</span>(<span class="tok-string">'region.run             '</span>, viaRun);
 <span class="tok-fn">measure</span>(<span class="tok-string">'Region.object, enter   '</span>, viaObject);
 <span class="tok-fn">measure</span>(<span class="tok-string">'Region.object и push   '</span>, viaPush);
-<span class="tok-fn">measure</span>(<span class="tok-string">'литерал #{} и push     '</span>, viaLiteral);</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8 --harmony-region-literals; время у вас будет другим</span></div><pre class="out">обычные объекты        : создание 25 ms, проход 0.2 ms (сумма 9900000)
-region.run             : создание 199 ms, проход 3.0 ms (сумма 9900000)
-Region.object, enter   : создание 442 ms, проход 2.0 ms (сумма 9900000)
-Region.object и push   : создание 503 ms, проход 2.3 ms (сумма 9900000)
-литерал #{} и push     : создание 89 ms, проход 2.1 ms (сумма 9900000)</pre></figure></details>
+<span class="tok-fn">measure</span>(<span class="tok-string">'литерал #{} и push     '</span>, viaLiteral);</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8 --harmony-region-literals; время у вас будет другим</span></div><pre class="out">обычные объекты        : создание 26 ms, проход 0.2 ms (сумма 9900000)
+region.run             : создание 198 ms, проход 2.3 ms (сумма 9900000)
+Region.object, enter   : создание 437 ms, проход 2.0 ms (сумма 9900000)
+Region.object и push   : создание 438 ms, проход 2.1 ms (сумма 9900000)
+литерал #{} и push     : создание 85 ms, проход 2.0 ms (сумма 9900000)</pre></figure></details>
 
 <h2 id="access">Чтение и запись</h2>
 <p>Объекты региона медленнее обычных там, где оптимизирующий компилятор пока не может встроить доступ к ним (подробнее на странице <a href="inside.html#ic">«Как это устроено»</a>).</p>

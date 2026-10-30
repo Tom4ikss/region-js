@@ -151,7 +151,7 @@
   <li>Форма объекта фиксирована, как у любого объекта региона. Массив растёт через <code>push</code>.</li>
 </ul>
 <p>Литерал выделяет объект прямо в машинном коде, без копии и без рантайма, и стоит около 15–20 нс (<a href="inside.html#literals">как</a>). Это самый быстрый способ наполнить регион: 200 000 товаров литералами и <code>push</code> создаются за 86 мс, одним <code>run</code> — за 197 мс, через <code>Region.object()</code> — за 446 мс. <code>push</code> в массив региона тоже идёт без рантайма, около 25 нс на элемент. Замер — на странице <a href="numbers.html#create">«Цифры»</a>.</p>
-<p>TypeScript, Biome и ESLint синтаксис <code>#{}</code> пока не понимают (<a href="tooling.html#literals">подробнее</a>).</p>
+<p>В VS Code типы в файлах с литералами работают через расширение из <code>playground/</code>, Biome и ESLint синтаксис <code>#{}</code> пока не понимают (<a href="tooling.html#literals">подробнее</a>).</p>
 
 <h2 id="reference">Всё API на одной странице</h2>
 <div class="table-wrap">
