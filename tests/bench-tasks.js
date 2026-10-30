@@ -62,3 +62,21 @@ await time('ping-pong 1000 round trips', async () => {
   ping.close();
   await task;
 });
+
+await time('rwlock: 1000 uncontended write+release', () => {
+  const lock = new RwLock({ n: 0 });
+  for (let i = 0; i < N; i++) {
+    using g = lock.writeSync();
+    g.value.n++;
+  }
+});
+
+await time('rwlock: 4 tasks x 250 write increments', async () => {
+  const lock = new RwLock({ n: 0 });
+  await Promise.all(Array.from({ length: 4 }, () => spawn(async (lock) => {
+    for (let i = 0; i < 250; i++) {
+      using g = await lock.write();
+      g.value.n++;
+    }
+  }, lock)));
+});

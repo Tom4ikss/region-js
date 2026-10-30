@@ -150,7 +150,7 @@ interface SpawnHandle<T> extends PromiseLike<T> {
  * the task ends, frozen regions are shared, helper functions are sent as
  * source. Classes, eval and with are rejected.
  */
-declare function spawn<Args extends (RegionData | Channel)[], Result extends RegionData | void>(
+declare function spawn<Args extends (RegionData | Channel | RwLock)[], Result extends RegionData | void>(
   callback: (...args: Args) => Result | PromiseLike<Result>,
   ...args: Args
 ): SpawnHandle<Result>;
@@ -203,6 +203,35 @@ declare class Channel<T = any> implements AsyncIterable<T>, Iterable<T> {
   static selectSync<T>(
     channels: Iterable<Channel<T>>,
   ): { channel: Channel<T>; value: T | undefined; done: boolean };
+}
+
+/** Access to the object of an RwLock while the guard is held. */
+interface RwLockGuard<T> extends Disposable {
+  /** The lock's object. Throws once the guard is released. */
+  readonly value: T;
+  /** Gives the lock back. References kept from `value` stop working. */
+  release(): void;
+}
+
+/**
+ * A region that threads take turns to write, or read together, like
+ * `tokio::sync::RwLock`. Acquires are served in arrival order. While nobody
+ * holds the lock its object cannot be used at all; the region cannot be
+ * freed, frozen or moved. Locks can be captured by spawn() tasks and sent
+ * through channels and postMessage(), like channels.
+ */
+declare class RwLock<T extends object = any> {
+  /** Takes the region of a region object owned by this thread, or copies
+   * plain data into a new region. */
+  constructor(value: T);
+  read(): Promise<RwLockGuard<T>>;
+  write(): Promise<RwLockGuard<T>>;
+  /** Block the thread instead. Fine in workers; avoid on the main thread. */
+  readSync(): RwLockGuard<T>;
+  writeSync(): RwLockGuard<T>;
+  /** null if the lock cannot be taken right now. */
+  tryRead(): RwLockGuard<T> | null;
+  tryWrite(): RwLockGuard<T> | null;
 }
 
 // --- d8 shell globals used together with regions ---------------------------

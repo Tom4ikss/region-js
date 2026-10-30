@@ -186,6 +186,47 @@ worker.<span class="tok-api">terminate</span>();</code></pre><div class="out-hea
 
 <p>Поток, который ждёт на канале, не мешает сборке мусора остальных потоков. Если воркер завершают через <code>terminate()</code>, пока он ждёт, ожидание прерывается, а значение, которое ему уже отдали, но он не успел прочитать, возвращается в канал следующему получателю.</p>
 
+<h2 id="rwlock">Общие данные: <code>RwLock</code></h2>
+<p>Канал передаёт данные из рук в руки. Иногда удобнее, чтобы данные лежали на месте, а потоки приходили к ним по очереди: общий счётчик, кэш, состояние игры. Для этого есть <code>RwLock</code>, как <code>tokio::sync::RwLock</code> в Rust или <code>sync.RWMutex</code> в Go. Лок держит один регион. Писатель на время получает его в собственность, и тогда никто другой его не видит. Читателей может быть сколько угодно, и пока они читают, регион заморожен.</p>
+
+<figure class="example"><div class="ex-head"><span class="file"><a href="examples/38-rwlock.js">examples/38-rwlock.js</a></span><button class="copy" type="button">Копировать</button></div><pre class="code"><code><span class="tok-comment">// d8-flags: --module</span>
+<span class="tok-comment">// Счётчик, который пишут четыре задачи и читают все сразу.</span>
+<span class="tok-keyword">const</span> stats = <span class="tok-keyword">new</span> <span class="tok-fn">RwLock</span>({ hits: <span class="tok-number">0</span>, writers: [] });
+
+<span class="tok-keyword">await</span> Promise.<span class="tok-fn">all</span>([<span class="tok-number">1</span>, <span class="tok-number">2</span>, <span class="tok-number">3</span>, <span class="tok-number">4</span>].<span class="tok-fn">map</span>((worker) =&gt; <span class="tok-api">spawn</span>(<span class="tok-keyword">async</span> (stats, worker) =&gt; {
+  <span class="tok-keyword">for</span> (<span class="tok-keyword">let</span> i = <span class="tok-number">0</span>; i &lt; <span class="tok-number">100</span>; i++) {
+    <span class="tok-keyword">using</span> g = <span class="tok-keyword">await</span> stats.<span class="tok-fn">write</span>();   <span class="tok-comment">// один писатель за раз</span>
+    g.value.hits++;
+    <span class="tok-keyword">if</span> (!g.value.writers.<span class="tok-fn">includes</span>(worker)) g.value.writers.<span class="tok-fn">push</span>(worker);
+  }
+}, stats, worker)));
+
+<span class="tok-keyword">let</span> kept;
+{
+  <span class="tok-keyword">using</span> r = <span class="tok-keyword">await</span> stats.<span class="tok-fn">read</span>();      <span class="tok-comment">// читателей может быть много</span>
+  <span class="tok-fn">print</span>(<span class="tok-string">'всего:'</span>, r.value.hits, <span class="tok-string">'| писали задачи'</span>, r.value.writers.<span class="tok-fn">toSorted</span>().<span class="tok-api">join</span>(<span class="tok-string">', '</span>));
+  kept = r.value;
+  <span class="tok-keyword">try</span> {
+    r.value.hits = <span class="tok-number">0</span>;
+  } <span class="tok-keyword">catch</span> (e) {
+    <span class="tok-fn">print</span>(<span class="tok-string">'запись под read():'</span>, e.message);
+  }
+}
+<span class="tok-comment">// Лок отпущен: сохранённая ссылка больше не работает.</span>
+<span class="tok-keyword">try</span> {
+  <span class="tok-fn">print</span>(kept.hits);
+} <span class="tok-keyword">catch</span> (e) {
+  <span class="tok-fn">print</span>(<span class="tok-string">'после отпуска:'</span>, e.message);
+}</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8 --module</span></div><pre class="out">всего: 400 | писали задачи 1, 2, 3, 4
+<span class="err">запись под read(): OwnershipError: region 0 is locked for reading; use lock.write() to change it</span>
+<span class="err">после отпуска: OwnershipError: region 0 is in an RwLock; use it through lock.read() or lock.write()</span></pre></figure>
+
+<p>Данные охраняет то же владение, что и всё остальное. Пока лок никто не держит, его регион не принадлежит никому. Поэтому ссылка, сохранённая из guard после отпуска, не работает: обращение к ней — ошибка, а не гонка данных, которую в Go ищет race detector. По той же причине регион лока нельзя освободить, заморозить, отправить в канал или через <code>postMessage</code> и взять на него <code>borrow()</code>: всё это обходило бы лок.</p>
+<p>Ждущие получают лок в порядке прихода. Читатель, пришедший после ждущего писателя, ждёт его, так что писатели не голодают. Поэтому взять <code>write()</code>, держа <code>read()</code> того же лока, нельзя: писатель ждёт, пока отпустят всех читателей, в том числе этот же поток.</p>
+<p><code>read()</code> и <code>write()</code> ждут через промис, <code>readSync()</code> и <code>writeSync()</code> блокируют поток (это для воркеров), <code>tryRead()</code> и <code>tryWrite()</code> сразу возвращают <code>null</code>, если лок занят. Guard отпускается через <code>using</code> или <code>release()</code>. Если поток, который держит лок, завершается, лок отпускается сам. Данные при этом могут остаться изменёнными наполовину: «отравления», как у <code>Mutex</code> в Rust, нет.</p>
+<p>Взять лок на запись и отпустить его стоит около 0,2 мкс, у <code>RwLock</code> в tokio — около 0,01 мкс: здесь каждый захват ещё и меняет владельца региона. Передача лока другому потоку стоит как пробуждение этого потока (<a href="numbers.html#tokio">замеры</a>).</p>
+<p>Между потоками лок ходит как канал: его можно захватить в <code>spawn</code>, отправить в канал и через <code>postMessage</code>. <code>new RwLock(data)</code> копирует обычные данные в новый регион, а объект региона, которым владеет поток, забирает без копии.</p>
+
 <h2 id="vs-go">Чем это отличается от Go</h2>
 <div class="table-wrap">
 <table>
@@ -232,8 +273,8 @@ ping.<span class="tok-api">close</span>();
 <span class="tok-keyword">const</span> perMessage = (performance.<span class="tok-fn">now</span>() - t) * <span class="tok-number">1000</span> / N;
 worker.<span class="tok-api">terminate</span>();
 <span class="tok-fn">print</span>(<span class="tok-string">'канал, круг:'</span>, perTrip.<span class="tok-fn">toFixed</span>(<span class="tok-number">1</span>), <span class="tok-string">'µs'</span>);
-<span class="tok-fn">print</span>(<span class="tok-string">'postMessage + getMessage, круг:'</span>, perMessage.<span class="tok-fn">toFixed</span>(<span class="tok-number">1</span>), <span class="tok-string">'µs'</span>);</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8 --module; время у вас будет другим</span></div><pre class="out">канал, круг: 4.8 µs
-postMessage + getMessage, круг: 2.9 µs</pre></figure>
+<span class="tok-fn">print</span>(<span class="tok-string">'postMessage + getMessage, круг:'</span>, perMessage.<span class="tok-fn">toFixed</span>(<span class="tok-number">1</span>), <span class="tok-string">'µs'</span>);</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8 --module; время у вас будет другим</span></div><pre class="out">канал, круг: 4.9 µs
+postMessage + getMessage, круг: 3.1 µs</pre></figure>
 
 <p>Это единицы микросекунд, а у горутин в Go — доли микросекунды. Если гонять через канал по одному числу, больше 200 000 значений в секунду не выйдет, и в горячем цикле пересылка легко займёт больше времени, чем сама работа. Каналы подходят, чтобы передавать порции работы: заказ, кусок файла, пачку строк. Объединяйте мелкие значения в пачки, как и для <code>spawn</code> (<a href="practices.html#batch">подробнее</a>).</p>
 <nav class="pager" aria-label="Соседние страницы"><a class="prev" href="spawn.html"><span>← Назад</span>spawn: задачи в потоках</a><a class="next" href="practices.html"><span>Дальше →</span>Как делать и как не делать</a></nav>

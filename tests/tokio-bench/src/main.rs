@@ -5,7 +5,7 @@
 use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, Mutex, RwLock};
 
 const N: usize = 1000;
 
@@ -114,6 +114,30 @@ fn main() {
         })
         .await;
         time("ping-pong 1000 round trips", ping_pong).await;
+        time("rwlock: 1000 uncontended write+release", || async {
+            let lock = RwLock::new(0u64);
+            for _ in 0..N {
+                *lock.write().await += 1;
+            }
+        })
+        .await;
+        time("rwlock: 4 tasks x 250 write increments", || async {
+            let lock = Arc::new(RwLock::new(0u64));
+            let tasks: Vec<_> = (0..4)
+                .map(|_| {
+                    let lock = lock.clone();
+                    tokio::spawn(async move {
+                        for _ in 0..250 {
+                            *lock.write().await += 1;
+                        }
+                    })
+                })
+                .collect();
+            for task in tasks {
+                task.await.unwrap();
+            }
+        })
+        .await;
         let inside = tokio::spawn(async {
             let start = Instant::now();
             ping_pong().await;

@@ -1072,10 +1072,10 @@ index 8226ac48..2ee2655b 100644
    V(address_of_double_neg_constant, "double_negate_constant")                  \
    V(address_of_enable_experimental_regexp_engine,                              \
 diff --git a/src/common/message-template.h b/src/common/message-template.h
-index ce7c8efa..bbb4c042 100644
+index ce7c8efa..11834ea5 100644
 --- a/src/common/message-template.h
 +++ b/src/common/message-template.h
-@@ -739,6 +739,26 @@ namespace internal {
+@@ -739,6 +739,32 @@ namespace internal {
    T(WasmSuspendJSFrames, "trying to suspend JS frames")                        \
    T(WasmExceptionError, "wasm exception")                                      \
    T(WasmObjectsAreOpaque, "WebAssembly objects are opaque")                    \
@@ -1086,6 +1086,12 @@ index ce7c8efa..bbb4c042 100644
 +  T(RegionFrozen,                                                              \
 +    "OwnershipError: region % is frozen; thaw it before writing")            \
 +  T(RegionFreed, "OwnershipError: region % was freed")                         \
++  T(RegionLocked,                                                              \
++    "OwnershipError: region % is in an RwLock; use it through lock.read() or " \
++    "lock.write()")                                                            \
++  T(RegionReadLocked,                                                          \
++    "OwnershipError: region % is locked for reading; use lock.write() to "     \
++    "change it")                                                               \
 +  T(RegionLiteralNoRegion,                                                     \
 +    "#{} and #[] need a current region: use region.enter() or region.run()")  \
 +  T(RegionLiteralPlainValue,                                                   \
@@ -1979,16 +1985,17 @@ index 8aab5f56..b2e7c4d5 100644
        CheckValueInputIs(node, 1, Type::Any());
 diff --git a/src/d8/d8-channel.cc b/src/d8/d8-channel.cc
 new file mode 100644
-index 00000000..ec9dac6f
+index 00000000..02bbde80
 --- /dev/null
 +++ b/src/d8/d8-channel.cc
-@@ -0,0 +1,822 @@
+@@ -0,0 +1,1147 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
 +
 +#include "src/d8/d8-channel.h"
 +
++#include <algorithm>
 +#include <atomic>
 +#include <cmath>
 +#include <deque>
@@ -2007,6 +2014,7 @@ index 00000000..ec9dac6f
 +#include "include/v8-platform.h"
 +#include "include/v8-primitive.h"
 +#include "include/v8-promise.h"
++#include "src/api/api-inl.h"
 +#include "src/base/lazy-instance.h"
 +#include "src/base/macros.h"
 +#include "src/base/platform/semaphore.h"
@@ -2015,8 +2023,10 @@ index 00000000..ec9dac6f
 +#include "src/d8/d8-port.h"
 +#include "src/d8/d8.h"
 +#include "src/execution/isolate.h"
++#include "src/handles/shared-object-conveyor-handles.h"
 +#include "src/heap/parked-scope-inl.h"
 +#include "src/init/v8.h"
++#include "src/objects/js-region-inl.h"
 +
 +namespace v8 {
 +
@@ -2031,7 +2041,8 @@ index 00000000..ec9dac6f
 +// A pending send or receive of one isolate. A receive may wait on several
 +// channels at once (select); whichever delivers first completes it.
 +struct ChannelWaiter {
-+  enum class Kind { kReceive, kSend };
++  // kRead and kWrite wait for an RwLock.
++  enum class Kind { kReceive, kSend, kRead, kWrite };
 +
 +  ChannelWaiter(Kind kind, Isolate* isolate, bool blocking, uint64_t id)
 +      : kind(kind), isolate(isolate), blocking(blocking), id(id) {}
@@ -2051,6 +2062,8 @@ index 00000000..ec9dac6f
 +  std::shared_ptr<ChannelState> source;
 +  // The channels the waiter is registered with.
 +  std::vector<std::shared_ptr<ChannelState>> channels;
++  // An RwLock granted to the waiter, until its thread takes the grant up.
++  std::shared_ptr<ChannelState> granted;
 +  // Signalled when a blocking waiter completes or is cancelled because its
 +  // isolate is terminated.
 +  base::Semaphore completed{0};
@@ -2059,6 +2072,32 @@ index 00000000..ec9dac6f
 +  bool cancelled = false;
 +};
 +
++// An RwLock: one region that threads take turns to write, or read together.
++// While nobody holds the lock the region is in transit; the writer owns it;
++// readers borrow it frozen by nobody. Guards are taken up on the holder's
++// thread, which claims or borrows the region there.
++struct LockData {
++  LockData(int region, int generation)
++      : region(region), generation(generation) {}
++  ~LockData() {
++    i::RegionRegistry::SetLocked(region, false);
++    i::RegionRegistry::RemoveHandle(region);
++  }
++
++  const int region;
++  const int generation;
++  // The object the lock was made with; every guard gives it out.
++  std::unique_ptr<i::SharedObjectConveyorHandles> root;
++  // Guarded by the channels mutex. Granted holders: the writer, and one entry
++  // per read guard.
++  Isolate* writer = nullptr;
++  std::vector<Isolate*> readers;
++  // Acquires waiting in arrival order; cancelled ones are skipped.
++  std::deque<std::shared_ptr<ChannelWaiter>> queue;
++};
++
++// Backs Channel objects, and RwLock objects (with `lock` set), so that both
++// travel between threads the same way.
 +struct ChannelState {
 +  explicit ChannelState(size_t capacity) : capacity(capacity) {}
 +
@@ -2084,6 +2123,7 @@ index 00000000..ec9dac6f
 +  // entries, which are skipped and dropped once they are half of the queue.
 +  std::deque<Receiver> receivers;
 +  size_t stale = 0;
++  std::unique_ptr<LockData> lock;
 +};
 +
 +namespace {
@@ -2109,6 +2149,9 @@ index 00000000..ec9dac6f
 +// the map itself is shared.
 +struct IsolateChannels {
 +  Global<FunctionTemplate> ctor;
++  Global<FunctionTemplate> lock_ctor;
++  // RwLock guards this isolate holds: the lock, and whether for writing.
++  std::vector<std::pair<std::shared_ptr<ChannelState>, bool>> held;
 +  std::unordered_map<uint64_t, PendingWait> pending;
 +  std::unordered_set<ChannelHandle*> handles;
 +  uint64_t next_id = 1;
@@ -2170,6 +2213,8 @@ index 00000000..ec9dac6f
 +
 +// The following functions run with the channels mutex held.
 +
++void GrantWaitingLocked(const std::shared_ptr<ChannelState>& state);
++
 +// The waiter, already marked done, leaves entries in the receive queues of
 +// its channels except `taken_from`, whose entry was already removed.
 +void LeaveQueuesLocked(ChannelWaiter* waiter, const ChannelState* taken_from) {
@@ -2211,7 +2256,13 @@ index 00000000..ec9dac6f
 +      if (item.sender.get() == waiter) item.sender = nullptr;
 +    }
 +  }
++  std::vector<std::shared_ptr<ChannelState>> channels =
++      std::move(waiter->channels);
 +  waiter->channels.clear();
++  // An acquire that leaves the queue may let the ones after it in.
++  for (const std::shared_ptr<ChannelState>& state : channels) {
++    if (state->lock) GrantWaitingLocked(state);
++  }
 +}
 +
 +// The next receiver that can still take a value, or null.
@@ -2243,9 +2294,75 @@ index 00000000..ec9dac6f
 +  CompleteLocked(receiver.waiter, state.get());
 +}
 +
++bool FitsLocked(const LockData* lock, ChannelWaiter::Kind kind) {
++  return kind == ChannelWaiter::Kind::kWrite
++             ? lock->writer == nullptr && lock->readers.empty()
++             : lock->writer == nullptr;
++}
++
++// Whether an acquire is waiting; an acquire that comes later waits after it.
++bool HasWaitersLocked(LockData* lock) {
++  while (!lock->queue.empty() && lock->queue.front()->done) {
++    lock->queue.pop_front();
++  }
++  return !lock->queue.empty();
++}
++
++void GrantLocked(LockData* lock, Isolate* isolate, ChannelWaiter::Kind kind) {
++  if (kind == ChannelWaiter::Kind::kWrite) {
++    lock->writer = isolate;
++    return;
++  }
++  if (lock->readers.empty()) CHECK(i::RegionRegistry::FreezeInTransit(lock->region));
++  lock->readers.push_back(isolate);
++}
++
++// Grants waiting acquires in arrival order while they fit: one writer, or
++// every reader up to the next writer.
++void GrantWaitingLocked(const std::shared_ptr<ChannelState>& state) {
++  LockData* lock = state->lock.get();
++  while (HasWaitersLocked(lock)) {
++    std::shared_ptr<ChannelWaiter> waiter = lock->queue.front();
++    if (!FitsLocked(lock, waiter->kind)) return;
++    lock->queue.pop_front();
++    if (TerminatingIsolates().contains(waiter->isolate)) {
++      CancelLocked(waiter.get());
++      continue;
++    }
++    GrantLocked(lock, waiter->isolate, waiter->kind);
++    waiter->granted = state;
++    CompleteLocked(waiter);
++  }
++}
++
++// Gives back a grant whose guard was released or never taken up.
++void UngrantLocked(const std::shared_ptr<ChannelState>& state,
++                   Isolate* isolate, bool write) {
++  LockData* lock = state->lock.get();
++  if (write) {
++    CHECK_EQ(lock->writer, isolate);
++    lock->writer = nullptr;
++  } else {
++    auto it = std::find(lock->readers.begin(), lock->readers.end(), isolate);
++    CHECK(it != lock->readers.end());
++    lock->readers.erase(it);
++    if (lock->readers.empty()) {
++      CHECK(i::RegionRegistry::ThawToTransit(lock->region));
++    }
++  }
++  GrantWaitingLocked(state);
++}
++
 +// A value delivered to an isolate that went away before reading it goes back
 +// to the front of its channel, so it is not lost with the regions it moves.
++// A lock granted to it is given to the next waiter.
 +void ReturnUndeliveredLocked(ChannelWaiter* waiter) {
++  if (waiter->granted) {
++    std::shared_ptr<ChannelState> state = std::move(waiter->granted);
++    UngrantLocked(state, waiter->isolate,
++                  waiter->kind == ChannelWaiter::Kind::kWrite);
++    return;
++  }
 +  if (!waiter->data || !waiter->source) return;
 +  std::shared_ptr<ChannelState> state = std::move(waiter->source);
 +  int index;
@@ -2331,6 +2448,45 @@ index 00000000..ec9dac6f
 +  return !waiter->cancelled;
 +}
 +
++// Takes up a lock granted to this isolate: the writer claims the region, a
++// reader borrows it. Returns the lock's object.
++MaybeLocal<Value> TakeGrant(Isolate* isolate,
++                            const std::shared_ptr<ChannelState>& state,
++                            bool write) {
++  LockData* lock = state->lock.get();
++  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
++  if (write) {
++    CHECK(i::RegionRegistry::Claim(lock->region, lock->generation, i_isolate));
++  } else {
++    CHECK(i::RegionRegistry::Borrow(lock->region, i_isolate, true));
++  }
++  DataOf(isolate).held.emplace_back(state, write);
++  i::Handle<i::Object> root;
++  if (!i::JSRegionObject::ToJSValue(
++           i_isolate, i::handle(lock->root->GetPersisted(0), i_isolate))
++           .ToHandle(&root)) {
++    return {};
++  }
++  return Utils::ToLocal(root);
++}
++
++// Gives up a guard taken by TakeGrant. An isolate that is going away keeps
++// its views, which go with it.
++void ReleaseHeld(Isolate* isolate, const std::shared_ptr<ChannelState>& state,
++                 bool write, bool dying) {
++  LockData* lock = state->lock.get();
++  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
++  if (write) {
++    // Views of the region's bytes must not outlive write access.
++    if (!dying) i::JSRegionObject::DetachViews(i_isolate, lock->region);
++    CHECK(i::RegionRegistry::Release(lock->region, i_isolate));
++  } else {
++    i::RegionRegistry::Unborrow(lock->region, i_isolate, !dying);
++  }
++  base::MutexGuard guard(channels_mutex.Pointer());
++  UngrantLocked(state, isolate, write);
++}
++
 +// {value, done, index} for a completed receive.
 +MaybeLocal<Object> MakeResult(Isolate* isolate, Local<Context> context,
 +                              int index, bool closed,
@@ -2403,6 +2559,23 @@ index 00000000..ec9dac6f
 +  ChannelWaiter* waiter = pending.waiter.get();
 +  if (waiter->kind == ChannelWaiter::Kind::kSend) {
 +    USE(resolver->Resolve(context, Undefined(isolate_)));
++    return;
++  }
++  if (waiter->kind == ChannelWaiter::Kind::kRead ||
++      waiter->kind == ChannelWaiter::Kind::kWrite) {
++    std::shared_ptr<ChannelState> state;
++    {
++      base::MutexGuard guard(channels_mutex.Pointer());
++      state = std::move(waiter->granted);
++    }
++    TryCatch try_catch(isolate_);
++    Local<Value> root;
++    if (TakeGrant(isolate_, state, waiter->kind == ChannelWaiter::Kind::kWrite)
++            .ToLocal(&root)) {
++      USE(resolver->Resolve(context, root));
++    } else if (try_catch.HasCaught() && !try_catch.HasTerminated()) {
++      USE(resolver->Reject(context, try_catch.Exception()));
++    }
 +    return;
 +  }
 +  std::unique_ptr<ChannelValue> received;
@@ -2624,7 +2797,7 @@ index 00000000..ec9dac6f
 +    Local<Value> element;
 +    if (!array->Get(context, i).ToLocal(&element)) return;
 +    std::shared_ptr<ChannelState> state = StateOf(isolate, element);
-+    if (!state) {
++    if (!state || state->lock) {
 +      ThrowTypeError(isolate, "Channel.select() expects channels");
 +      return;
 +    }
@@ -2687,6 +2860,135 @@ index 00000000..ec9dac6f
 +  info.GetReturnValue().Set(closed);
 +}
 +
++std::shared_ptr<ChannelState> ThisLock(const FunctionCallbackInfo<Value>& info) {
++  std::shared_ptr<ChannelState> state =
++      Channels::FromValue(info.GetIsolate(), info.This());
++  if (!state || !state->lock) {
++    ThrowTypeError(info.GetIsolate(), "this is not an RwLock");
++    return nullptr;
++  }
++  return state;
++}
++
++// new RwLock(value): the lock takes the region of a region object owned by
++// this thread; other objects are first copied into a new region.
++void LockNew(const FunctionCallbackInfo<Value>& info) {
++  Isolate* isolate = info.GetIsolate();
++  if (!info.IsConstructCall()) {
++    ThrowTypeError(isolate, "RwLock constructor requires 'new'");
++    return;
++  }
++  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
++  if (!info[0]->IsObject()) {
++    ThrowTypeError(isolate, "RwLock holds an object or an array");
++    return;
++  }
++  i::DirectHandle<i::Object> root = Utils::OpenDirectHandle(*info[0]);
++  if (!i::IsJSRegionObject(*root)) {
++    int region = i::RegionRegistry::Create(i_isolate);
++    if (region < 0) {
++      ThrowTypeError(isolate, "Too many regions");
++      return;
++    }
++    if (!i::JSRegionObject::Evacuate(i_isolate, region, root).ToHandle(&root)) {
++      return;
++    }
++  }
++  int region = i::Cast<i::JSRegionObject>(*root)->region_id();
++  if (i::RegionRegistry::IsLocked(region)) {
++    ThrowTypeError(isolate, "the region is already in an RwLock");
++    return;
++  }
++  if (!i::RegionRegistry::IsOwner(region, i_isolate)) {
++    ThrowTypeError(isolate,
++                   "RwLock needs a region that this thread owns and that is "
++                   "not frozen");
++    return;
++  }
++  auto state = std::make_shared<ChannelState>(0);
++  state->lock = std::make_unique<LockData>(
++      region, i::RegionRegistry::Generation(region));
++  i::RegionRegistry::AddHandle(region);
++  i::RegionRegistry::SetLocked(region, true);
++  state->lock->root = std::make_unique<i::SharedObjectConveyorHandles>(i_isolate);
++  state->lock->root->Persist(i::Cast<i::HeapObject>(*root));
++  // The region now belongs to the lock: this thread uses it through guards.
++  i::JSRegionObject::DetachViews(i_isolate, region);
++  CHECK(i::RegionRegistry::Release(region, i_isolate));
++  Attach(isolate, info.This(), std::move(state));
++}
++
++// __acquire(write, mode): mode 0 waits with a promise, 1 blocks, 2 only tries
++// and gives null if the lock is taken. Gives the lock's object; the guard
++// is made by the prelude.
++void LockAcquire(const FunctionCallbackInfo<Value>& info) {
++  Isolate* isolate = info.GetIsolate();
++  std::shared_ptr<ChannelState> state = ThisLock(info);
++  if (!state) return;
++  bool write = info[0]->IsTrue();
++  int mode = info[1]->Int32Value(isolate->GetCurrentContext()).FromMaybe(0);
++  bool blocking = mode == 1;
++  auto kind = write ? ChannelWaiter::Kind::kWrite : ChannelWaiter::Kind::kRead;
++  LockData* lock = state->lock.get();
++  bool granted = false;
++  std::shared_ptr<ChannelWaiter> waiter;
++  uint64_t id = mode == 0 ? DataOf(isolate).next_id++ : 0;
++  {
++    base::MutexGuard guard(channels_mutex.Pointer());
++    if (!HasWaitersLocked(lock) && FitsLocked(lock, kind)) {
++      GrantLocked(lock, isolate, kind);
++      granted = true;
++    } else if (mode != 2) {
++      waiter = std::make_shared<ChannelWaiter>(kind, isolate, blocking, id);
++      waiter->channels.push_back(state);
++      lock->queue.push_back(waiter);
++    }
++  }
++  if (mode == 2 && !granted) {
++    info.GetReturnValue().SetNull();
++    return;
++  }
++  if (!granted && !blocking) {
++    info.GetReturnValue().Set(AddPending(isolate, std::move(waiter)));
++    return;
++  }
++  if (!granted) {
++    if (!WaitBlocking(waiter)) return;
++    base::MutexGuard guard(channels_mutex.Pointer());
++    if (isolate->IsExecutionTerminating()) {
++      ReturnUndeliveredLocked(waiter.get());
++      return;
++    }
++    waiter->granted = nullptr;
++  }
++  Local<Value> root;
++  if (!TakeGrant(isolate, state, write).ToLocal(&root)) return;
++  if (mode != 0) {
++    info.GetReturnValue().Set(root);
++    return;
++  }
++  Local<Promise::Resolver> resolver =
++      Promise::Resolver::New(isolate->GetCurrentContext()).ToLocalChecked();
++  USE(resolver->Resolve(isolate->GetCurrentContext(), root));
++  info.GetReturnValue().Set(resolver->GetPromise());
++}
++
++// __release(write): gives up one guard of this thread.
++void LockRelease(const FunctionCallbackInfo<Value>& info) {
++  Isolate* isolate = info.GetIsolate();
++  std::shared_ptr<ChannelState> state = ThisLock(info);
++  if (!state) return;
++  bool write = info[0]->IsTrue();
++  auto& held = DataOf(isolate).held;
++  auto it = std::find(held.begin(), held.end(), std::pair{state, write});
++  if (it == held.end()) {
++    ThrowTypeError(isolate, "this thread holds no such guard of the lock");
++    return;
++  }
++  held.erase(it);
++  ReleaseHeld(isolate, state, write, false);
++}
++
 +}  // namespace
 +
 +// static
@@ -2718,11 +3020,32 @@ index 00000000..ec9dac6f
 +}
 +
 +// static
++Local<FunctionTemplate> Channels::CreateLockTemplate(Isolate* isolate) {
++  Local<FunctionTemplate> ctor = FunctionTemplate::New(isolate, LockNew);
++  ctor->SetClassName(String::NewFromUtf8Literal(isolate, "RwLock"));
++  ctor->InstanceTemplate()->SetInternalFieldCount(1);
++  Local<Signature> signature = Signature::New(isolate, ctor);
++  for (auto [name, callback] : {std::pair{"__acquire", LockAcquire},
++                                std::pair{"__release", LockRelease}}) {
++    ctor->PrototypeTemplate()->Set(
++        String::NewFromUtf8(isolate, name).ToLocalChecked(),
++        FunctionTemplate::New(isolate, callback, Local<Value>(), signature, 0,
++                              ConstructorBehavior::kThrow));
++  }
++  DataOf(isolate).lock_ctor.Reset(isolate, ctor);
++  return ctor;
++}
++
++// static
 +std::shared_ptr<ChannelState> Channels::FromValue(Isolate* isolate,
 +                                                  Local<Value> value) {
 +  IsolateChannels& data = DataOf(isolate);
 +  if (data.ctor.IsEmpty() || !value->IsObject()) return nullptr;
-+  if (!data.ctor.Get(isolate)->HasInstance(value)) return nullptr;
++  if (!data.ctor.Get(isolate)->HasInstance(value) &&
++      (data.lock_ctor.IsEmpty() ||
++       !data.lock_ctor.Get(isolate)->HasInstance(value))) {
++    return nullptr;
++  }
 +  Local<Object> object = value.As<Object>();
 +  if (object->InternalFieldCount() != 1) return nullptr;
 +  Local<Data> field = object->GetInternalField(0);
@@ -2736,9 +3059,10 @@ index 00000000..ec9dac6f
 +MaybeLocal<Object> Channels::ToObject(Isolate* isolate,
 +                                      std::shared_ptr<ChannelState> state) {
 +  IsolateChannels& data = DataOf(isolate);
-+  if (data.ctor.IsEmpty()) return {};
++  Global<FunctionTemplate>& ctor = state->lock ? data.lock_ctor : data.ctor;
++  if (ctor.IsEmpty()) return {};
 +  Local<Object> object;
-+  if (!data.ctor.Get(isolate)
++  if (!ctor.Get(isolate)
 +           ->InstanceTemplate()
 +           ->NewInstance(isolate->GetCurrentContext())
 +           .ToLocal(&object)) {
@@ -2792,6 +3116,12 @@ index 00000000..ec9dac6f
 +    pending.context.Reset();
 +  }
 +  data.pending.clear();
++  // Guards still held are released, so the lock does not stay taken.
++  while (!data.held.empty()) {
++    auto [state, write] = std::move(data.held.back());
++    data.held.pop_back();
++    ReleaseHeld(isolate, state, write, true);
++  }
 +  // Weak callbacks do not run when an isolate is disposed.
 +  for (ChannelHandle* handle : data.handles) {
 +    handle->object.Reset();
@@ -2799,6 +3129,7 @@ index 00000000..ec9dac6f
 +  }
 +  data.handles.clear();
 +  data.ctor.Reset();
++  data.lock_ctor.Reset();
 +  base::MutexGuard guard(isolates_mutex.Pointer());
 +  AllData().erase(isolate);
 +  data_epoch.fetch_add(1, std::memory_order_release);
@@ -2807,10 +3138,10 @@ index 00000000..ec9dac6f
 +}  // namespace v8
 diff --git a/src/d8/d8-channel.h b/src/d8/d8-channel.h
 new file mode 100644
-index 00000000..b7c2e120
+index 00000000..970a5f96
 --- /dev/null
 +++ b/src/d8/d8-channel.h
-@@ -0,0 +1,44 @@
+@@ -0,0 +1,46 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -2834,9 +3165,11 @@ index 00000000..b7c2e120
 +class Channels {
 + public:
 +  static Local<FunctionTemplate> CreateTemplate(Isolate* isolate);
++  // RwLock: a region that threads take turns to write or read together.
++  static Local<FunctionTemplate> CreateLockTemplate(Isolate* isolate);
 +
-+  // Serializer support: the state behind a Channel object, or null if
-+  // `value` is not one, and a Channel object for a received state.
++  // Serializer support: the state behind a Channel or RwLock object, or null
++  // if `value` is neither, and an object for a received state.
 +  static std::shared_ptr<ChannelState> FromValue(Isolate* isolate,
 +                                                 Local<Value> value);
 +  static MaybeLocal<Object> ToObject(Isolate* isolate,
@@ -2857,10 +3190,10 @@ index 00000000..b7c2e120
 +#endif  // V8_D8_D8_CHANNEL_H_
 diff --git a/src/d8/d8-port.cc b/src/d8/d8-port.cc
 new file mode 100644
-index 00000000..3fe2d28e
+index 00000000..bdfec316
 --- /dev/null
 +++ b/src/d8/d8-port.cc
-@@ -0,0 +1,879 @@
+@@ -0,0 +1,883 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -3088,6 +3421,10 @@ index 00000000..3fe2d28e
 +    int region = TransferredRegion(isolate, element);
 +    if (region < 0) {
 +      ThrowTypeError(isolate, "Transfer array elements must be regions");
++      return false;
++    }
++    if (i::RegionRegistry::IsLocked(region)) {
++      ThrowTypeError(isolate, "Region is in an RwLock and cannot be moved");
 +      return false;
 +    }
 +    if (!i::RegionRegistry::IsOwner(region, i_isolate) &&
@@ -3837,7 +4174,7 @@ index 00000000..bd767012
 +
 +#endif  // V8_D8_D8_PORT_H_
 diff --git a/src/d8/d8.cc b/src/d8/d8.cc
-index 49121fe1..06fcc616 100644
+index 49121fe1..86f83244 100644
 --- a/src/d8/d8.cc
 +++ b/src/d8/d8.cc
 @@ -14,6 +14,7 @@
@@ -4018,7 +4355,7 @@ index 49121fe1..06fcc616 100644
  }
  
  void Shell::WorkerTerminate(const v8::FunctionCallbackInfo<v8::Value>& info) {
-@@ -4804,6 +4897,12 @@ Local<ObjectTemplate> Shell::CreateGlobalTemplate(Isolate* isolate) {
+@@ -4804,6 +4897,14 @@ Local<ObjectTemplate> Shell::CreateGlobalTemplate(Isolate* isolate) {
    global_template->Set(isolate, "performance",
                         Shell::CreatePerformanceTemplate(isolate));
    global_template->Set(isolate, "Worker", Shell::CreateWorkerTemplate(isolate));
@@ -4027,11 +4364,13 @@ index 49121fe1..06fcc616 100644
 +                         Shell::CreateRegionTemplate(isolate));
 +    global_template->Set(isolate, "Channel",
 +                         Channels::CreateTemplate(isolate));
++    global_template->Set(isolate, "RwLock",
++                         Channels::CreateLockTemplate(isolate));
 +  }
  
    // Prevent fuzzers from creating side effects.
    if (!i::v8_flags.fuzzing) {
-@@ -4899,6 +4998,1041 @@ Local<FunctionTemplate> Shell::CreateWorkerTemplate(Isolate* isolate) {
+@@ -4899,6 +5000,1051 @@ Local<FunctionTemplate> Shell::CreateWorkerTemplate(Isolate* isolate) {
    return worker_fun_template;
  }
  
@@ -4284,6 +4623,9 @@ index 49121fe1..06fcc616 100644
 +      ThrowError(isolate, message.c_str());
 +      return;
 +    }
++    case i::RegionRegistry::FreeResult::kLocked:
++      ThrowError(isolate, "Region is in an RwLock and cannot be freed");
++      return;
 +    case i::RegionRegistry::FreeResult::kNotOwner:
 +      ThrowError(isolate,
 +                 i::RegionRegistry::IsFreed(region) ? "Region was already freed"
@@ -4340,6 +4682,11 @@ index 49121fe1..06fcc616 100644
 +  DCHECK(i::ValidateCallbackInfo(info));
 +  int region = RegionIdOf(info);
 +  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(info.GetIsolate());
++  if (i::RegionRegistry::IsLocked(region)) {
++    ThrowError(info.GetIsolate(),
++               "Region is in an RwLock; readers share it through lock.read()");
++    return;
++  }
 +  // Writable typed array views would let the owner change frozen bytes.
 +  if (i::RegionRegistry::IsOwner(region, i_isolate)) {
 +    i::JSRegionObject::DetachViews(i_isolate, region);
@@ -4391,8 +4738,10 @@ index 49121fe1..06fcc616 100644
 +  }
 +  if (!i::RegionRegistry::Borrow(region,
 +                                 reinterpret_cast<i::Isolate*>(isolate))) {
-+    ThrowError(isolate, i::RegionRegistry::IsFreed(region)
-+                            ? "Region was freed"
++    ThrowError(isolate, i::RegionRegistry::IsFreed(region) ? "Region was freed"
++                        : i::RegionRegistry::IsLocked(region)
++                            ? "Region is in an RwLock; read it through "
++                              "lock.read()"
 +                            : "Region must be frozen to borrow it");
 +    return;
 +  }
@@ -5073,7 +5422,7 @@ index 49121fe1..06fcc616 100644
  Local<ObjectTemplate> Shell::CreateAsyncHookTemplate(Isolate* isolate) {
    Local<ObjectTemplate> async_hooks_templ = ObjectTemplate::New(isolate);
    async_hooks_templ->Set(isolate, "createHook",
-@@ -5376,9 +6510,596 @@ MaybeLocal<Context> Shell::CreateEvaluationContext(Isolate* isolate) {
+@@ -5376,9 +6522,649 @@ MaybeLocal<Context> Shell::CreateEvaluationContext(Isolate* isolate) {
    }
  #endif  // V8_ENABLE_HARDWARE_WATCHPOINT_SUPPORT
  
@@ -5437,8 +5786,10 @@ index 49121fe1..06fcc616 100644
 +    }
 +  }
 +
++  // Channels and locks are shared by reference.
 +  const isChannel = (value) =>
-+      typeof Channel === 'function' && value instanceof Channel;
++      (typeof Channel === 'function' && value instanceof Channel) ||
++      (typeof RwLock === 'function' && value instanceof RwLock);
 +  // Task code and the order of its captures, by the key prepareSpawn() gives.
 +  const factories = new Map();
 +
@@ -5652,6 +6003,57 @@ index 49121fe1..06fcc616 100644
 +      }),
 +    });
 +  }
++  // RwLock: a guard gives the lock's object while it is held. Once released,
++  // the object cannot be used through it, nor through references kept from
++  // it: the region is the lock's again.
++  if (typeof RwLock === 'function') {
++    const nativeAcquire = RwLock.prototype.__acquire;
++    const nativeRelease = RwLock.prototype.__release;
++    delete RwLock.prototype.__acquire;
++    delete RwLock.prototype.__release;
++    class RwLockGuard {
++      #lock;
++      #write;
++      #value;
++      #held = true;
++      constructor(lock, write, value) {
++        this.#lock = lock;
++        this.#write = write;
++        this.#value = value;
++      }
++      get value() {
++        if (!this.#held) throw new TypeError('the RwLock guard was released');
++        return this.#value;
++      }
++      release() {
++        if (!this.#held) return;
++        this.#held = false;
++        this.#value = undefined;
++        nativeRelease.call(this.#lock, this.#write);
++      }
++      [Symbol.dispose]() {
++        this.release();
++      }
++    }
++    const kWait = 0, kBlock = 1, kTry = 2;
++    const method = (value) =>
++        ({ value, writable: true, configurable: true, enumerable: false });
++    const acquire = (write, mode) => function() {
++      const value = nativeAcquire.call(this, write, mode);
++      if (mode === kWait) {
++        return value.then((value) => new RwLockGuard(this, write, value));
++      }
++      return value === null ? null : new RwLockGuard(this, write, value);
++    };
++    Object.defineProperties(RwLock.prototype, {
++      read: method(acquire(false, kWait)),
++      write: method(acquire(true, kWait)),
++      readSync: method(acquire(false, kBlock)),
++      writeSync: method(acquire(true, kBlock)),
++      tryRead: method(acquire(false, kTry)),
++      tryWrite: method(acquire(true, kTry)),
++    });
++  }
 +  // Resolves once every task spawned by this thread has finished.
 +  spawn.idle = () =>
 +      inFlight === 0 ? Promise.resolve()
@@ -5670,7 +6072,7 @@ index 49121fe1..06fcc616 100644
  namespace {
  int LineFromOffset(Local<debug::Script> script, int offset) {
    debug::Location location = script->GetSourceLocation(offset);
-@@ -6538,6 +8259,7 @@ void SourceGroup::JoinThread(const i::ParkedScope& parked) {
+@@ -6538,6 +8324,7 @@ void SourceGroup::JoinThread(const i::ParkedScope& parked) {
  void SerializationDataQueue::Enqueue(std::unique_ptr<SerializationData> data) {
    base::MutexGuard lock_guard(&mutex_);
    data_.push_back(std::move(data));
@@ -5678,7 +6080,7 @@ index 49121fe1..06fcc616 100644
  }
  
  bool SerializationDataQueue::Dequeue(
-@@ -6547,6 +8269,7 @@ bool SerializationDataQueue::Dequeue(
+@@ -6547,6 +8334,7 @@ bool SerializationDataQueue::Dequeue(
    if (data_.empty()) return false;
    *out_data = std::move(data_[0]);
    data_.erase(data_.begin());
@@ -5686,7 +6088,7 @@ index 49121fe1..06fcc616 100644
    return true;
  }
  
-@@ -6558,6 +8281,7 @@ bool SerializationDataQueue::IsEmpty() {
+@@ -6558,6 +8346,7 @@ bool SerializationDataQueue::IsEmpty() {
  void SerializationDataQueue::Clear() {
    base::MutexGuard lock_guard(&mutex_);
    data_.clear();
@@ -5694,7 +6096,7 @@ index 49121fe1..06fcc616 100644
  }
  
  Worker::Worker(Isolate* parent_isolate, const char* script)
-@@ -6668,6 +8392,12 @@ std::unique_ptr<SerializationData> Worker::GetMessage(Isolate* requester) {
+@@ -6668,6 +8457,12 @@ std::unique_ptr<SerializationData> Worker::GetMessage(Isolate* requester) {
        out_queue_.Dequeue(&result);
        break;
      }
@@ -5707,7 +6109,7 @@ index 49121fe1..06fcc616 100644
      out_semaphore_.ParkedWait(
          reinterpret_cast<i::Isolate*>(requester)->main_thread_local_isolate());
    }
-@@ -6705,6 +8435,8 @@ void Worker::Terminate() {
+@@ -6705,6 +8500,8 @@ void Worker::Terminate() {
    // returning to the event queue. Since we checked the state before, and we are
    // holding the {worker_mutex_}, it's safe to access the isolate.
    isolate_->TerminateExecution();
@@ -5716,7 +6118,7 @@ index 49121fe1..06fcc616 100644
  }
  
  void Worker::EnterTerminatedState() {
-@@ -7310,6 +9042,9 @@ bool Shell::SetOptions(int argc, char* argv[]) {
+@@ -7310,6 +9107,9 @@ bool Shell::SetOptions(int argc, char* argv[]) {
                                    argv, &i)) {
        // Value is expressed in MB.
        options.max_serializer_memory = atoi(flag_value) * i::MB;
@@ -5726,7 +6128,7 @@ index 49121fe1..06fcc616 100644
      } else if (FlagMatches("--bundle", &argv[i])) {
        options.bundle = true;
  #ifdef V8_FUZZILLI
-@@ -7921,6 +9656,27 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7921,6 +9721,27 @@ class Serializer : public ValueSerializer::Delegate {
      return true;
    }
  
@@ -5754,7 +6156,7 @@ index 49121fe1..06fcc616 100644
   private:
    Maybe<bool> PrepareTransfer(Local<Context> context, Local<Value> transfer) {
      if (transfer->IsArray()) {
-@@ -7929,6 +9685,22 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7929,6 +9750,22 @@ class Serializer : public ValueSerializer::Delegate {
        for (uint32_t i = 0; i < length; ++i) {
          Local<Value> element;
          if (transfer_array->Get(context, i).ToLocal(&element)) {
@@ -5777,7 +6179,7 @@ index 49121fe1..06fcc616 100644
            if (!element->IsArrayBuffer()) {
              ThrowError(isolate_,
                         "Transfer array elements must be an ArrayBuffer");
-@@ -7961,7 +9733,48 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7961,7 +9798,52 @@ class Serializer : public ValueSerializer::Delegate {
      }
    }
  
@@ -5789,6 +6191,10 @@ index 49121fe1..06fcc616 100644
 +
 +  bool PrepareRegionTransfer(int region) {
 +    i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate_);
++    if (i::RegionRegistry::IsLocked(region)) {
++      ThrowError(isolate_, "Region is in an RwLock and cannot be moved");
++      return false;
++    }
 +    if (!i::RegionRegistry::IsOwner(region, i_isolate) &&
 +        !i::RegionRegistry::IsFrozenBy(region, i_isolate)) {
 +      ThrowError(isolate_,
@@ -5826,7 +6232,7 @@ index 49121fe1..06fcc616 100644
      for (const auto& global_array_buffer : array_buffers_) {
        Local<ArrayBuffer> array_buffer =
            Local<ArrayBuffer>::New(isolate_, global_array_buffer);
-@@ -7987,6 +9800,7 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7987,6 +9869,7 @@ class Serializer : public ValueSerializer::Delegate {
    ValueSerializer serializer_;
    std::unique_ptr<SerializationData> data_;
    std::vector<Global<ArrayBuffer>> array_buffers_;
@@ -5834,7 +6240,7 @@ index 49121fe1..06fcc616 100644
    std::vector<Global<SharedArrayBuffer>> shared_array_buffers_;
    std::vector<Global<WasmModuleObject>> wasm_modules_;
    std::vector<std::shared_ptr<v8::BackingStore>> backing_stores_;
-@@ -8013,6 +9827,21 @@ class Deserializer : public ValueDeserializer::Delegate {
+@@ -8013,6 +9896,21 @@ class Deserializer : public ValueDeserializer::Delegate {
        return MaybeLocal<Value>();
      }
  
@@ -5856,7 +6262,7 @@ index 49121fe1..06fcc616 100644
      uint32_t index = 0;
      for (const auto& backing_store : data_->backing_stores()) {
        Local<ArrayBuffer> array_buffer =
-@@ -8049,6 +9878,21 @@ class Deserializer : public ValueDeserializer::Delegate {
+@@ -8049,6 +9947,21 @@ class Deserializer : public ValueDeserializer::Delegate {
      return nullptr;
    }
  
@@ -5878,7 +6284,7 @@ index 49121fe1..06fcc616 100644
   private:
    Isolate* isolate_;
    ValueDeserializer deserializer_;
-@@ -8309,6 +10153,8 @@ int Shell::Main(int argc, char* argv[]) {
+@@ -8309,6 +10222,8 @@ int Shell::Main(int argc, char* argv[]) {
    // The platform is owned by wrapper platform despite the `std::move` below.
    START_IGNORE_LIFETIME_SAFETY_WARNINGS()
    g_default_platform = g_platform.get();
@@ -8101,10 +8507,10 @@ index 00000000..844041ef
 +#endif  // V8_OBJECTS_JS_REGION_INL_H_
 diff --git a/src/objects/js-region.cc b/src/objects/js-region.cc
 new file mode 100644
-index 00000000..bccce0ef
+index 00000000..973233da
 --- /dev/null
 +++ b/src/objects/js-region.cc
-@@ -0,0 +1,1790 @@
+@@ -0,0 +1,1836 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -8143,6 +8549,7 @@ index 00000000..bccce0ef
 +std::atomic<int> RegionRegistry::generations_[RegionRegistry::kMaxRegions];
 +std::atomic<int> RegionRegistry::handles_[RegionRegistry::kMaxRegions];
 +std::atomic<bool> RegionRegistry::in_use_[RegionRegistry::kMaxRegions];
++std::atomic<bool> RegionRegistry::locked_[RegionRegistry::kMaxRegions];
 +std::atomic<size_t> RegionRegistry::bytes_[RegionRegistry::kMaxRegions];
 +
 +namespace {
@@ -8344,6 +8751,7 @@ index 00000000..bccce0ef
 +    }
 +  }
 +  in_use_[region].store(true, std::memory_order_relaxed);
++  locked_[region].store(false, std::memory_order_relaxed);
 +  handles_[region].store(0, std::memory_order_relaxed);
 +  bytes_[region].store(0, std::memory_order_relaxed);
 +  owner_ids_[region].store(owner->id(), std::memory_order_relaxed);
@@ -8429,6 +8837,7 @@ index 00000000..bccce0ef
 +}
 +
 +RegionRegistry::FreeResult RegionRegistry::Free(int region, Isolate* isolate) {
++  if (IsLocked(region)) return FreeResult::kLocked;
 +  uintptr_t expected = OwnerKey(isolate);
 +  if (!owners_[region].compare_exchange_strong(expected, kFreed,
 +                                               std::memory_order_acq_rel)) {
@@ -8506,7 +8915,7 @@ index 00000000..bccce0ef
 +}
 +
 +bool RegionRegistry::Freeze(int region, Isolate* isolate) {
-+  if (!IsOwner(region, isolate)) return false;
++  if (!IsOwner(region, isolate) || IsLocked(region)) return false;
 +  frozen_by_[region].store(OwnerKey(isolate), std::memory_order_relaxed);
 +  // Borrows only succeed once the owners entry says kFrozen, so the counter
 +  // can be reset before publishing the new state.
@@ -8628,7 +9037,8 @@ index 00000000..bccce0ef
 +  return true;
 +}
 +
-+bool RegionRegistry::Borrow(int region, Isolate* isolate) {
++bool RegionRegistry::Borrow(int region, Isolate* isolate, bool for_lock) {
++  if (!for_lock && IsLocked(region)) return false;
 +  int readers = readers_[region].load(std::memory_order_acquire);
 +  while (readers >= 0) {
 +    if (!IsFrozen(region)) return false;
@@ -8642,10 +9052,11 @@ index 00000000..bccce0ef
 +  return false;
 +}
 +
-+void RegionRegistry::Unborrow(int region, Isolate* isolate) {
++void RegionRegistry::Unborrow(int region, Isolate* isolate,
++                              bool detach_views) {
 +  // Views go first: once the counter drops, the region may be thawed.
 +  if (RegionViews::ChangeBorrows(isolate, region, -1) == 0) {
-+    JSRegionObject::DetachFrozenViewsIfUnused(isolate, region);
++    if (detach_views) JSRegionObject::DetachFrozenViewsIfUnused(isolate, region);
 +    if (!IsFrozenBy(region, isolate)) SetReadable(region, isolate, false);
 +  }
 +  int previous = readers_[region].fetch_sub(1, std::memory_order_acq_rel);
@@ -8654,6 +9065,40 @@ index 00000000..bccce0ef
 +
 +bool RegionRegistry::IsBorrowedBy(int region, Isolate* isolate) {
 +  return RegionViews::HasBorrow(isolate, region);
++}
++
++void RegionRegistry::SetLocked(int region, bool locked) {
++  locked_[region].store(locked, std::memory_order_release);
++}
++
++bool RegionRegistry::IsLocked(int region) {
++  return locked_[region].load(std::memory_order_acquire);
++}
++
++bool RegionRegistry::FreezeInTransit(int region) {
++  frozen_by_[region].store(0, std::memory_order_relaxed);
++  readers_[region].store(0, std::memory_order_relaxed);
++  uintptr_t expected = 0;
++  if (!owners_[region].compare_exchange_strong(expected, kFrozen,
++                                               std::memory_order_acq_rel)) {
++    readers_[region].store(kNotFrozen, std::memory_order_relaxed);
++    return false;
++  }
++  return true;
++}
++
++bool RegionRegistry::ThawToTransit(int region) {
++  if (!IsFrozen(region) || frozen_by_[region].load(std::memory_order_acquire)) {
++    return false;
++  }
++  // As in Thaw(): closing the counter makes later borrows fail.
++  int expected = 0;
++  if (!readers_[region].compare_exchange_strong(expected, kNotFrozen,
++                                                std::memory_order_acq_rel)) {
++    return false;
++  }
++  owners_[region].store(0, std::memory_order_release);
++  return true;
 +}
 +
 +namespace {
@@ -8669,6 +9114,13 @@ index 00000000..bccce0ef
 +  DirectHandle<Object> id = factory->NewNumberFromInt(region);
 +  if (RegionRegistry::IsFreed(region)) {
 +    isolate->Throw(*factory->NewTypeError(MessageTemplate::kRegionFreed, id));
++  } else if (RegionRegistry::IsLocked(region)) {
++    bool read_locked = RegionRegistry::IsFrozen(region);
++    isolate->Throw(*factory->NewTypeError(
++        read_locked && access == Access::kWrite
++            ? MessageTemplate::kRegionReadLocked
++            : MessageTemplate::kRegionLocked,
++        id));
 +  } else if (RegionRegistry::IsInTransit(region)) {
 +    isolate->Throw(
 +        *factory->NewTypeError(MessageTemplate::kRegionInTransit, id));
@@ -9897,10 +10349,10 @@ index 00000000..bccce0ef
 +}  // namespace v8
 diff --git a/src/objects/js-region.h b/src/objects/js-region.h
 new file mode 100644
-index 00000000..9b998a5b
+index 00000000..6fb7d2f0
 --- /dev/null
 +++ b/src/objects/js-region.h
-@@ -0,0 +1,313 @@
+@@ -0,0 +1,327 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -9927,6 +10379,9 @@ index 00000000..9b998a5b
 +//                            owner may thaw it once no borrows are left;
 +//   Freed                  - nobody may access it ever again; its objects are
 +//                            emptied at the next shared GC.
++// A region can also be held by an RwLock (d8): it is then in transit while
++// nobody holds the lock, owned by the writer, or frozen by nobody while
++// readers hold it, and it cannot be freed, frozen or moved by other means.
 +class V8_EXPORT_PRIVATE RegionRegistry {
 + public:
 +  static constexpr int kMaxRegions = 1 << 20;
@@ -9947,7 +10402,7 @@ index 00000000..9b998a5b
 +  static bool IsFreed(int region);
 +
 +  // Owned(isolate) -> Freed, or Frozen(isolate, 0) -> Freed.
-+  enum class FreeResult { kFreed, kNotOwner, kBorrowed };
++  enum class FreeResult { kFreed, kNotOwner, kBorrowed, kLocked };
 +  static FreeResult Free(int region, Isolate* isolate);
 +
 +  // Bytes copied into the region by region.run() and spawn(), roughly: its
@@ -9996,12 +10451,22 @@ index 00000000..9b998a5b
 +  // are also counted per isolate: typed array views of a frozen region are
 +  // handed out only to the isolate that froze it and to isolates borrowing
 +  // it, and are detached once the isolate is neither.
-+  static bool Borrow(int region, Isolate* isolate);
-+  static void Unborrow(int region, Isolate* isolate);
++  // Regions in an RwLock are borrowed only by the lock (`for_lock`).
++  static bool Borrow(int region, Isolate* isolate, bool for_lock = false);
++  // `detach_views` is false for an isolate that is going away.
++  static void Unborrow(int region, Isolate* isolate, bool detach_views = true);
 +  static bool IsBorrowedBy(int region, Isolate* isolate);
 +  // Marks whether `isolate` may read frozen `region`, in its read table.
 +  static void SetReadable(int region, Isolate* isolate, bool readable);
 +  static void ForgetReadTable(Isolate* isolate);
++
++  // Regions held by an RwLock. Freeze() and Free() fail for them.
++  static void SetLocked(int region, bool locked);
++  static bool IsLocked(int region);
++  // For the readers of an RwLock: InTransit -> Frozen(nobody, 0), and back
++  // once no borrows are left. Nobody may thaw such a region.
++  static bool FreezeInTransit(int region);
++  static bool ThawToTransit(int region);
 +
 +  // Table indexed by region id, read by generated code. Holds the Isolate* of
 +  // the owner, 0 while the region is in transit, or kFrozen.
@@ -10028,6 +10493,7 @@ index 00000000..9b998a5b
 +  static std::atomic<int> generations_[kMaxRegions];
 +  static std::atomic<int> handles_[kMaxRegions];
 +  static std::atomic<bool> in_use_[kMaxRegions];
++  static std::atomic<bool> locked_[kMaxRegions];
 +  static std::atomic<size_t> bytes_[kMaxRegions];
 +};
 +
