@@ -341,8 +341,8 @@ result.total += <span class="tok-number">1</span>;
                              ^
 <span class="err">RangeError: индекс за пределами</span>
     at settle (&lt;anonymous&gt;:210:30)
-    at PoolWorker.deliver (&lt;anonymous&gt;:276:7)
-    at #deliver (&lt;anonymous&gt;:246:17)
+    at Pool.deliver (&lt;anonymous&gt;:290:7)
+    at #deliver (&lt;anonymous&gt;:251:17)
 
 1 pending unhandled Promise rejection(s) detected.</pre></figure>
 
@@ -381,13 +381,13 @@ start = performance.<span class="tok-fn">now</span>();
 <span class="tok-fn">six</span>(<span class="tok-string">'пул из 4'</span>);
 <span class="tok-api">spawn</span>.<span class="tok-api">poolSize</span> = <span class="tok-number">6</span>;
 <span class="tok-fn">six</span>(<span class="tok-string">'пул из 6'</span>);</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8; время у вас будет другим</span></div><pre class="out">результаты совпадают: true
-по очереди: 474 ms
-все сразу:  139 ms (x3.4)
-6 задач, пул из 4: 249 ms
+по очереди: 471 ms
+все сразу:  138 ms (x3.4)
+6 задач, пул из 4: 250 ms
 6 задач, пул из 6: 141 ms</pre></figure>
 
 <p>Четыре задачи сразу идут примерно в 3,5 раза быстрее, чем по очереди. Ровно в 4 раза не выходит, и дело не в запуске: он стоит несколько микросекунд, а задача считается больше ста миллисекунд. Причину мы отдельно не разбирали.</p>
-<p>Если задач больше, чем воркеров, лишние ждут очереди: шесть задач с пулом из четырёх идут почти вдвое дольше одной. Пул можно увеличить, например под 6 быстрых ядер этой машины: <code>spawn.poolSize = 6</code>. Больше, чем ядер, ставить нет смысла: потоки начнут делить одни и те же ядра. Значения меньше 1 и не числа <code>spawn</code> считает за 1.</p>
+<p>Все воркеры пула берут задачи из одной очереди, как рабочие потоки tokio: задача ждёт, только пока заняты все воркеры, и никогда не стоит за долгой задачей, если рядом есть свободный воркер. Воркер, который ждёт в <code>await</code>, тоже свободен: пока одна его задача ждёт канал или таймер, он выполняет другие. Если задач больше, чем воркеров, лишние ждут очереди: шесть задач с пулом из четырёх идут почти вдвое дольше одной. Пул можно увеличить, например под 6 быстрых ядер этой машины: <code>spawn.poolSize = 6</code>. Больше, чем ядер, ставить нет смысла: потоки начнут делить одни и те же ядра. Значения меньше 1 и не числа <code>spawn</code> считает за 1.</p>
 <p>Если задачи запускаются в <code>map</code>, колбэк должен вернуть ручку: <code>tasks.map((t) =&gt; spawn(work, t))</code>. Тогда <code>Promise.all</code> ждёт сами задачи. Если колбэк вызывает <code>spawn</code> и возвращает что-то другое, <code>Promise.all</code> получит это значение сразу и задач ждать не будет. Подробнее в <a href="practices.html#map">практике 10</a>.</p>
 
 <h2 id="nested">Задачи внутри задач</h2>
@@ -442,8 +442,8 @@ poolSize здесь: 6 | в задаче: 4</pre></figure>
   ms = performance.<span class="tok-fn">now</span>() - start;
   <span class="tok-fn">print</span>(<span class="tok-string">`${</span>M<span class="tok-string">} задач сразу (await): ${</span>ms.<span class="tok-fn">toFixed</span>(<span class="tok-number">0</span>)<span class="tok-string">} ms, последний результат ${</span>results[M - <span class="tok-number">1</span>]<span class="tok-string">}`</span>);
 })();</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8; время у вас будет другим</span></div><pre class="out">воркеров в пуле: 4
-100000 задач по очереди (join): 341 ms, 3 µs на задачу
-20000 задач сразу (await): 76 ms, последний результат 20000</pre></figure>
+100000 задач по очереди (join): 340 ms, 3 µs на задачу
+20000 задач сразу (await): 75 ms, последний результат 20000</pre></figure>
 
 <p>Задачи, запущенные все сразу, стоят примерно столько же, около 4 мкс на штуку. Почему запуск вообще стал таким дешёвым, рассказано на странице <a href="inside.html#fast-spawn">«Как это устроено»</a>.</p>
 <p>Для задач от миллисекунды и дольше эти накладные расходы почти не видны. Для мелких задач они могут оказаться больше самой работы. Как с этим быть, показано на странице <a href="practices.html#batch">«Как делать и как не делать»</a>.</p>
@@ -526,7 +526,7 @@ borrowWhile: 55 (readers: 2) | readers после задачи: 0</pre></figure>
 <span class="callout-title">Ограничения spawn</span>
 <ul>
   <li>Классы не поддерживаются, <code>super</code>, <code>new.target</code> и <code>import</code> в колбэке не работают.</li>
-  <li>Если воркер пула умер посреди задачи, её <code>join()</code> и <code>await</code> заканчиваются ошибкой <code>spawn() worker exited without a result</code>. Тайм-аута у задач нет: задача, которая работает бесконечно, ждётся бесконечно.</li>
+  <li>Если воркер пула умер посреди задачи, её <code>join()</code> и <code>await</code> заканчиваются ошибкой <code>spawn() worker exited without a result</code>. Это касается только задач, которые он успел взять: остальные выполнят другие воркеры, а если умерли все, следующий <code>spawn</code> заводит новый пул. Тайм-аута у задач нет: задача, которая работает бесконечно, ждётся бесконечно.</li>
   <li>Как и всё остальное, <code>spawn</code> есть только в d8 с флагом <code>--harmony-regions</code>.</li>
 </ul>
 </div>

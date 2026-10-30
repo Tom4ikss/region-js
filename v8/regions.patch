@@ -2824,10 +2824,10 @@ index 00000000..b7c2e120
 +#endif  // V8_D8_D8_CHANNEL_H_
 diff --git a/src/d8/d8-port.cc b/src/d8/d8-port.cc
 new file mode 100644
-index 00000000..40045301
+index 00000000..8b9263a3
 --- /dev/null
 +++ b/src/d8/d8-port.cc
-@@ -0,0 +1,708 @@
+@@ -0,0 +1,850 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -2836,6 +2836,7 @@ index 00000000..40045301
 +
 +#include <algorithm>
 +#include <atomic>
++#include <optional>
 +#include <deque>
 +#include <string>
 +#include <unordered_map>
@@ -2869,14 +2870,30 @@ index 00000000..40045301
 +
 +namespace v8 {
 +
-+// Client -> server: tasks. Server -> client: replies.
++// An isolate that runs the tasks of a port.
++struct PortServer {
++  Isolate* isolate;
++  std::shared_ptr<TaskRunner> runner;
++  // Taking tasks from the inbox, or about to.
++  bool drain_scheduled = false;
++  // Ids of the tasks it took and has not replied to.
++  std::unordered_set<double> in_flight;
++};
++
++// Client -> servers: tasks. Servers -> client: replies. Every server takes
++// tasks from the one inbox, so a task waits only while all of them are busy
++// running tasks; a server waiting in an await takes more.
 +struct PortState {
 +  base::Mutex mutex;
 +  // Guarded by `mutex`.
 +  std::deque<std::unique_ptr<PortMessage>> inbox;
-+  Isolate* server = nullptr;
-+  std::shared_ptr<TaskRunner> server_runner;
-+  bool server_drain_scheduled = false;
++  std::vector<PortServer> servers;
++  bool served = false;
++  // Servers announced by the client (port.expect()) that do not serve yet.
++  // The port is gone only when there are neither servers nor these.
++  int expected_servers = 0;
++  // Task code by key: sent once, taken by servers that have not seen it.
++  std::unordered_map<int, std::u16string> codes;
 +  std::deque<std::unique_ptr<PortMessage>> outbox;
 +  Isolate* client = nullptr;
 +  std::shared_ptr<TaskRunner> client_runner;
@@ -2886,8 +2903,26 @@ index 00000000..40045301
 +  // Tasks sent whose reply the client has not taken yet.
 +  int expected = 0;
 +
++  PortServer* ServerOf(Isolate* isolate) {
++    for (PortServer& server : servers) {
++      if (server.isolate == isolate) return &server;
++    }
++    return nullptr;
++  }
++  // A server that is not taking tasks right now, marked as taking them.
++  PortServer* WakeIdleServer() {
++    for (PortServer& server : servers) {
++      if (!server.drain_scheduled) {
++        server.drain_scheduled = true;
++        return &server;
++      }
++    }
++    return nullptr;
++  }
++
 +  // Read without the mutex by a client that spins waiting for a reply.
 +  std::atomic<size_t> outbox_size{0};
++  // Every server is gone.
 +  std::atomic<bool> server_gone{false};
 +  // Signalled for every reply and when the server goes away.
 +  base::Semaphore reply_signal{0};
@@ -3131,6 +3166,29 @@ index 00000000..40045301
 +
 +// Delivers queued messages to the handler of an isolate: tasks to a server,
 +// replies to a listening client. One task drains everything queued.
++// The task id: the first element of tasks and replies.
++std::optional<double> TaskIdOf(const PortMessage* message) {
++  if (message->slots.empty() ||
++      message->slots[0].kind != PortMessage::Kind::kNumber) {
++    return std::nullopt;
++  }
++  return message->slots[0].number;
++}
++
++// The reply for a task whose server went away before replying, as the
++// prelude's failure replies are: [id, undefined, name, message].
++std::unique_ptr<PortMessage> GoneReply(double id) {
++  using Kind = PortMessage::Kind;
++  auto reply = std::make_unique<PortMessage>();
++  reply->slots.push_back({Kind::kNumber, id, 0});
++  reply->slots.push_back({Kind::kUndefined, 0, 0});
++  reply->slots.push_back({Kind::kString, 0, 0});
++  reply->strings.push_back(u"Error");
++  reply->slots.push_back({Kind::kString, 0, 1});
++  reply->strings.push_back(u"spawn() worker exited without a result");
++  return reply;
++}
++
 +class DrainTask : public Task {
 + public:
 +  DrainTask(Isolate* isolate, std::shared_ptr<PortState> state, bool server)
@@ -3145,12 +3203,17 @@ index 00000000..40045301
 +      {
 +        base::MutexGuard guard(&state_->mutex);
 +        if (server_) {
++          PortServer* server = state_->ServerOf(isolate_);
++          if (server == nullptr) return;
 +          if (state_->inbox.empty()) {
-+            state_->server_drain_scheduled = false;
++            server->drain_scheduled = false;
 +            return;
 +          }
 +          message = std::move(state_->inbox.front());
 +          state_->inbox.pop_front();
++          if (std::optional<double> id = TaskIdOf(message.get())) {
++            server->in_flight.insert(*id);
++          }
 +        } else {
 +          if (!state_->listening || state_->outbox.empty()) {
 +            report_gone = state_->listening && state_->server_gone &&
@@ -3257,16 +3320,19 @@ index 00000000..40045301
 +  std::shared_ptr<TaskRunner> runner;
 +  {
 +    base::MutexGuard guard(&state->mutex);
-+    if (state->server) {
-+      ThrowTypeError(isolate, "the port is already served");
++    if (state->ServerOf(isolate)) {
++      ThrowTypeError(isolate, "this thread already serves the port");
 +      return;
 +    }
-+    state->server = isolate;
-+    state->server_runner =
++    state->served = true;
++    if (state->expected_servers > 0) state->expected_servers--;
++    PortServer& server = state->servers.emplace_back();
++    server.isolate = isolate;
++    server.runner =
 +        i::V8::GetCurrentPlatform()->GetForegroundTaskRunner(isolate);
 +    if (!state->inbox.empty()) {
-+      state->server_drain_scheduled = true;
-+      runner = state->server_runner;
++      server.drain_scheduled = true;
++      runner = server.runner;
 +    }
 +  }
 +  DataOf(isolate).serving.insert_or_assign(
@@ -3286,18 +3352,19 @@ index 00000000..40045301
 +  std::unique_ptr<PortMessage> message = Marshal(isolate, info[0], info[1]);
 +  if (!message) return;
 +  std::shared_ptr<TaskRunner> runner;
-+  Isolate* server;
++  Isolate* server_isolate;
 +  {
 +    base::MutexGuard guard(&state->mutex);
 +    state->inbox.push_back(std::move(message));
 +    state->expected++;
-+    if (state->server_runner && !state->server_drain_scheduled) {
-+      state->server_drain_scheduled = true;
-+      runner = state->server_runner;
-+      server = state->server;
++    if (PortServer* server = state->WakeIdleServer()) {
++      runner = server->runner;
++      server_isolate = server->isolate;
 +    }
 +  }
-+  if (runner) runner->PostTask(std::make_unique<DrainTask>(server, state, true));
++  if (runner) {
++    runner->PostTask(std::make_unique<DrainTask>(server_isolate, state, true));
++  }
 +}
 +
 +// port.reply(message, transfer): server -> client.
@@ -3312,6 +3379,11 @@ index 00000000..40045301
 +  {
 +    base::MutexGuard guard(&state->mutex);
 +    if (!state->client_runner) return;  // The client is gone.
++    if (PortServer* server = state->ServerOf(isolate)) {
++      if (std::optional<double> id = TaskIdOf(message.get())) {
++        server->in_flight.erase(*id);
++      }
++    }
 +    state->outbox.push_back(std::move(message));
 +    state->outbox_size.fetch_add(1, std::memory_order_release);
 +    if (state->listening && !state->client_drain_scheduled) {
@@ -3376,6 +3448,59 @@ index 00000000..40045301
 +  }
 +}
 +
++// port.expect(): a server is starting and will serve the port soon.
++void PortExpect(const FunctionCallbackInfo<Value>& info) {
++  std::shared_ptr<PortState> state = ThisState(info);
++  if (!state) return;
++  base::MutexGuard guard(&state->mutex);
++  state->expected_servers++;
++}
++
++// port.gone(): every server went away; the port takes no more tasks.
++void PortGone(const FunctionCallbackInfo<Value>& info) {
++  std::shared_ptr<PortState> state = ThisState(info);
++  if (!state) return;
++  info.GetReturnValue().Set(state->server_gone.load(std::memory_order_acquire));
++}
++
++// port.code(key, source) stores the code of tasks with `key`; port.code(key)
++// returns it, or undefined. A task carries only its key, so whichever server
++// takes it can compile it.
++void PortCode(const FunctionCallbackInfo<Value>& info) {
++  Isolate* isolate = info.GetIsolate();
++  std::shared_ptr<PortState> state = ThisState(info);
++  if (!state) return;
++  if (!info[0]->IsInt32()) {
++    ThrowTypeError(isolate, "port.code() expects a key");
++    return;
++  }
++  int key = info[0].As<Int32>()->Value();
++  if (info.Length() > 1 && info[1]->IsString()) {
++    Local<String> source = info[1].As<String>();
++    std::u16string copy(source->Length(), u'\0');
++    source->Write(isolate, 0, source->Length(),
++                  reinterpret_cast<uint16_t*>(copy.data()));
++    base::MutexGuard guard(&state->mutex);
++    state->codes.try_emplace(key, std::move(copy));
++    return;
++  }
++  std::u16string source;
++  {
++    base::MutexGuard guard(&state->mutex);
++    auto it = state->codes.find(key);
++    if (it == state->codes.end()) return;
++    source = it->second;
++  }
++  Local<String> result;
++  if (String::NewFromTwoByte(isolate,
++                             reinterpret_cast<const uint16_t*>(source.data()),
++                             NewStringType::kNormal,
++                             static_cast<int>(source.size()))
++          .ToLocal(&result)) {
++    info.GetReturnValue().Set(result);
++  }
++}
++
 +// port.listen(handler | null): replies go to `handler` from the event loop.
 +// While listening with replies due, the event loop keeps running.
 +void PortListen(const FunctionCallbackInfo<Value>& info) {
@@ -3415,7 +3540,8 @@ index 00000000..40045301
 +  for (auto [name, callback] :
 +       {std::pair{"serve", PortServe}, std::pair{"send", PortSend},
 +        std::pair{"reply", PortReply}, std::pair{"take", PortTake},
-+        std::pair{"listen", PortListen}}) {
++        std::pair{"listen", PortListen}, std::pair{"code", PortCode},
++        std::pair{"expect", PortExpect}, std::pair{"gone", PortGone}}) {
 +    ctor->PrototypeTemplate()->Set(
 +        String::NewFromUtf8(isolate, name).ToLocalChecked(),
 +        FunctionTemplate::New(isolate, callback, Local<Value>(), signature, 0,
@@ -3489,24 +3615,40 @@ index 00000000..40045301
 +// static
 +void Ports::ForgetIsolate(Isolate* isolate) {
 +  IsolatePorts& data = DataOf(isolate);
-+  // Tasks for a dead server are dropped; its client hears that it is gone.
++  // The tasks a dead server took fail; the other servers take the rest. With
++  // no server left, the client hears that they are gone.
 +  for (auto& [raw, handler] : data.serving) {
 +    std::shared_ptr<PortState> state = handler.state;
 +    std::shared_ptr<TaskRunner> runner;
 +    Isolate* client;
++    int replies = 0;
 +    {
 +      base::MutexGuard guard(&state->mutex);
-+      state->server_gone.store(true, std::memory_order_release);
-+      state->server_runner.reset();
-+      state->inbox.clear();
-+      if (state->listening && state->client_runner &&
-+          !state->client_drain_scheduled) {
++      auto it = std::find_if(
++          state->servers.begin(), state->servers.end(),
++          [&](const PortServer& server) { return server.isolate == isolate; });
++      if (it != state->servers.end()) {
++        if (state->client_runner) {
++          for (double id : it->in_flight) {
++            state->outbox.push_back(GoneReply(id));
++            state->outbox_size.fetch_add(1, std::memory_order_release);
++            replies++;
++          }
++        }
++        state->servers.erase(it);
++      }
++      if (state->servers.empty() && state->expected_servers == 0) {
++        state->server_gone.store(true, std::memory_order_release);
++        state->inbox.clear();
++      }
++      if ((replies > 0 || state->server_gone) && state->listening &&
++          state->client_runner && !state->client_drain_scheduled) {
 +        state->client_drain_scheduled = true;
 +        runner = state->client_runner;
 +        client = state->client;
 +      }
 +    }
-+    state->reply_signal.Signal();
++    for (int i = 0; i < std::max(replies, 1); i++) state->reply_signal.Signal();
 +    if (runner) {
 +      runner->PostTask(std::make_unique<DrainTask>(client, state, false));
 +    }
@@ -3633,7 +3775,7 @@ index 00000000..bd767012
 +
 +#endif  // V8_D8_D8_PORT_H_
 diff --git a/src/d8/d8.cc b/src/d8/d8.cc
-index 49121fe1..1ad01972 100644
+index 49121fe1..06fcc616 100644
 --- a/src/d8/d8.cc
 +++ b/src/d8/d8.cc
 @@ -14,6 +14,7 @@
@@ -4869,7 +5011,7 @@ index 49121fe1..1ad01972 100644
  Local<ObjectTemplate> Shell::CreateAsyncHookTemplate(Isolate* isolate) {
    Local<ObjectTemplate> async_hooks_templ = ObjectTemplate::New(isolate);
    async_hooks_templ->Set(isolate, "createHook",
-@@ -5376,9 +6510,593 @@ MaybeLocal<Context> Shell::CreateEvaluationContext(Isolate* isolate) {
+@@ -5376,9 +6510,596 @@ MaybeLocal<Context> Shell::CreateEvaluationContext(Isolate* isolate) {
    }
  #endif  // V8_ENABLE_HARDWARE_WATCHPOINT_SUPPORT
  
@@ -5045,7 +5187,7 @@ index 49121fe1..1ad01972 100644
 +  try {
 +    let factory = __factories.get(data[1]);
 +    if (!factory) {
-+      factory = (0, eval)(data[2]);
++      factory = (0, eval)(data[2] ?? __port.code(data[1]));
 +      __factories.set(data[1], factory);
 +    }
 +    const argc = data[3];
@@ -5112,34 +5254,48 @@ index 49121fe1..1ad01972 100644
 +  };
 +
 +  // Replies are routed by task id, whether they are read by a blocking
-+  // join() or delivered by onmessage to an awaiting caller. The worker is
-+  // subscribed while it has unfinished tasks: that keeps d8 running until
-+  // they are done, and lets it exit once the pool is idle.
-+  class PoolWorker {
-+    worker = new Worker(runnerSource, { type: 'string' });
-+    // Tasks and replies go through a task port, not postMessage().
++  // join() or delivered by the port listener to an awaiting caller. The pool
++  // listens while it has unfinished tasks: that keeps d8 running until they
++  // are done, and lets it exit once the pool is idle.
++  //
++  // The pool: worker threads that serve one task port. A task waits in the
++  // port until a worker takes it, so it waits only while every worker is busy
++  // running a task; a worker waiting in an await takes more. Workers start as
++  // tasks come, up to spawn.poolSize.
++  class Pool {
 +    port = newPort();
++    workers = [];
++    // Tasks sent whose reply has not arrived.
 +    pending = 0;
 +    #tasks = new Map();
-+    // Keys of the task code this worker has already compiled.
++    // Keys of the task code the port has.
 +    #knownCode = new Set();
 +    #deliver = (reply) => {
 +      if (reply === undefined) this.#failAll();
 +      else this.deliver(reply);
 +    };
 +
-+    constructor() {
-+      this.worker.postMessage(this.port);
-+    }
-+
-+    knows(key) {
-+      return this.#knownCode.has(key);
-+    }
-+
-+    send(id, key, message, transfer) {
++    send(id, key, code, message, transfer) {
++      if (this.port.gone()) {
++        // Every worker exited: their tasks failed; start over.
++        this.#failAll();
++        this.port = newPort();
++        this.workers = [];
++        this.#knownCode.clear();
++      }
++      if (!this.#knownCode.has(key)) {
++        this.port.code(key, code);
++        this.#knownCode.add(key);
++      }
++      if (this.pending >= this.workers.length &&
++          this.workers.length < Math.max(1, Math.floor(spawn.poolSize) || 1)) {
++        const worker = new Worker(runnerSource, { type: 'string' });
++        this.port.expect();
++        worker.postMessage(this.port);
++        this.workers.push(worker);
++      }
 +      // Throws if a region cannot be moved; nothing is counted then.
 +      this.port.send(message, transfer);
-+      this.#knownCode.add(key);
 +      inFlight++;
 +      if (this.pending++ === 0) this.port.listen(this.#deliver);
 +      const task = {
@@ -5158,7 +5314,7 @@ index 49121fe1..1ad01972 100644
 +      settle(task, reply);
 +    }
 +
-+    // The worker is gone: none of its tasks will reply.
++    // Every worker is gone: none of the tasks will reply.
 +    #failAll() {
 +      const count = this.pending;
 +      this.pending = 0;
@@ -5188,7 +5344,7 @@ index 49121fe1..1ad01972 100644
 +
 +  const newPort = Region.__port;
 +  delete Region.__port;
-+  const pool = [];
++  let pool = null;
 +  let nextTaskId = 0;
 +  // Tasks of this thread whose reply has not arrived yet.
 +  let inFlight = 0;
@@ -5201,30 +5357,18 @@ index 49121fe1..1ad01972 100644
 +      for (const resolve of waiters) resolve();
 +    }
 +  };
-+  const pickWorker = () => {
-+    let best = null;
-+    for (const candidate of pool) {
-+      if (!best || candidate.pending < best.pending) best = candidate;
-+    }
-+    if ((!best || best.pending > 0) &&
-+        pool.length < Math.max(1, Math.floor(spawn.poolSize) || 1)) {
-+      best = new PoolWorker();
-+      pool.push(best);
-+    }
-+    return best;
-+  };
 +
 +  // Like a promise of the task's result: join() waits for it blocking,
 +  // awaiting the handle waits without blocking. Either can be repeated.
 +  class SpawnHandle {
-+    #worker;
++    #pool;
 +    #task;
-+    constructor(worker, task) {
-+      this.#worker = worker;
++    constructor(pool, task) {
++      this.#pool = pool;
 +      this.#task = task;
 +    }
 +    join() {
-+      return this.#worker.join(this.#task);
++      return this.#pool.join(this.#task);
 +    }
 +    then(onFulfilled, onRejected) {
 +      return outcomeOf(this.#task).then(onFulfilled, onRejected);
@@ -5285,10 +5429,9 @@ index 49121fe1..1ad01972 100644
 +      factories.set(key, factory);
 +    }
 +    const names = factory.names;
-+    const worker = pickWorker();
 +    const id = nextTaskId++;
-+    const message = [id, key, worker.knows(key) ? undefined : factory.code,
-+                     args.length, null];
++    // The code goes to the port once; a task carries its key.
++    const message = [id, key, undefined, args.length, null];
 +    const count = 2 + names.length + args.length;
 +    const labelOf = (i) => i === 0 ? 'this' : i === 1 ? 'arguments'
 +        : i < 2 + names.length ? names[i - 2] : 'an argument';
@@ -5340,8 +5483,10 @@ index 49121fe1..1ad01972 100644
 +      }
 +      (transfer ??= []).push(input);
 +    }
-+    const task = worker.send(id, key, message, transfer ?? undefined);
-+    return new SpawnHandle(worker, task);
++    pool ??= new Pool();
++    const task =
++        pool.send(id, key, factory.code, message, transfer ?? undefined);
++    return new SpawnHandle(pool, task);
 +  };
 +  spawn.poolSize = 4;
 +  // Tasks spawned by this thread that have not finished yet.
@@ -5463,7 +5608,7 @@ index 49121fe1..1ad01972 100644
  namespace {
  int LineFromOffset(Local<debug::Script> script, int offset) {
    debug::Location location = script->GetSourceLocation(offset);
-@@ -6538,6 +8256,7 @@ void SourceGroup::JoinThread(const i::ParkedScope& parked) {
+@@ -6538,6 +8259,7 @@ void SourceGroup::JoinThread(const i::ParkedScope& parked) {
  void SerializationDataQueue::Enqueue(std::unique_ptr<SerializationData> data) {
    base::MutexGuard lock_guard(&mutex_);
    data_.push_back(std::move(data));
@@ -5471,7 +5616,7 @@ index 49121fe1..1ad01972 100644
  }
  
  bool SerializationDataQueue::Dequeue(
-@@ -6547,6 +8266,7 @@ bool SerializationDataQueue::Dequeue(
+@@ -6547,6 +8269,7 @@ bool SerializationDataQueue::Dequeue(
    if (data_.empty()) return false;
    *out_data = std::move(data_[0]);
    data_.erase(data_.begin());
@@ -5479,7 +5624,7 @@ index 49121fe1..1ad01972 100644
    return true;
  }
  
-@@ -6558,6 +8278,7 @@ bool SerializationDataQueue::IsEmpty() {
+@@ -6558,6 +8281,7 @@ bool SerializationDataQueue::IsEmpty() {
  void SerializationDataQueue::Clear() {
    base::MutexGuard lock_guard(&mutex_);
    data_.clear();
@@ -5487,7 +5632,7 @@ index 49121fe1..1ad01972 100644
  }
  
  Worker::Worker(Isolate* parent_isolate, const char* script)
-@@ -6668,6 +8389,12 @@ std::unique_ptr<SerializationData> Worker::GetMessage(Isolate* requester) {
+@@ -6668,6 +8392,12 @@ std::unique_ptr<SerializationData> Worker::GetMessage(Isolate* requester) {
        out_queue_.Dequeue(&result);
        break;
      }
@@ -5500,7 +5645,7 @@ index 49121fe1..1ad01972 100644
      out_semaphore_.ParkedWait(
          reinterpret_cast<i::Isolate*>(requester)->main_thread_local_isolate());
    }
-@@ -6705,6 +8432,8 @@ void Worker::Terminate() {
+@@ -6705,6 +8435,8 @@ void Worker::Terminate() {
    // returning to the event queue. Since we checked the state before, and we are
    // holding the {worker_mutex_}, it's safe to access the isolate.
    isolate_->TerminateExecution();
@@ -5509,7 +5654,7 @@ index 49121fe1..1ad01972 100644
  }
  
  void Worker::EnterTerminatedState() {
-@@ -7310,6 +9039,9 @@ bool Shell::SetOptions(int argc, char* argv[]) {
+@@ -7310,6 +9042,9 @@ bool Shell::SetOptions(int argc, char* argv[]) {
                                    argv, &i)) {
        // Value is expressed in MB.
        options.max_serializer_memory = atoi(flag_value) * i::MB;
@@ -5519,7 +5664,7 @@ index 49121fe1..1ad01972 100644
      } else if (FlagMatches("--bundle", &argv[i])) {
        options.bundle = true;
  #ifdef V8_FUZZILLI
-@@ -7921,6 +9653,27 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7921,6 +9656,27 @@ class Serializer : public ValueSerializer::Delegate {
      return true;
    }
  
@@ -5547,7 +5692,7 @@ index 49121fe1..1ad01972 100644
   private:
    Maybe<bool> PrepareTransfer(Local<Context> context, Local<Value> transfer) {
      if (transfer->IsArray()) {
-@@ -7929,6 +9682,22 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7929,6 +9685,22 @@ class Serializer : public ValueSerializer::Delegate {
        for (uint32_t i = 0; i < length; ++i) {
          Local<Value> element;
          if (transfer_array->Get(context, i).ToLocal(&element)) {
@@ -5570,7 +5715,7 @@ index 49121fe1..1ad01972 100644
            if (!element->IsArrayBuffer()) {
              ThrowError(isolate_,
                         "Transfer array elements must be an ArrayBuffer");
-@@ -7961,7 +9730,48 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7961,7 +9733,48 @@ class Serializer : public ValueSerializer::Delegate {
      }
    }
  
@@ -5619,7 +5764,7 @@ index 49121fe1..1ad01972 100644
      for (const auto& global_array_buffer : array_buffers_) {
        Local<ArrayBuffer> array_buffer =
            Local<ArrayBuffer>::New(isolate_, global_array_buffer);
-@@ -7987,6 +9797,7 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7987,6 +9800,7 @@ class Serializer : public ValueSerializer::Delegate {
    ValueSerializer serializer_;
    std::unique_ptr<SerializationData> data_;
    std::vector<Global<ArrayBuffer>> array_buffers_;
@@ -5627,7 +5772,7 @@ index 49121fe1..1ad01972 100644
    std::vector<Global<SharedArrayBuffer>> shared_array_buffers_;
    std::vector<Global<WasmModuleObject>> wasm_modules_;
    std::vector<std::shared_ptr<v8::BackingStore>> backing_stores_;
-@@ -8013,6 +9824,21 @@ class Deserializer : public ValueDeserializer::Delegate {
+@@ -8013,6 +9827,21 @@ class Deserializer : public ValueDeserializer::Delegate {
        return MaybeLocal<Value>();
      }
  
@@ -5649,7 +5794,7 @@ index 49121fe1..1ad01972 100644
      uint32_t index = 0;
      for (const auto& backing_store : data_->backing_stores()) {
        Local<ArrayBuffer> array_buffer =
-@@ -8049,6 +9875,21 @@ class Deserializer : public ValueDeserializer::Delegate {
+@@ -8049,6 +9878,21 @@ class Deserializer : public ValueDeserializer::Delegate {
      return nullptr;
    }
  
@@ -5671,7 +5816,7 @@ index 49121fe1..1ad01972 100644
   private:
    Isolate* isolate_;
    ValueDeserializer deserializer_;
-@@ -8309,6 +10150,8 @@ int Shell::Main(int argc, char* argv[]) {
+@@ -8309,6 +10153,8 @@ int Shell::Main(int argc, char* argv[]) {
    // The platform is owned by wrapper platform despite the `std::move` below.
    START_IGNORE_LIFETIME_SAFETY_WARNINGS()
    g_default_platform = g_platform.get();

@@ -76,6 +76,7 @@
   запись по индексу (StoreRegionElement handler) и `push` одного элемента (ArrayPrototypePush)
   пишут в запас без рантайма; методы прототипа кэшируются как константы с validity cell
   локального `Array.prototype`/`Object.prototype` и проверкой доступа к региону в EmitAccessCheck;
+- пул `spawn`: один порт задач на пул, все воркеры его обслуживают (`PortState::servers`); `send` будит воркер, который сейчас не разбирает очередь, разбирающие берут задачи по одной; порт помнит id задач каждого воркера и при его смерти отвечает за них ошибкой; код задач в порте (`port.code`), `port.expect()` для ещё не запущенных воркеров;
 - литералы `#{}`/`#[]`: CallJSRuntime к TFJ-билтинам `RegionObjectLiteral`/`RegionArrayLiteral` из native
   context; кэш форм в native context (хэш ключей → [map, keys, локальные ключи]), текущий регион в поле
   изолята, выделение объекта и значений одним куском из shared LAB главного потока (LAB вынесен в
