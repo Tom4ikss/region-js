@@ -296,7 +296,7 @@ spawn.aborted = () =&gt; {
 <p>Проверка смотрит только на каналы и локи. Задача, которая ждёт обычный промис, который никто не выполнит, держит d8 вечно, как и раньше.</p>
 
 <h2 id="cost">Сколько это стоит</h2>
-<p>Числа, строки, объекты регионов и сами каналы идут через канал напрямую, без сериализатора. Обычные объекты копирует тот же сериализатор, что у <code>postMessage</code>. Ожидающий поток будится напрямую. Круг «туда и обратно» через два канала без буфера всё равно немного дороже, чем обмен сообщениями с воркером: каждый круг — это две встречи отправителя с получателем, и на каждую получатель собирает результат <code>{ value, done }</code> и засыпает или просыпается.</p>
+<p>Числа, строки, объекты регионов и сами каналы идут через канал напрямую, без сериализатора. Обычные объекты копирует тот же сериализатор, что у <code>postMessage</code>. Ожидающий поток будится напрямую, а значение, которое он дождался, забирает без общего мьютекса каналов. Круг «туда и обратно» через два канала без буфера стоит почти как обмен сообщениями с воркером, хотя каждый круг — это две встречи отправителя с получателем, и на каждую получатель собирает результат <code>{ value, done }</code>.</p>
 
 <figure class="example"><div class="ex-head"><span class="file"><a href="examples/33-channel-overhead.js">examples/33-channel-overhead.js</a></span><button class="copy" type="button">Копировать</button></div><pre class="code"><code><span class="tok-comment">// d8-flags: --module</span>
 <span class="tok-comment">// Сколько стоит один круг «туда и обратно» через два канала без буфера.</span>
@@ -325,7 +325,7 @@ ping.<span class="tok-api">close</span>();
 <span class="tok-keyword">const</span> perMessage = (performance.<span class="tok-fn">now</span>() - t) * <span class="tok-number">1000</span> / N;
 worker.<span class="tok-api">terminate</span>();
 <span class="tok-fn">print</span>(<span class="tok-string">'канал, круг:'</span>, perTrip.<span class="tok-fn">toFixed</span>(<span class="tok-number">1</span>), <span class="tok-string">'µs'</span>);
-<span class="tok-fn">print</span>(<span class="tok-string">'postMessage + getMessage, круг:'</span>, perMessage.<span class="tok-fn">toFixed</span>(<span class="tok-number">1</span>), <span class="tok-string">'µs'</span>);</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8 --module; время у вас будет другим</span></div><pre class="out">канал, круг: 4.8 µs
+<span class="tok-fn">print</span>(<span class="tok-string">'postMessage + getMessage, круг:'</span>, perMessage.<span class="tok-fn">toFixed</span>(<span class="tok-number">1</span>), <span class="tok-string">'µs'</span>);</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8 --module; время у вас будет другим</span></div><pre class="out">канал, круг: 3.4 µs
 postMessage + getMessage, круг: 3.1 µs</pre></figure>
 
 <p>Это единицы микросекунд, а у горутин в Go — доли микросекунды. Если гонять через канал по одному числу, больше 200 000 значений в секунду не выйдет, и в горячем цикле пересылка легко займёт больше времени, чем сама работа. Каналы подходят, чтобы передавать порции работы: заказ, кусок файла, пачку строк. Объединяйте мелкие значения в пачки, как и для <code>spawn</code> (<a href="practices.html#batch">подробнее</a>).</p>

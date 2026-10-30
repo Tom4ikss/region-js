@@ -56,10 +56,15 @@ frozen[0] = 999;
 print('frozen view immutable:', frozen[0]);
 const reader = new Worker(
   `onmessage = ({ data }) => {
-    using borrow = Region.of(data).borrow();
-    const p = data.points;
-    p[0] = -1;
-    postMessage(p[0] + '/' + p.length);
+    let reply;
+    {
+      using borrow = Region.of(data).borrow();
+      const p = data.points;
+      p[0] = -1;
+      reply = p[0] + '/' + p.length;
+    }
+    // The borrow is returned before the reply, so the main thread can thaw.
+    postMessage(reply);
   }`,
   { type: 'string' },
 );

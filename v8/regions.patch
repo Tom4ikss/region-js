@@ -1985,10 +1985,10 @@ index 8aab5f56..b2e7c4d5 100644
        CheckValueInputIs(node, 1, Type::Any());
 diff --git a/src/d8/d8-channel.cc b/src/d8/d8-channel.cc
 new file mode 100644
-index 00000000..6bd403eb
+index 00000000..4ed17f3b
 --- /dev/null
 +++ b/src/d8/d8-channel.cc
-@@ -0,0 +1,1565 @@
+@@ -0,0 +1,1659 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -1999,6 +1999,7 @@ index 00000000..6bd403eb
 +#include <atomic>
 +#include <cmath>
 +#include <deque>
++#include <optional>
 +#include <string>
 +#include <unordered_map>
 +#include <unordered_set>
@@ -2021,6 +2022,7 @@ index 00000000..6bd403eb
 +#include "src/base/platform/semaphore.h"
 +#include "src/base/platform/mutex.h"
 +#include "src/base/platform/time.h"
++#include "src/base/small-vector.h"
 +#include "src/d8/d8-port.h"
 +#include "src/d8/d8.h"
 +#include "src/execution/isolate.h"
@@ -2063,14 +2065,15 @@ index 00000000..6bd403eb
 +  // The channel `data` came from, to give it back if nobody picks it up.
 +  std::shared_ptr<ChannelState> source;
 +  // The channels the waiter is registered with.
-+  std::vector<std::shared_ptr<ChannelState>> channels;
++  base::SmallVector<std::shared_ptr<ChannelState>, 1> channels;
 +  // An RwLock granted to the waiter, until its thread takes the grant up.
 +  std::shared_ptr<ChannelState> granted;
-+  // Signalled when a blocking waiter completes or is cancelled because its
-+  // isolate is terminated.
-+  base::Semaphore completed{0};
-+  // Set together with the signal, for a waiter that spins before blocking.
++  // Set when a blocking waiter completes or is cancelled. The thread spins on
++  // it first; the semaphore, which costs a kernel object, is made only when
++  // the thread stops spinning and sleeps. Made and signalled under the
++  // channels mutex.
 +  std::atomic<bool> ready{false};
++  std::optional<base::Semaphore> completed;
 +  bool cancelled = false;
 +  // The spawn() task that waits (-1 outside tasks), and whether the wait was
 +  // cancelled because that task was aborted.
@@ -2080,6 +2083,12 @@ index 00000000..6bd403eb
 +  // wait was cancelled because every thread sleeps.
 +  bool parked = false;
 +  bool deadlocked = false;
++  // Links of the WaiterList the waiter is in, if any.
++  ChannelWaiter* prev = nullptr;
++  ChannelWaiter* next = nullptr;
++  bool listed = false;
++
++  ~ChannelWaiter() { DCHECK(!listed); }
 +};
 +
 +// An RwLock: one region that threads take turns to write, or read together.
@@ -2165,23 +2174,67 @@ index 00000000..6bd403eb
 +  std::unordered_map<uint64_t, PendingWait> pending;
 +  std::unordered_set<ChannelHandle*> handles;
 +  uint64_t next_id = 1;
++  // Property names of receive results.
++  Global<String> value_name;
++  Global<String> done_name;
++  Global<String> index_name;
 +};
 +
 +base::LazyMutex isolates_mutex = LAZY_MUTEX_INITIALIZER;
-+// Bumped whenever an entry of AllData() is erased.
-+std::atomic<uint64_t> data_epoch{1};
 +
-+// Guarded by the channels mutex: threads blocked in a channel operation, and
-+// isolates being terminated, whose waiters must not get values any more.
-+std::unordered_set<ChannelWaiter*>& BlockingWaiters() {
-+  static base::LeakyObject<std::unordered_set<ChannelWaiter*>> waiters;
++// Waiters linked through their own fields, so that queueing one allocates
++// nothing. Guarded by the channels mutex.
++class WaiterList {
++ public:
++  void insert(ChannelWaiter* waiter) {
++    DCHECK(!waiter->listed);
++    waiter->listed = true;
++    waiter->prev = nullptr;
++    waiter->next = head_;
++    if (head_) head_->prev = waiter;
++    head_ = waiter;
++  }
++  void erase(ChannelWaiter* waiter) {
++    if (!waiter->listed) return;
++    if (waiter->prev) {
++      waiter->prev->next = waiter->next;
++    } else {
++      head_ = waiter->next;
++    }
++    if (waiter->next) waiter->next->prev = waiter->prev;
++    waiter->prev = waiter->next = nullptr;
++    waiter->listed = false;
++  }
++  // A copy, for loops that complete or cancel waiters, which may take other
++  // waiters off the list.
++  std::vector<ChannelWaiter*> Snapshot() const {
++    std::vector<ChannelWaiter*> waiters;
++    for (ChannelWaiter* waiter = head_; waiter; waiter = waiter->next) {
++      waiters.push_back(waiter);
++    }
++    return waiters;
++  }
++
++ private:
++  ChannelWaiter* head_ = nullptr;
++};
++
++// Threads waiting in a blocking channel or lock operation that has not
++// completed; the one that completes the waiter takes it off. A waiter is in
++// at most one of the two lists.
++WaiterList& BlockingWaiters() {
++  static base::LeakyObject<WaiterList> waiters;
 +  return *waiters.get();
 +}
-+// Guarded by the channels mutex: waits with a pending promise.
-+std::unordered_set<ChannelWaiter*>& AsyncWaiters() {
-+  static base::LeakyObject<std::unordered_set<ChannelWaiter*>> waiters;
++// Waits with a pending promise.
++WaiterList& AsyncWaiters() {
++  static base::LeakyObject<WaiterList> waiters;
 +  return *waiters.get();
 +}
++// Guarded by the channels mutex: isolates being terminated, whose waiters
++// must not get values any more.
++// Whether TerminatingIsolates() has entries, read without the mutex.
++std::atomic<bool> any_terminating{false};
 +std::unordered_set<Isolate*>& TerminatingIsolates() {
 +  static base::LeakyObject<std::unordered_set<Isolate*>> isolates;
 +  return *isolates.get();
@@ -2192,6 +2245,9 @@ index 00000000..6bd403eb
 +  std::string name;
 +  std::string message;
 +};
++// Whether AbortedTasks() has entries: lets operations skip the mutex. A
++// blocking wait checks again when it is queued (RegisterLocked()).
++std::atomic<bool> any_aborted{false};
 +// Aborted spawn() tasks of each isolate, until they end.
 +std::unordered_map<Isolate*, std::unordered_map<double, AbortReason>>&
 +AbortedTasks() {
@@ -2209,18 +2265,16 @@ index 00000000..6bd403eb
 +// Elements of an unordered_map keep their address, so the entry can be used
 +// without the lock.
 +IsolateChannels& DataOf(Isolate* isolate) {
-+  // The entry is cached per thread; erasing any entry invalidates the cache,
-+  // as a new isolate may get the address of a disposed one.
-+  thread_local Isolate* cached_isolate = nullptr;
-+  thread_local IsolateChannels* cached_data = nullptr;
-+  thread_local uint64_t cached_epoch = 0;
-+  uint64_t epoch = data_epoch.load(std::memory_order_acquire);
-+  if (cached_isolate == isolate && cached_epoch == epoch) return *cached_data;
++  // The entry is kept in the isolate's PerIsolateData; isolates without one
++  // look it up every time.
++  PerIsolateData* per_isolate = PerIsolateData::Get(isolate);
++  if (per_isolate && per_isolate->channels_data) {
++    return *static_cast<IsolateChannels*>(per_isolate->channels_data);
++  }
 +  base::MutexGuard guard(isolates_mutex.Pointer());
-+  cached_data = &AllData()[isolate];
-+  cached_isolate = isolate;
-+  cached_epoch = epoch;
-+  return *cached_data;
++  IsolateChannels& data = AllData()[isolate];
++  if (per_isolate) per_isolate->channels_data = &data;
++  return data;
 +}
 +
 +void ThrowTypeError(Isolate* isolate, const char* message) {
@@ -2256,7 +2310,7 @@ index 00000000..6bd403eb
 +// Throws and returns true if the running task was aborted: it may not start
 +// waiting again.
 +bool ThrowIfAborted(Isolate* isolate, double task) {
-+  if (task < 0) return false;
++  if (task < 0 || !any_aborted.load(std::memory_order_relaxed)) return false;
 +  AbortReason reason;
 +  {
 +    base::MutexGuard guard(channels_mutex.Pointer());
@@ -2308,7 +2362,7 @@ index 00000000..6bd403eb
 +    Deadlocks::Unblock(waiter->isolate);
 +  }
 +  waiter->ready.store(true, std::memory_order_release);
-+  waiter->completed.Signal();
++  if (waiter->completed) waiter->completed->Signal();
 +}
 +
 +void CompleteLocked(const std::shared_ptr<ChannelWaiter>& waiter,
@@ -2317,8 +2371,12 @@ index 00000000..6bd403eb
 +  LeaveQueuesLocked(waiter.get(), taken_from);
 +  waiter->channels.clear();
 +  if (waiter->blocking) {
++    // The thread takes the result without the mutex once it sees `ready`.
++    BlockingWaiters().erase(waiter.get());
 +    SignalLocked(waiter.get());
 +  } else {
++    // WakeTask reads the result without the mutex.
++    AsyncWaiters().erase(waiter.get());
 +    i::V8::GetCurrentPlatform()
 +        ->GetForegroundTaskRunner(waiter->isolate)
 +        ->PostTask(std::make_unique<WakeTask>(waiter->isolate, waiter->id));
@@ -2336,8 +2394,7 @@ index 00000000..6bd403eb
 +      if (item.sender.get() == waiter) item.sender = nullptr;
 +    }
 +  }
-+  std::vector<std::shared_ptr<ChannelState>> channels =
-+      std::move(waiter->channels);
++  auto channels = std::move(waiter->channels);
 +  waiter->channels.clear();
 +  // An acquire that leaves the queue may let the ones after it in.
 +  for (const std::shared_ptr<ChannelState>& state : channels) {
@@ -2485,17 +2542,37 @@ index 00000000..6bd403eb
 +  return true;
 +}
 +
-+// Blocks until the waiter completes. Returns false, with the termination
-+// exception pending, if the isolate is terminated meanwhile. The thread is
-+// parked while it waits: a shared heap GC must not wait for it, or a sender
-+// that needs the GC would never come. Nothing that may allocate runs with the
-+// channels mutex held.
-+bool WaitBlocking(const std::shared_ptr<ChannelWaiter>& waiter) {
-+  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(waiter->isolate);
-+  {
-+    base::MutexGuard guard(channels_mutex.Pointer());
-+    BlockingWaiters().insert(waiter.get());
++// A waiter was queued. Whoever cancels waits finds it from now on. A task
++// aborted since the operation checked does not wait.
++void RegisterLocked(ChannelWaiter* waiter) {
++  if (!waiter->blocking) {
++    AsyncWaiters().insert(waiter);
++    return;
 +  }
++  BlockingWaiters().insert(waiter);
++  if (waiter->task < 0 || !any_aborted.load(std::memory_order_relaxed)) {
++    return;
++  }
++  auto tasks = AbortedTasks().find(waiter->isolate);
++  if (tasks == AbortedTasks().end() || !tasks->second.contains(waiter->task)) {
++    return;
++  }
++  CancelLocked(waiter);
++  waiter->cancelled = true;
++  waiter->aborted = true;
++  SignalLocked(waiter);
++}
++
++// Blocks until the registered waiter completes, then runs `done` with the
++// channels mutex held. Returns false, with an exception or the termination
++// pending, if the wait was cancelled or the isolate is terminated meanwhile.
++// The thread is parked while it waits: a shared heap GC must not wait for it,
++// or a sender that needs the GC would never come. Nothing that may allocate
++// runs with the channels mutex held.
++template <typename Done>
++bool WaitBlocking(const std::shared_ptr<ChannelWaiter>& waiter, Done done) {
++  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(waiter->isolate);
++  bool slept = false;
 +  // Worker.terminate() cancels the wait (Channels::TerminateIsolate); the
 +  // timeout only covers other ways to terminate an isolate.
 +  i_isolate->main_thread_local_isolate()->ExecuteMainThreadWhileParked(
@@ -2507,12 +2584,13 @@ index 00000000..6bd403eb
 +        }
 +        {
 +          base::MutexGuard guard(channels_mutex.Pointer());
-+          if (!waiter->ready.load(std::memory_order_relaxed)) {
-+            waiter->parked = true;
-+            Deadlocks::Block(waiter->isolate);
-+          }
++          if (waiter->ready.load(std::memory_order_relaxed)) return;
++          slept = true;
++          waiter->completed.emplace(0);
++          waiter->parked = true;
++          Deadlocks::Block(waiter->isolate);
 +        }
-+        while (!waiter->completed.WaitFor(
++        while (!waiter->completed->WaitFor(
 +            base::TimeDelta::FromMilliseconds(50))) {
 +          if (!i_isolate->stack_guard()->HasTerminationRequest() &&
 +              !i_isolate->is_execution_terminating()) {
@@ -2531,6 +2609,14 @@ index 00000000..6bd403eb
 +          return;
 +        }
 +      });
++  // Completed while the thread spun: the result was written, and the waiter
++  // taken off BlockingWaiters, before `ready` was set, and nobody else
++  // touches it now.
++  if (!slept && !waiter->cancelled &&
++      !waiter->isolate->IsExecutionTerminating()) {
++    done();
++    return true;
++  }
 +  AbortReason reason;
 +  {
 +    base::MutexGuard guard(channels_mutex.Pointer());
@@ -2539,7 +2625,15 @@ index 00000000..6bd403eb
 +      waiter->parked = false;
 +      Deadlocks::Unblock(waiter->isolate);
 +    }
-+    if (!waiter->cancelled) return true;
++    if (!waiter->cancelled) {
++      // Terminating: what was delivered goes back.
++      if (waiter->isolate->IsExecutionTerminating()) {
++        ReturnUndeliveredLocked(waiter.get());
++        return false;
++      }
++      done();
++      return true;
++    }
 +    if (waiter->deadlocked) {
 +      reason = DeadlockReason();
 +    } else if (!waiter->aborted) {
@@ -2608,20 +2702,27 @@ index 00000000..6bd403eb
 +                                               std::move(data->serialized));
 +    if (!maybe.ToLocal(&value)) return {};
 +  }
++  IsolateChannels& names = DataOf(isolate);
++  if (names.value_name.IsEmpty()) {
++    names.value_name.Reset(isolate, String::NewFromUtf8Literal(
++                                        isolate, "value",
++                                        NewStringType::kInternalized));
++    names.done_name.Reset(isolate, String::NewFromUtf8Literal(
++                                       isolate, "done",
++                                       NewStringType::kInternalized));
++    names.index_name.Reset(isolate, String::NewFromUtf8Literal(
++                                        isolate, "index",
++                                        NewStringType::kInternalized));
++  }
 +  Local<Object> result = Object::New(isolate);
-+  if (result
-+          ->CreateDataProperty(context,
-+                               String::NewFromUtf8Literal(isolate, "value"),
-+                               value)
++  if (result->CreateDataProperty(context, names.value_name.Get(isolate), value)
 +          .IsNothing() ||
 +      result
-+          ->CreateDataProperty(context,
-+                               String::NewFromUtf8Literal(isolate, "done"),
++          ->CreateDataProperty(context, names.done_name.Get(isolate),
 +                               Boolean::New(isolate, closed))
 +          .IsNothing() ||
 +      result
-+          ->CreateDataProperty(context,
-+                               String::NewFromUtf8Literal(isolate, "index"),
++          ->CreateDataProperty(context, names.index_name.Get(isolate),
 +                               Integer::New(isolate, index))
 +          .IsNothing()) {
 +    return {};
@@ -2651,13 +2752,13 @@ index 00000000..6bd403eb
 +  // Terminating: the value could not be deserialized; ForgetIsolate gives it
 +  // back to the channel.
 +  if (isolate_->IsExecutionTerminating()) return;
-+  bool deadlocked;
-+  {
++  if (any_terminating.load(std::memory_order_relaxed)) {
 +    base::MutexGuard guard(channels_mutex.Pointer());
 +    if (TerminatingIsolates().contains(isolate_)) return;
-+    AsyncWaiters().erase(it->second.waiter.get());
-+    deadlocked = it->second.waiter->deadlocked;
 +  }
++  // The waiter was completed, or failed as deadlocked, and taken off
++  // AsyncWaiters before this task was posted: nobody else touches it now.
++  bool deadlocked = it->second.waiter->deadlocked;
 +  PendingWait pending = std::move(it->second);
 +  data.pending.erase(it);
 +
@@ -2679,11 +2780,7 @@ index 00000000..6bd403eb
 +  }
 +  if (waiter->kind == ChannelWaiter::Kind::kRead ||
 +      waiter->kind == ChannelWaiter::Kind::kWrite) {
-+    std::shared_ptr<ChannelState> state;
-+    {
-+      base::MutexGuard guard(channels_mutex.Pointer());
-+      state = std::move(waiter->granted);
-+    }
++    std::shared_ptr<ChannelState> state = std::move(waiter->granted);
 +    TryCatch try_catch(isolate_);
 +    Local<Value> root;
 +    if (TakeGrant(isolate_, state, waiter->kind == ChannelWaiter::Kind::kWrite)
@@ -2694,18 +2791,11 @@ index 00000000..6bd403eb
 +    }
 +    return;
 +  }
-+  std::unique_ptr<ChannelValue> received;
-+  int index;
-+  bool closed;
-+  {
-+    base::MutexGuard guard(channels_mutex.Pointer());
-+    received = std::move(waiter->data);
-+    index = waiter->index;
-+    closed = waiter->closed;
-+  }
++  std::unique_ptr<ChannelValue> received = std::move(waiter->data);
 +  TryCatch try_catch(isolate_);
 +  Local<Object> result;
-+  if (MakeResult(isolate_, context, index, closed, std::move(received))
++  if (MakeResult(isolate_, context, waiter->index, waiter->closed,
++                 std::move(received))
 +          .ToLocal(&result)) {
 +    USE(resolver->Resolve(context, result));
 +  } else if (try_catch.HasCaught() && !try_catch.HasTerminated()) {
@@ -2806,9 +2896,9 @@ index 00000000..6bd403eb
 +      waiter = std::make_shared<ChannelWaiter>(ChannelWaiter::Kind::kSend,
 +                                               isolate, blocking, id);
 +      waiter->task = task;
-+      if (!blocking) AsyncWaiters().insert(waiter.get());
 +      state->items.push_back({std::move(data), false, waiter});
 +      waiter->channels.push_back(state);
++      RegisterLocked(waiter.get());
 +    }
 +  }
 +  if (!waiter) {
@@ -2822,7 +2912,7 @@ index 00000000..6bd403eb
 +    return;
 +  }
 +  if (blocking) {
-+    WaitBlocking(waiter);
++    WaitBlocking(waiter, [] {});
 +  } else {
 +    info.GetReturnValue().Set(AddPending(isolate, std::move(waiter)));
 +  }
@@ -2830,14 +2920,13 @@ index 00000000..6bd403eb
 +
 +// Receives from the first of `states` that has a value or is closed.
 +void Receive(const FunctionCallbackInfo<Value>& info,
-+             std::vector<std::shared_ptr<ChannelState>> states,
++             const std::shared_ptr<ChannelState>* states, size_t count,
 +             bool blocking) {
 +  Isolate* isolate = info.GetIsolate();
 +  Local<Context> context = isolate->GetCurrentContext();
 +  static thread_local uint32_t rotation = 0;
 +  double task = CurrentTask(isolate);
 +  if (ThrowIfAborted(isolate, task)) return;
-+  size_t count = states.size();
 +  size_t start = count > 1 ? rotation++ % count : 0;
 +
 +  std::unique_ptr<ChannelValue> data;
@@ -2862,11 +2951,11 @@ index 00000000..6bd403eb
 +      waiter = std::make_shared<ChannelWaiter>(ChannelWaiter::Kind::kReceive,
 +                                               isolate, blocking, id);
 +      waiter->task = task;
-+      if (!blocking) AsyncWaiters().insert(waiter.get());
 +      for (size_t i = 0; i < count; i++) {
 +        states[i]->receivers.push_back({waiter, static_cast<int>(i)});
 +        waiter->channels.push_back(states[i]);
 +      }
++      RegisterLocked(waiter.get());
 +    }
 +  }
 +
@@ -2875,15 +2964,13 @@ index 00000000..6bd403eb
 +    return;
 +  }
 +  if (waiter) {
-+    if (!WaitBlocking(waiter)) return;
-+    base::MutexGuard guard(channels_mutex.Pointer());
-+    if (isolate->IsExecutionTerminating()) {
-+      ReturnUndeliveredLocked(waiter.get());
++    if (!WaitBlocking(waiter, [&] {
++          data = std::move(waiter->data);
++          index = waiter->index;
++          closed = waiter->closed;
++        })) {
 +      return;
 +    }
-+    data = std::move(waiter->data);
-+    index = waiter->index;
-+    closed = waiter->closed;
 +  }
 +  Local<Object> result;
 +  if (!MakeResult(isolate, context, index, closed, std::move(data))
@@ -2904,7 +2991,7 @@ index 00000000..6bd403eb
 +void ChannelRecv(const FunctionCallbackInfo<Value>& info) {
 +  std::shared_ptr<ChannelState> state = ThisState(info);
 +  if (!state) return;
-+  Receive(info, {state}, info[0]->IsTrue());
++  Receive(info, &state, 1, info[0]->IsTrue());
 +}
 +
 +// Channel.__select(channels, blocking)
@@ -2927,7 +3014,7 @@ index 00000000..6bd403eb
 +    }
 +    states.push_back(std::move(state));
 +  }
-+  Receive(info, std::move(states), info[1]->IsTrue());
++  Receive(info, states.data(), states.size(), info[1]->IsTrue());
 +}
 +
 +void ChannelClose(const FunctionCallbackInfo<Value>& info) {
@@ -3073,9 +3160,9 @@ index 00000000..6bd403eb
 +    } else if (mode != 2) {
 +      waiter = std::make_shared<ChannelWaiter>(kind, isolate, blocking, id);
 +      waiter->task = task;
-+      if (!blocking) AsyncWaiters().insert(waiter.get());
 +      waiter->channels.push_back(state);
 +      lock->queue.push_back(waiter);
++      RegisterLocked(waiter.get());
 +    }
 +  }
 +  if (mode == 2 && !granted) {
@@ -3087,13 +3174,7 @@ index 00000000..6bd403eb
 +    return;
 +  }
 +  if (!granted) {
-+    if (!WaitBlocking(waiter)) return;
-+    base::MutexGuard guard(channels_mutex.Pointer());
-+    if (isolate->IsExecutionTerminating()) {
-+      ReturnUndeliveredLocked(waiter.get());
-+      return;
-+    }
-+    waiter->granted = nullptr;
++    if (!WaitBlocking(waiter, [&] { waiter->granted = nullptr; })) return;
 +  }
 +  Local<Value> root;
 +  if (!TakeGrant(isolate, state, write).ToLocal(&root)) return;
@@ -3210,7 +3291,8 @@ index 00000000..6bd403eb
 +void Channels::TerminateIsolate(Isolate* isolate) {
 +  base::MutexGuard guard(channels_mutex.Pointer());
 +  TerminatingIsolates().insert(isolate);
-+  for (ChannelWaiter* waiter : BlockingWaiters()) {
++  any_terminating.store(true, std::memory_order_relaxed);
++  for (ChannelWaiter* waiter : BlockingWaiters().Snapshot()) {
 +    if (waiter->isolate != isolate || waiter->cancelled) continue;
 +    if (waiter->done) {
 +      ReturnUndeliveredLocked(waiter);
@@ -3281,8 +3363,9 @@ index 00000000..6bd403eb
 +  {
 +    base::MutexGuard guard(channels_mutex.Pointer());
 +    AbortedTasks()[isolate].insert_or_assign(task, AbortReason{name, message});
++    any_aborted.store(true, std::memory_order_relaxed);
 +    // A blocked thread cannot run the task below: its wait ends here.
-+    for (ChannelWaiter* waiter : BlockingWaiters()) {
++    for (ChannelWaiter* waiter : BlockingWaiters().Snapshot()) {
 +      if (waiter->isolate != isolate || waiter->task != task ||
 +          waiter->cancelled) {
 +        continue;
@@ -3308,12 +3391,14 @@ index 00000000..6bd403eb
 +  if (it == AbortedTasks().end()) return;
 +  it->second.erase(task);
 +  if (it->second.empty()) AbortedTasks().erase(it);
++  any_aborted.store(!AbortedTasks().empty(), std::memory_order_relaxed);
 +}
 +
 +// static
 +bool Channels::HasPendingWaits(Isolate* isolate) {
 +  if (DataOf(isolate).pending.empty()) return false;
 +  // A terminated isolate must be able to leave its event loop.
++  if (!any_terminating.load(std::memory_order_relaxed)) return true;
 +  base::MutexGuard guard(channels_mutex.Pointer());
 +  return !TerminatingIsolates().contains(isolate);
 +}
@@ -3324,7 +3409,10 @@ index 00000000..6bd403eb
 +  {
 +    base::MutexGuard guard(channels_mutex.Pointer());
 +    TerminatingIsolates().erase(isolate);
++    any_terminating.store(!TerminatingIsolates().empty(),
++                          std::memory_order_relaxed);
 +    AbortedTasks().erase(isolate);
++    any_aborted.store(!AbortedTasks().empty(), std::memory_order_relaxed);
 +    for (auto& [id, pending] : data.pending) {
 +      AsyncWaiters().erase(pending.waiter.get());
 +      if (pending.waiter->done) {
@@ -3353,9 +3441,14 @@ index 00000000..6bd403eb
 +  data.handles.clear();
 +  data.ctor.Reset();
 +  data.lock_ctor.Reset();
++  data.value_name.Reset();
++  data.done_name.Reset();
++  data.index_name.Reset();
++  if (PerIsolateData* per_isolate = PerIsolateData::Get(isolate)) {
++    per_isolate->channels_data = nullptr;
++  }
 +  base::MutexGuard guard(isolates_mutex.Pointer());
 +  AllData().erase(isolate);
-+  data_epoch.fetch_add(1, std::memory_order_release);
 +}
 +
 +namespace {
@@ -3407,10 +3500,10 @@ index 00000000..6bd403eb
 +    if (!AllAsleepLocked() || Deadlock().epoch != epoch) return;
 +  }
 +  std::vector<ChannelWaiter*> waiters;
-+  for (ChannelWaiter* waiter : BlockingWaiters()) {
++  for (ChannelWaiter* waiter : BlockingWaiters().Snapshot()) {
 +    if (!waiter->done && !waiter->cancelled) waiters.push_back(waiter);
 +  }
-+  for (ChannelWaiter* waiter : AsyncWaiters()) {
++  for (ChannelWaiter* waiter : AsyncWaiters().Snapshot()) {
 +    if (!waiter->done) waiters.push_back(waiter);
 +  }
 +  // Marked first: a cancelled lock acquire must not let the next one in.
@@ -3421,6 +3514,7 @@ index 00000000..6bd403eb
 +      waiter->cancelled = true;
 +      SignalLocked(waiter);
 +    } else {
++      AsyncWaiters().erase(waiter);
 +      i::V8::GetCurrentPlatform()
 +          ->GetForegroundTaskRunner(waiter->isolate)
 +          ->PostTask(std::make_unique<WakeTask>(waiter->isolate, waiter->id));
@@ -3634,10 +3728,10 @@ index 00000000..9446d334
 +#endif  // V8_D8_D8_CHANNEL_H_
 diff --git a/src/d8/d8-port.cc b/src/d8/d8-port.cc
 new file mode 100644
-index 00000000..3d5794c0
+index 00000000..74d70d9c
 --- /dev/null
 +++ b/src/d8/d8-port.cc
-@@ -0,0 +1,1111 @@
+@@ -0,0 +1,1109 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -3779,8 +3873,6 @@ index 00000000..3d5794c0
 +};
 +
 +base::LazyMutex isolates_mutex = LAZY_MUTEX_INITIALIZER;
-+// Bumped whenever an entry of AllData() is erased.
-+std::atomic<uint64_t> data_epoch{1};
 +
 +std::unordered_map<Isolate*, IsolatePorts>& AllData() {
 +  static base::LeakyObject<std::unordered_map<Isolate*, IsolatePorts>> all;
@@ -3790,18 +3882,16 @@ index 00000000..3d5794c0
 +// Elements of an unordered_map keep their address; only the isolate's own
 +// thread uses its entry.
 +IsolatePorts& DataOf(Isolate* isolate) {
-+  // The entry is cached per thread; erasing any entry invalidates the cache,
-+  // as a new isolate may get the address of a disposed one.
-+  thread_local Isolate* cached_isolate = nullptr;
-+  thread_local IsolatePorts* cached_data = nullptr;
-+  thread_local uint64_t cached_epoch = 0;
-+  uint64_t epoch = data_epoch.load(std::memory_order_acquire);
-+  if (cached_isolate == isolate && cached_epoch == epoch) return *cached_data;
++  // The entry is kept in the isolate's PerIsolateData; isolates without one
++  // look it up every time.
++  PerIsolateData* per_isolate = PerIsolateData::Get(isolate);
++  if (per_isolate && per_isolate->ports_data) {
++    return *static_cast<IsolatePorts*>(per_isolate->ports_data);
++  }
 +  base::MutexGuard guard(isolates_mutex.Pointer());
-+  cached_data = &AllData()[isolate];
-+  cached_isolate = isolate;
-+  cached_epoch = epoch;
-+  return *cached_data;
++  IsolatePorts& data = AllData()[isolate];
++  if (per_isolate) per_isolate->ports_data = &data;
++  return data;
 +}
 +
 +void ThrowTypeError(Isolate* isolate, const char* message) {
@@ -4743,9 +4833,11 @@ index 00000000..3d5794c0
 +  }
 +  data.handles.clear();
 +  data.ctor.Reset();
++  if (PerIsolateData* per_isolate = PerIsolateData::Get(isolate)) {
++    per_isolate->ports_data = nullptr;
++  }
 +  base::MutexGuard guard(isolates_mutex.Pointer());
 +  AllData().erase(isolate);
-+  data_epoch.fetch_add(1, std::memory_order_release);
 +}
 +
 +}  // namespace v8
@@ -7151,7 +7243,7 @@ index 49121fe1..44947efd 100644
  #ifdef V8_FUZZILLI
  
 diff --git a/src/d8/d8.h b/src/d8/d8.h
-index 0c7ad50a..0c8b064d 100644
+index 0c7ad50a..44dc73d2 100644
 --- a/src/d8/d8.h
 +++ b/src/d8/d8.h
 @@ -8,6 +8,7 @@
@@ -7231,7 +7323,19 @@ index 0c7ad50a..0c8b064d 100644
    std::vector<std::unique_ptr<SerializationData>> data_;
  };
  
-@@ -432,8 +460,25 @@ class PerIsolateData {
+@@ -388,6 +416,11 @@ class PerIsolateData {
+     return reinterpret_cast<PerIsolateData*>(isolate->GetData(0));
+   }
+ 
++  // The isolate's entries in d8-channel.cc and d8-port.cc, found here without
++  // a lookup.
++  void* channels_data = nullptr;
++  void* ports_data = nullptr;
++
+   class V8_NODISCARD RealmScope {
+    public:
+     explicit RealmScope(Isolate* isolate, const Global<Context>& context);
+@@ -432,8 +465,25 @@ class PerIsolateData {
    Local<FunctionTemplate> GetDomNodeCtor() const;
    void SetDomNodeCtor(Local<FunctionTemplate> ctor);
  
@@ -7257,7 +7361,7 @@ index 0c7ad50a..0c8b064d 100644
    void SubscribeWorkerOnMessage(const std::shared_ptr<Worker>& worker,
                                  Local<Context> context,
                                  Local<Function> callback);
-@@ -457,6 +502,33 @@ class PerIsolateData {
+@@ -457,6 +507,33 @@ class PerIsolateData {
    std::unordered_set<DynamicImportData*> import_data_;
    Global<FunctionTemplate> test_api_object_ctor_;
    Global<FunctionTemplate> dom_node_ctor_;
@@ -7291,7 +7395,7 @@ index 0c7ad50a..0c8b064d 100644
    // See Shell::GetOrCreateLeafInterfaceTypeTemplate.
    Global<FunctionTemplate> leaf_interface_type_template_;
    // The template of the global object of all contexts that d8 creates in this
-@@ -641,6 +713,9 @@ class ShellOptions {
+@@ -641,6 +718,9 @@ class ShellOptions {
    DisallowReassignment<bool> expose_fast_api = {"expose-fast-api", false};
    DisallowReassignment<size_t> max_serializer_memory = {"max-serializer-memory",
                                                          1 * i::MB};
@@ -7301,7 +7405,7 @@ index 0c7ad50a..0c8b064d 100644
    DisallowReassignment<bool> bundle = {"bundle", false};
  };
  
-@@ -713,6 +788,21 @@ class Shell : public i::AllStatic {
+@@ -713,6 +793,21 @@ class Shell : public i::AllStatic {
  
    static bool HandleUnhandledPromiseRejections(Isolate* isolate);
  
@@ -7323,7 +7427,7 @@ index 0c7ad50a..0c8b064d 100644
    static std::unique_ptr<SerializationData> SerializeValue(
        Isolate* isolate, Local<Value> value, Local<Value> transfer);
    static MaybeLocal<Value> DeserializeValue(
-@@ -1007,6 +1097,46 @@ class Shell : public i::AllStatic {
+@@ -1007,6 +1102,46 @@ class Shell : public i::AllStatic {
    static Local<ObjectTemplate> GetOrCreateGlobalTemplate(Isolate* isolate);
    static Local<ObjectTemplate> CreateOSTemplate(Isolate* isolate);
    static Local<FunctionTemplate> CreateWorkerTemplate(Isolate* isolate);
