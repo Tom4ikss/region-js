@@ -133,11 +133,11 @@
 <span class="tok-fn">measure</span>(<span class="tok-string">'region.run             '</span>, viaRun);
 <span class="tok-fn">measure</span>(<span class="tok-string">'Region.object, enter   '</span>, viaObject);
 <span class="tok-fn">measure</span>(<span class="tok-string">'Region.object и push   '</span>, viaPush);
-<span class="tok-fn">measure</span>(<span class="tok-string">'литерал #{} и push     '</span>, viaLiteral);</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8 --harmony-region-literals; время у вас будет другим</span></div><pre class="out">обычные объекты        : создание 27 ms, проход 0.3 ms (сумма 9900000)
-region.run             : создание 236 ms, проход 1.6 ms (сумма 9900000)
-Region.object, enter   : создание 481 ms, проход 1.0 ms (сумма 9900000)
-Region.object и push   : создание 475 ms, проход 1.1 ms (сумма 9900000)
-литерал #{} и push     : создание 68 ms, проход 1.1 ms (сумма 9900000)</pre></figure></details>
+<span class="tok-fn">measure</span>(<span class="tok-string">'литерал #{} и push     '</span>, viaLiteral);</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8 --harmony-region-literals; время у вас будет другим</span></div><pre class="out">обычные объекты        : создание 26 ms, проход 0.2 ms (сумма 9900000)
+region.run             : создание 202 ms, проход 1.8 ms (сумма 9900000)
+Region.object, enter   : создание 453 ms, проход 0.7 ms (сумма 9900000)
+Region.object и push   : создание 472 ms, проход 0.9 ms (сумма 9900000)
+литерал #{} и push     : создание 69 ms, проход 0.7 ms (сумма 9900000)</pre></figure></details>
 
 <h2 id="access">Чтение и запись</h2>
 <p>Maglev и Turbofan встраивают доступ к объектам региона в машинный код, но проверяют владельца на каждом обращении (подробнее на странице <a href="inside.html#jit">«Как это устроено»</a>). Замеры ниже сделаны на сборке <code>out/release/d8</code> с теми же настройками, что и остальные.</p>
@@ -160,6 +160,29 @@ Region.object и push   : создание 475 ms, проход 1.1 ms (сумм
 </div>
 <p>Только Maglev (<code>--no-turbofan</code>), регион, вызов inline cache → встроенный доступ: чтение поля 3,6 → 2,2 нс, запись поля 3,7 → 2,8 нс, чтение по индексу 6,9 → 4,8 нс, запись по индексу 6,7 → 4,5 нс. Быстрый путь в Maglev пока есть только на arm64.</p>
 <p>Типизированные массивы в регионе этого отставания не имеют. При чтении поля поток получает обычный типизированный массив над памятью региона, и сумма миллиона чисел по нему занимает те же 0,68 мс, что и по обычному <code>Float64Array</code>. По массиву чисел в регионе она занимает 2,4 мс (замер в <a href="practices.html#typed">практике 9</a>).</p>
+
+<h3 id="methods">Методы массивов, 100 000 элементов</h3>
+<p>Методы массивов, <code>for...of</code>, <code>Array.from</code> и spread раньше читали каждый элемент массива региона через рантайм. Теперь они берут значения прямо из массива региона (<a href="inside.html#methods">как</a>). Сборка <code>out/release/d8</code>, массив из 100 000 чисел, миллисекунды на один вызов.</p>
+<div class="table-wrap">
+<table>
+<thead><tr><th>Операция</th><th class="num">Обычный массив</th><th class="num">Регион, было</th><th class="num">Регион, стало</th></tr></thead>
+<tbody>
+<tr><td>цикл <code>for</code> по индексу</td><td class="num">0,22</td><td class="num">0,79</td><td class="num">0,79</td></tr>
+<tr><td><code>for...of</code></td><td class="num">1,07</td><td class="num">15,4</td><td class="num">1,36</td></tr>
+<tr><td><code>forEach</code></td><td class="num">0,99</td><td class="num">21,3</td><td class="num">1,17</td></tr>
+<tr><td><code>map</code></td><td class="num">0,92</td><td class="num">21,5</td><td class="num">1,46</td></tr>
+<tr><td><code>filter</code></td><td class="num">1,06</td><td class="num">24,9</td><td class="num">1,44</td></tr>
+<tr><td><code>reduce</code></td><td class="num">0,84</td><td class="num">21,8</td><td class="num">0,97</td></tr>
+<tr><td><code>indexOf</code></td><td class="num">0,01</td><td class="num">4,03</td><td class="num">0,09</td></tr>
+<tr><td><code>includes</code></td><td class="num">0,01</td><td class="num">3,43</td><td class="num">0,09</td></tr>
+<tr><td><code>join</code></td><td class="num">3,30</td><td class="num">9,84</td><td class="num">3,29</td></tr>
+<tr><td>spread <code>[...a]</code></td><td class="num">0,04</td><td class="num">17,0</td><td class="num">0,28</td></tr>
+<tr><td><code>Array.from</code></td><td class="num">0,09</td><td class="num">16,6</td><td class="num">0,25</td></tr>
+<tr><td><code>at()</code> в цикле</td><td class="num">0,20</td><td class="num">15,4</td><td class="num">1,74</td></tr>
+</tbody>
+</table>
+</div>
+<p>Методы с колбэком и <code>for...of</code> ускорились в 11–22 раза и теперь медленнее обычного массива в 1,2–1,6 раза. <code>indexOf</code>, <code>includes</code>, spread и <code>Array.from</code> ускорились в 38–66 раз. У обычного массива они ещё быстрее, поэтому отношение у них больше, но разница — доли миллисекунды. <code>join</code> сравнялся с обычным массивом. Дольше всех <code>at()</code> в цикле, примерно в 9 раз дольше обычного: для обычного массива компилятор встраивает <code>at</code> в код, а для массива региона каждый раз вызывает встроенную функцию. Цикл <code>for</code> эта работа не затронула.</p>
 
 <h2 id="parallel">Параллельное чтение</h2>
 <p>Замороженное дерево из миллиона узлов один раз рассылается воркерам, каждый берёт на него билет. Потом 8 полных обходов делятся между ними поровну.</p>

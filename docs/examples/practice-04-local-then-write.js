@@ -42,7 +42,7 @@ const readLoopCopy = () => {
   for (let i = 0; i < prices.length; i++) local[i] = prices[i];
   return sumLocal(local);
 };
-// А Array.from (и spread) на массиве региона пока медленные: они идут через итератор.
+// Так же быстро копирует Array.from (и spread): для массива региона это один проход по значениям.
 const sumFromCopy = (local) => {
   let total = 0;
   for (let p = 0; p < PASSES; p++)

@@ -213,7 +213,7 @@ spread объекта: {"x":1,"y":2,"z":3}
 
 <div class="callout limit">
 <span class="callout-title">Про скорость</span>
-<p>Методы из <code>Array.prototype</code> (<code>map</code>, <code>filter</code>, <code>Array.from</code>, spread массива, <code>for...of</code>) на массиве региона пока заметно медленнее простого цикла <code>for</code> по индексу. Цифры — на странице <a href="practices.html#methods">«Как делать и как не делать»</a>.</p>
+<p>Методы из <code>Array.prototype</code> (<code>map</code>, <code>filter</code>, <code>reduce</code>, <code>includes</code>), <code>for...of</code>, <code>Array.from</code> и spread массива читают массив региона напрямую и стоят почти столько же, сколько на обычном массиве. Доступ по индексу в цикле <code>for</code> медленнее обычного примерно в 3 раза: на каждом обращении проверяется владелец. Цифры — на страницах <a href="numbers.html#methods">«Цифры»</a> и <a href="practices.html#methods">«Как делать и как не делать»</a>.</p>
 </div>
 
 <h2 id="not-allowed">4. Что нельзя положить в регион</h2>
@@ -355,7 +355,7 @@ worker.<span class="tok-api">terminate</span>();</code></pre><div class="out-hea
 }
 worker.<span class="tok-api">terminate</span>();</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8; время у вас будет другим</span></div><pre class="out">тот же самый объект: true
 ходов: 2000 | последний писал: воркер
-один круг туда-обратно: 14.7 µs
+один круг туда-обратно: 9.9 µs
 Region.of для обычного объекта: Region.of() expects an object from a region</pre></figure>
 
 <p>Тысяча кругов «туда и обратно», и в конце в руках тот же самый объект: <code>current === state</code>. Один круг — два переезда и две пересылки сообщения — занимает около 10–11 микросекунд, от запуска к запуску по-разному.</p>
@@ -550,7 +550,7 @@ start = performance.<span class="tok-fn">now</span>();
 тот же объект? false | те же байты? true
 это обычный Uint8Array: true 4
 новая длина: 16
-8 МБ копией: 0.62 ms, через transfer: 0.05 ms
+8 МБ копией: 0.45 ms, через transfer: 0.03 ms
 исходный после transfer: 0 | в регионе: 1000000 1000000</pre></figure>
 
 <ul>
