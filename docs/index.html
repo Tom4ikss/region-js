@@ -82,8 +82,8 @@
   <span class="tok-fn">print</span>(<span class="tok-string">'главный поток после переезда:'</span>, e.message);
 }
 worker.<span class="tok-api">terminate</span>();</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8; время у вас будет другим</span></div><pre class="out">узлов в дереве: 131071
-копия (structured clone): 123.26 ms
-переезд региона:          0.07 ms
+копия (structured clone): 120.42 ms
+переезд региона:          0.08 ms
 <span class="err">главный поток после переезда: OwnershipError: region 0 is owned by isolate 1, not by isolate 0</span></pre></figure>
 
 <p>Копия заняла больше сотни миллисекунд, переезд — сотые доли миллисекунды. И время переезда почти не растёт с размером: для дерева из миллиона узлов оно около 0,12 мс, а копия такого дерева идёт почти секунду.</p>
@@ -104,7 +104,7 @@ worker.<span class="tok-api">terminate</span>();</code></pre><div class="out-hea
   <li><strong>Переезд</strong> (<code>worker.postMessage(msg, [region])</code>) — отдать регион другому потоку без копирования. Отправитель теряет доступ. <code>spawn</code> и каналы перемещают регионы сами, без списка transfer.</li>
   <li><strong>Заморозка</strong> (<code>region.freeze()</code>, <code>region.borrow()</code>) — регион только для чтения, зато его могут читать все потоки сразу, взяв билет <code>borrow()</code>. Разморозить может тот, кто заморозил, и это право можно передать.</li>
   <li><strong><code>spawn(fn)</code></strong> — запустить функцию в отдельном потоке одной строкой. Задачи идут в пул долгоживущих воркеров. Нужные функции переменные <code>spawn</code> находит сам, результат возвращается через регион. Ручку задачи ждут как промис, вложенные задачи заканчиваются раньше внешней, ошибки не теряются.</li>
-  <li><strong>Каналы</strong> (<code>new Channel()</code>, <code>send</code>, <code>recv</code>, <code>select</code>) — очереди между потоками, как в Go. Регион, отправленный в канал, переезжает без копии.</li>
+  <li><strong>Каналы</strong> (<code>new Channel()</code>, <code>send</code>, <code>recv</code>, <code>select</code>) — очереди между потоками, как в Go. Регион, отправленный в канал, переезжает без копии. Если все потоки ждут друг друга, ожидания заканчиваются ошибкой <code>DeadlockError</code> (<a href="channels.html#deadlock">подробнее</a>).</li>
   <li><strong><code>RwLock</code></strong> (<code>new RwLock(data)</code>, <code>await lock.write()</code>, <code>await lock.read()</code>) — общие данные, которые потоки пишут по очереди или читают вместе. Ссылка, сохранённая после отпуска лока, перестаёт работать (<a href="channels.html#rwlock">подробнее</a>).</li>
   <li><strong>Освобождение</strong> (<code>region.free()</code>, <code>using</code>) — отдать регион сразу, не дожидаясь сборщика мусора. После этого его объекты недоступны никому (<a href="guide.html#free">подробнее</a>).</li>
   <li><strong>Песочница для редактора</strong> — типы и правила Biome и ESLint, которые подсвечивают типичные ошибки до запуска.</li>

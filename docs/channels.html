@@ -251,7 +251,49 @@ spawn.aborted = () =&gt; {
 </tbody>
 </table>
 </div>
-<p>Последняя строка значит, что забытый получатель держит программу. Если задача ждёт канал, в который никто никогда не напишет, d8 не завершится. Go в такой ситуации сообщает «all goroutines are asleep», здесь такой проверки пока нет.</p>
+<p>Последняя строка значит, что получатель держит программу, пока его может разбудить другой поток.</p>
+
+<h2 id="deadlock">Дедлоки</h2>
+<p>Если ждут все потоки и разбудить друг друга им некому, это дедлок. Go в такой ситуации завершает программу с ошибкой «all goroutines are asleep». Здесь все ожидания каналов и локов заканчиваются ошибкой <code>DeadlockError</code>, и программа может её поймать:</p>
+
+<figure class="example"><div class="ex-head"><span class="file"><a href="examples/40-deadlock.js">examples/40-deadlock.js</a></span><button class="copy" type="button">Копировать</button></div><pre class="code"><code><span class="tok-comment">// d8-flags: --module</span>
+<span class="tok-comment">// Дедлок: все потоки ждут, и разбудить друг друга им некому.</span>
+<span class="tok-keyword">const</span> ping = <span class="tok-keyword">new</span> <span class="tok-api">Channel</span>();
+<span class="tok-keyword">const</span> pong = <span class="tok-keyword">new</span> <span class="tok-api">Channel</span>();
+
+<span class="tok-comment">// Обе задачи сначала ждут, а отправляют потом: такой обмен не начнётся никогда.</span>
+<span class="tok-keyword">const</span> a = <span class="tok-api">spawn</span>(<span class="tok-keyword">async</span> (ping, pong) =&gt; {
+  <span class="tok-keyword">await</span> ping.<span class="tok-api">recv</span>();
+  <span class="tok-keyword">await</span> pong.<span class="tok-api">send</span>(<span class="tok-string">'от a'</span>);
+}, ping, pong);
+<span class="tok-keyword">const</span> b = <span class="tok-api">spawn</span>(<span class="tok-keyword">async</span> (ping, pong) =&gt; {
+  <span class="tok-keyword">await</span> pong.<span class="tok-api">recv</span>();
+  <span class="tok-keyword">await</span> ping.<span class="tok-api">send</span>(<span class="tok-string">'от b'</span>);
+}, ping, pong);
+
+<span class="tok-keyword">for</span> (<span class="tok-keyword">const</span> [name, task] <span class="tok-keyword">of</span> [[<span class="tok-string">'a'</span>, a], [<span class="tok-string">'b'</span>, b]]) {
+  <span class="tok-keyword">try</span> {
+    <span class="tok-keyword">await</span> task;
+  } <span class="tok-keyword">catch</span> (e) {
+    <span class="tok-fn">print</span>(<span class="tok-string">`задача ${</span>name<span class="tok-string">}: ${</span>e.name<span class="tok-string">}: ${</span>e.message<span class="tok-string">}`</span>);
+  }
+}
+
+<span class="tok-comment">// Ошибку можно поймать и продолжить.</span>
+<span class="tok-keyword">const</span> lonely = <span class="tok-keyword">new</span> <span class="tok-api">Channel</span>(<span class="tok-number">1</span>);
+<span class="tok-keyword">try</span> {
+  <span class="tok-keyword">await</span> lonely.<span class="tok-api">recv</span>();
+} <span class="tok-keyword">catch</span> (e) {
+  <span class="tok-fn">print</span>(<span class="tok-string">'главный поток:'</span>, e.name);
+}
+<span class="tok-keyword">await</span> lonely.<span class="tok-api">send</span>(<span class="tok-string">'теперь есть что получить'</span>);
+<span class="tok-fn">print</span>((<span class="tok-keyword">await</span> lonely.<span class="tok-api">recv</span>()).value);</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8 --module</span></div><pre class="out"><span class="err">задача a: DeadlockError: deadlock: every thread is waiting, and none of them can wake the others</span>
+<span class="err">задача b: DeadlockError: deadlock: every thread is waiting, and none of them can wake the others</span>
+<span class="err">главный поток: DeadlockError</span>
+теперь есть что получить</pre></figure>
+
+<p>Поток спит, когда ему нечего делать в цикле событий или когда он стоит в блокирующем ожидании: <code>recvSync</code>, <code>writeSync</code>, <code>join()</code>. Поток, который считает, может ещё что-то отправить, поэтому пока он работает, дедлока нет. То же с таймером <code>timeout()</code>: пока он не сработал, он может отменить задачу. Ошибка приходит, если все потоки проспали так 50 мс подряд.</p>
+<p>Проверка смотрит только на каналы и локи. Задача, которая ждёт обычный промис, который никто не выполнит, держит d8 вечно, как и раньше.</p>
 
 <h2 id="cost">Сколько это стоит</h2>
 <p>Числа, строки, объекты регионов и сами каналы идут через канал напрямую, без сериализатора. Обычные объекты копирует тот же сериализатор, что у <code>postMessage</code>. Ожидающий поток будится напрямую. Круг «туда и обратно» через два канала без буфера всё равно немного дороже, чем обмен сообщениями с воркером: каждый круг — это две встречи отправителя с получателем, и на каждую получатель собирает результат <code>{ value, done }</code> и засыпает или просыпается.</p>
@@ -283,8 +325,8 @@ ping.<span class="tok-api">close</span>();
 <span class="tok-keyword">const</span> perMessage = (performance.<span class="tok-fn">now</span>() - t) * <span class="tok-number">1000</span> / N;
 worker.<span class="tok-api">terminate</span>();
 <span class="tok-fn">print</span>(<span class="tok-string">'канал, круг:'</span>, perTrip.<span class="tok-fn">toFixed</span>(<span class="tok-number">1</span>), <span class="tok-string">'µs'</span>);
-<span class="tok-fn">print</span>(<span class="tok-string">'postMessage + getMessage, круг:'</span>, perMessage.<span class="tok-fn">toFixed</span>(<span class="tok-number">1</span>), <span class="tok-string">'µs'</span>);</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8 --module; время у вас будет другим</span></div><pre class="out">канал, круг: 4.9 µs
-postMessage + getMessage, круг: 2.9 µs</pre></figure>
+<span class="tok-fn">print</span>(<span class="tok-string">'postMessage + getMessage, круг:'</span>, perMessage.<span class="tok-fn">toFixed</span>(<span class="tok-number">1</span>), <span class="tok-string">'µs'</span>);</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8 --module; время у вас будет другим</span></div><pre class="out">канал, круг: 4.8 µs
+postMessage + getMessage, круг: 3.1 µs</pre></figure>
 
 <p>Это единицы микросекунд, а у горутин в Go — доли микросекунды. Если гонять через канал по одному числу, больше 200 000 значений в секунду не выйдет, и в горячем цикле пересылка легко займёт больше времени, чем сама работа. Каналы подходят, чтобы передавать порции работы: заказ, кусок файла, пачку строк. Объединяйте мелкие значения в пачки, как и для <code>spawn</code> (<a href="practices.html#batch">подробнее</a>).</p>
 <nav class="pager" aria-label="Соседние страницы"><a class="prev" href="spawn.html"><span>← Назад</span>spawn: задачи в потоках</a><a class="next" href="practices.html"><span>Дальше →</span>Как делать и как не делать</a></nav>

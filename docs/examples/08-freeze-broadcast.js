@@ -18,12 +18,17 @@ const workers = [0, 1, 2].map(
       onmessage = ({ data: { config } }) => {
         let unborrowed;
         try { unborrowed = config.api; } catch (e) { unborrowed = e.message; }
-        // Читать замороженный регион можно только под билетом.
-        using borrow = Region.of(config).borrow();
-        let write;
-        try { config.retries = 0; write = 'записал'; } catch (e) { write = 'запись запрещена'; }
-        postMessage('воркер ${i}: ' + config.api + ', флаг ' + config.flags[${i}] + ', ' + write +
-                    (${i} === 0 ? '\\n  без билета: ' + unborrowed : ''));
+        let reply;
+        {
+          // Читать замороженный регион можно только под билетом.
+          using borrow = Region.of(config).borrow();
+          let write;
+          try { config.retries = 0; write = 'записал'; } catch (e) { write = 'запись запрещена'; }
+          reply = 'воркер ${i}: ' + config.api + ', флаг ' + config.flags[${i}] + ', ' + write +
+                  (${i} === 0 ? '\\n  без билета: ' + unborrowed : '');
+        }
+        // Билет уже отдан: главный поток сможет сделать thaw().
+        postMessage(reply);
       };
       `,
       { type: 'string' },

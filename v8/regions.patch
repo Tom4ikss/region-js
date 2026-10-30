@@ -1985,10 +1985,10 @@ index 8aab5f56..b2e7c4d5 100644
        CheckValueInputIs(node, 1, Type::Any());
 diff --git a/src/d8/d8-channel.cc b/src/d8/d8-channel.cc
 new file mode 100644
-index 00000000..228f1352
+index 00000000..6bd403eb
 --- /dev/null
 +++ b/src/d8/d8-channel.cc
-@@ -0,0 +1,1312 @@
+@@ -0,0 +1,1565 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -2027,6 +2027,7 @@ index 00000000..228f1352
 +#include "src/handles/shared-object-conveyor-handles.h"
 +#include "src/heap/parked-scope-inl.h"
 +#include "src/init/v8.h"
++#include "src/libplatform/default-foreground-task-runner.h"
 +#include "src/objects/js-region-inl.h"
 +
 +namespace v8 {
@@ -2075,6 +2076,10 @@ index 00000000..228f1352
 +  // cancelled because that task was aborted.
 +  double task = -1;
 +  bool aborted = false;
++  // The blocked thread sleeps, as far as the deadlock check knows; and the
++  // wait was cancelled because every thread sleeps.
++  bool parked = false;
++  bool deadlocked = false;
 +};
 +
 +// An RwLock: one region that threads take turns to write, or read together.
@@ -2172,6 +2177,11 @@ index 00000000..228f1352
 +  static base::LeakyObject<std::unordered_set<ChannelWaiter*>> waiters;
 +  return *waiters.get();
 +}
++// Guarded by the channels mutex: waits with a pending promise.
++std::unordered_set<ChannelWaiter*>& AsyncWaiters() {
++  static base::LeakyObject<std::unordered_set<ChannelWaiter*>> waiters;
++  return *waiters.get();
++}
 +std::unordered_set<Isolate*>& TerminatingIsolates() {
 +  static base::LeakyObject<std::unordered_set<Isolate*>> isolates;
 +  return *isolates.get();
@@ -2216,6 +2226,12 @@ index 00000000..228f1352
 +void ThrowTypeError(Isolate* isolate, const char* message) {
 +  isolate->ThrowException(Exception::TypeError(
 +      String::NewFromUtf8(isolate, message).ToLocalChecked()));
++}
++
++AbortReason DeadlockReason() {
++  return AbortReason{"DeadlockError",
++                     "deadlock: every thread is waiting, and none of them can "
++                     "wake the others"};
 +}
 +
 +Local<Value> AbortError(Isolate* isolate, const AbortReason& reason) {
@@ -2285,14 +2301,23 @@ index 00000000..228f1352
 +  }
 +}
 +
++// Wakes the thread blocked in the waiter.
++void SignalLocked(ChannelWaiter* waiter) {
++  if (waiter->parked) {
++    waiter->parked = false;
++    Deadlocks::Unblock(waiter->isolate);
++  }
++  waiter->ready.store(true, std::memory_order_release);
++  waiter->completed.Signal();
++}
++
 +void CompleteLocked(const std::shared_ptr<ChannelWaiter>& waiter,
 +                    const ChannelState* taken_from = nullptr) {
 +  waiter->done = true;
 +  LeaveQueuesLocked(waiter.get(), taken_from);
 +  waiter->channels.clear();
 +  if (waiter->blocking) {
-+    waiter->ready.store(true, std::memory_order_release);
-+    waiter->completed.Signal();
++    SignalLocked(waiter.get());
 +  } else {
 +    i::V8::GetCurrentPlatform()
 +        ->GetForegroundTaskRunner(waiter->isolate)
@@ -2380,7 +2405,8 @@ index 00000000..228f1352
 +    std::shared_ptr<ChannelWaiter> waiter = lock->queue.front();
 +    if (!FitsLocked(lock, waiter->kind)) return;
 +    lock->queue.pop_front();
-+    if (TerminatingIsolates().contains(waiter->isolate)) {
++    if (TerminatingIsolates().contains(waiter->isolate) ||
++        waiter->deadlocked) {
 +      CancelLocked(waiter.get());
 +      continue;
 +    }
@@ -2479,6 +2505,13 @@ index 00000000..228f1352
 +            })) {
 +          return;
 +        }
++        {
++          base::MutexGuard guard(channels_mutex.Pointer());
++          if (!waiter->ready.load(std::memory_order_relaxed)) {
++            waiter->parked = true;
++            Deadlocks::Block(waiter->isolate);
++          }
++        }
 +        while (!waiter->completed.WaitFor(
 +            base::TimeDelta::FromMilliseconds(50))) {
 +          if (!i_isolate->stack_guard()->HasTerminationRequest() &&
@@ -2502,13 +2535,22 @@ index 00000000..228f1352
 +  {
 +    base::MutexGuard guard(channels_mutex.Pointer());
 +    BlockingWaiters().erase(waiter.get());
++    if (waiter->parked) {
++      waiter->parked = false;
++      Deadlocks::Unblock(waiter->isolate);
++    }
 +    if (!waiter->cancelled) return true;
-+    if (!waiter->aborted) return false;
-+    reason = AbortReason{"AbortError", "spawn() task was aborted"};
-+    auto tasks = AbortedTasks().find(waiter->isolate);
-+    if (tasks != AbortedTasks().end()) {
-+      auto it = tasks->second.find(waiter->task);
-+      if (it != tasks->second.end()) reason = it->second;
++    if (waiter->deadlocked) {
++      reason = DeadlockReason();
++    } else if (!waiter->aborted) {
++      return false;
++    } else {
++      reason = AbortReason{"AbortError", "spawn() task was aborted"};
++      auto tasks = AbortedTasks().find(waiter->isolate);
++      if (tasks != AbortedTasks().end()) {
++        auto it = tasks->second.find(waiter->task);
++        if (it != tasks->second.end()) reason = it->second;
++      }
 +    }
 +  }
 +  waiter->isolate->ThrowException(AbortError(waiter->isolate, reason));
@@ -2609,9 +2651,12 @@ index 00000000..228f1352
 +  // Terminating: the value could not be deserialized; ForgetIsolate gives it
 +  // back to the channel.
 +  if (isolate_->IsExecutionTerminating()) return;
++  bool deadlocked;
 +  {
 +    base::MutexGuard guard(channels_mutex.Pointer());
 +    if (TerminatingIsolates().contains(isolate_)) return;
++    AsyncWaiters().erase(it->second.waiter.get());
++    deadlocked = it->second.waiter->deadlocked;
 +  }
 +  PendingWait pending = std::move(it->second);
 +  data.pending.erase(it);
@@ -2624,6 +2669,10 @@ index 00000000..228f1352
 +  pending.context.Reset();
 +
 +  ChannelWaiter* waiter = pending.waiter.get();
++  if (deadlocked) {
++    USE(resolver->Reject(context, AbortError(isolate_, DeadlockReason())));
++    return;
++  }
 +  if (waiter->kind == ChannelWaiter::Kind::kSend) {
 +    USE(resolver->Resolve(context, Undefined(isolate_)));
 +    return;
@@ -2757,6 +2806,7 @@ index 00000000..228f1352
 +      waiter = std::make_shared<ChannelWaiter>(ChannelWaiter::Kind::kSend,
 +                                               isolate, blocking, id);
 +      waiter->task = task;
++      if (!blocking) AsyncWaiters().insert(waiter.get());
 +      state->items.push_back({std::move(data), false, waiter});
 +      waiter->channels.push_back(state);
 +    }
@@ -2812,6 +2862,7 @@ index 00000000..228f1352
 +      waiter = std::make_shared<ChannelWaiter>(ChannelWaiter::Kind::kReceive,
 +                                               isolate, blocking, id);
 +      waiter->task = task;
++      if (!blocking) AsyncWaiters().insert(waiter.get());
 +      for (size_t i = 0; i < count; i++) {
 +        states[i]->receivers.push_back({waiter, static_cast<int>(i)});
 +        waiter->channels.push_back(states[i]);
@@ -2957,13 +3008,19 @@ index 00000000..228f1352
 +    return;
 +  }
 +  i::DirectHandle<i::Object> root = Utils::OpenDirectHandle(*info[0]);
++  // A new region gets the lock's handle before the copy: with no handle, a GC
++  // while copying would reclaim it.
++  bool created = false;
 +  if (!i::IsJSRegionObject(*root)) {
 +    int region = i::RegionRegistry::Create(i_isolate);
 +    if (region < 0) {
 +      ThrowTypeError(isolate, "Too many regions");
 +      return;
 +    }
++    i::RegionRegistry::AddHandle(region);
++    created = true;
 +    if (!i::JSRegionObject::Evacuate(i_isolate, region, root).ToHandle(&root)) {
++      i::RegionRegistry::RemoveHandle(region);
 +      return;
 +    }
 +  }
@@ -2981,7 +3038,7 @@ index 00000000..228f1352
 +  auto state = std::make_shared<ChannelState>(0);
 +  state->lock = std::make_unique<LockData>(
 +      region, i::RegionRegistry::Generation(region));
-+  i::RegionRegistry::AddHandle(region);
++  if (!created) i::RegionRegistry::AddHandle(region);
 +  i::RegionRegistry::SetLocked(region, true);
 +  state->lock->root = std::make_unique<i::SharedObjectConveyorHandles>(i_isolate);
 +  state->lock->root->Persist(i::Cast<i::HeapObject>(*root));
@@ -3016,6 +3073,7 @@ index 00000000..228f1352
 +    } else if (mode != 2) {
 +      waiter = std::make_shared<ChannelWaiter>(kind, isolate, blocking, id);
 +      waiter->task = task;
++      if (!blocking) AsyncWaiters().insert(waiter.get());
 +      waiter->channels.push_back(state);
 +      lock->queue.push_back(waiter);
 +    }
@@ -3160,8 +3218,7 @@ index 00000000..228f1352
 +      CancelLocked(waiter);
 +    }
 +    waiter->cancelled = true;
-+    waiter->ready.store(true, std::memory_order_release);
-+    waiter->completed.Signal();
++    SignalLocked(waiter);
 +  }
 +}
 +
@@ -3194,6 +3251,7 @@ index 00000000..228f1352
 +        } else {
 +          CancelLocked(waiter);
 +        }
++        AsyncWaiters().erase(waiter);
 +        failed.push_back(std::move(it->second));
 +        it = data.pending.erase(it);
 +      }
@@ -3236,8 +3294,7 @@ index 00000000..228f1352
 +      }
 +      waiter->cancelled = true;
 +      waiter->aborted = true;
-+      waiter->ready.store(true, std::memory_order_release);
-+      waiter->completed.Signal();
++      SignalLocked(waiter);
 +    }
 +  }
 +  i::V8::GetCurrentPlatform()->GetForegroundTaskRunner(isolate)->PostTask(
@@ -3269,6 +3326,7 @@ index 00000000..228f1352
 +    TerminatingIsolates().erase(isolate);
 +    AbortedTasks().erase(isolate);
 +    for (auto& [id, pending] : data.pending) {
++      AsyncWaiters().erase(pending.waiter.get());
 +      if (pending.waiter->done) {
 +        ReturnUndeliveredLocked(pending.waiter.get());
 +      } else {
@@ -3300,13 +3358,208 @@ index 00000000..228f1352
 +  data_epoch.fetch_add(1, std::memory_order_release);
 +}
 +
++namespace {
++
++// A thread that runs an isolate, as the deadlock check sees it.
++struct Sleeper {
++  // Its event loop waits for a task, or it is blocked in a wait.
++  bool in_loop = false;
++  bool blocked = false;
++  bool asleep() const { return in_loop || blocked; }
++};
++
++// Guarded by the deadlock mutex. It is taken last: with a task runner's lock,
++// the channels mutex or a port's mutex held, never the other way around.
++struct DeadlockState {
++  bool installed = false;
++  std::unordered_map<Isolate*, std::unique_ptr<Sleeper>> sleepers;
++  size_t asleep = 0;
++  // Timers that have not fired.
++  int timers = 0;
++  // Changes whenever a thread sleeps or wakes.
++  uint64_t epoch = 0;
++  bool check_posted = false;
++};
++
++base::LazyMutex deadlock_mutex = LAZY_MUTEX_INITIALIZER;
++DeadlockState& Deadlock() {
++  static base::LeakyObject<DeadlockState> state;
++  return *state.get();
++}
++thread_local Sleeper* current_sleeper = nullptr;
++
++// How long every thread must sleep before it is a deadlock. This covers what
++// the check does not see, such as a background job that posts a task.
++constexpr double kDeadlockDelaySeconds = 0.05;
++
++bool AllAsleepLocked() {
++  DeadlockState& s = Deadlock();
++  return s.timers == 0 && !s.sleepers.empty() &&
++         s.asleep == s.sleepers.size();
++}
++
++// Fails every channel and lock wait if the threads still sleep as they did
++// at `epoch`. Nothing can wake them, so no wait could end otherwise.
++void FailDeadlockedWaits(uint64_t epoch) {
++  base::MutexGuard guard(channels_mutex.Pointer());
++  {
++    base::MutexGuard deadlock_guard(deadlock_mutex.Pointer());
++    if (!AllAsleepLocked() || Deadlock().epoch != epoch) return;
++  }
++  std::vector<ChannelWaiter*> waiters;
++  for (ChannelWaiter* waiter : BlockingWaiters()) {
++    if (!waiter->done && !waiter->cancelled) waiters.push_back(waiter);
++  }
++  for (ChannelWaiter* waiter : AsyncWaiters()) {
++    if (!waiter->done) waiters.push_back(waiter);
++  }
++  // Marked first: a cancelled lock acquire must not let the next one in.
++  for (ChannelWaiter* waiter : waiters) waiter->deadlocked = true;
++  for (ChannelWaiter* waiter : waiters) {
++    CancelLocked(waiter);
++    if (waiter->blocking) {
++      waiter->cancelled = true;
++      SignalLocked(waiter);
++    } else {
++      i::V8::GetCurrentPlatform()
++          ->GetForegroundTaskRunner(waiter->isolate)
++          ->PostTask(std::make_unique<WakeTask>(waiter->isolate, waiter->id));
++    }
++  }
++}
++
++class DeadlockCheckTask : public Task {
++ public:
++  explicit DeadlockCheckTask(uint64_t epoch) : epoch_(epoch) {}
++  void Run() override;
++
++ private:
++  const uint64_t epoch_;
++};
++
++void MaybePostCheckLocked() {
++  DeadlockState& s = Deadlock();
++  if (!s.installed || s.check_posted || !AllAsleepLocked()) return;
++  s.check_posted = true;
++  i::V8::GetCurrentPlatform()->PostDelayedTaskOnWorkerThread(
++      TaskPriority::kUserVisible, std::make_unique<DeadlockCheckTask>(s.epoch),
++      kDeadlockDelaySeconds);
++}
++
++void DeadlockCheckTask::Run() {
++  {
++    base::MutexGuard guard(deadlock_mutex.Pointer());
++    DeadlockState& s = Deadlock();
++    s.check_posted = false;
++    if (!AllAsleepLocked()) return;
++    if (s.epoch != epoch_) {
++      // Something woke up meanwhile: wait for a quiet period again.
++      MaybePostCheckLocked();
++      return;
++    }
++  }
++  FailDeadlockedWaits(epoch_);
++}
++
++void SetAsleepLocked(Sleeper* sleeper, bool Sleeper::* flag, bool value) {
++  DeadlockState& s = Deadlock();
++  bool was = sleeper->asleep();
++  sleeper->*flag = value;
++  s.epoch++;
++  if (was == sleeper->asleep()) return;
++  if (was) {
++    s.asleep--;
++  } else {
++    s.asleep++;
++    MaybePostCheckLocked();
++  }
++}
++
++class LoopObserver
++    : public platform::DefaultForegroundTaskRunner::SleepObserver {
++ public:
++  void* Sleeping() override {
++    Sleeper* sleeper = current_sleeper;
++    if (!sleeper) return nullptr;
++    base::MutexGuard guard(deadlock_mutex.Pointer());
++    SetAsleepLocked(sleeper, &Sleeper::in_loop, true);
++    return sleeper;
++  }
++  void Woken(void* sleeper) override {
++    base::MutexGuard guard(deadlock_mutex.Pointer());
++    SetAsleepLocked(static_cast<Sleeper*>(sleeper), &Sleeper::in_loop, false);
++  }
++};
++
++void SetBlocked(Isolate* isolate, bool blocked) {
++  base::MutexGuard guard(deadlock_mutex.Pointer());
++  auto it = Deadlock().sleepers.find(isolate);
++  if (it == Deadlock().sleepers.end()) return;
++  SetAsleepLocked(it->second.get(), &Sleeper::blocked, blocked);
++}
++
++}  // namespace
++
++// static
++void Deadlocks::Install() {
++  static base::LeakyObject<LoopObserver> observer;
++  {
++    base::MutexGuard guard(deadlock_mutex.Pointer());
++    Deadlock().installed = true;
++  }
++  platform::DefaultForegroundTaskRunner::SetSleepObserver(observer.get());
++}
++
++// static
++void Deadlocks::Enter(Isolate* isolate) {
++  base::MutexGuard guard(deadlock_mutex.Pointer());
++  DeadlockState& s = Deadlock();
++  auto sleeper = std::make_unique<Sleeper>();
++  current_sleeper = sleeper.get();
++  s.sleepers.insert_or_assign(isolate, std::move(sleeper));
++}
++
++// static
++void Deadlocks::Leave(Isolate* isolate) {
++  base::MutexGuard guard(deadlock_mutex.Pointer());
++  DeadlockState& s = Deadlock();
++  auto it = s.sleepers.find(isolate);
++  if (it == s.sleepers.end()) return;
++  if (it->second->asleep()) s.asleep--;
++  if (current_sleeper == it->second.get()) current_sleeper = nullptr;
++  s.sleepers.erase(it);
++  s.epoch++;
++  MaybePostCheckLocked();
++}
++
++// static
++void Deadlocks::Block(Isolate* isolate) { SetBlocked(isolate, true); }
++
++// static
++void Deadlocks::Unblock(Isolate* isolate) { SetBlocked(isolate, false); }
++
++// static
++void Deadlocks::TimerPosted() {
++  base::MutexGuard guard(deadlock_mutex.Pointer());
++  Deadlock().timers++;
++}
++
++// static
++void Deadlocks::TimerDone() {
++  base::MutexGuard guard(deadlock_mutex.Pointer());
++  DeadlockState& s = Deadlock();
++  s.timers--;
++  s.epoch++;
++  MaybePostCheckLocked();
++}
++
 +}  // namespace v8
 diff --git a/src/d8/d8-channel.h b/src/d8/d8-channel.h
 new file mode 100644
-index 00000000..6fb41c56
+index 00000000..9446d334
 --- /dev/null
 +++ b/src/d8/d8-channel.h
-@@ -0,0 +1,51 @@
+@@ -0,0 +1,72 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -3355,15 +3608,36 @@ index 00000000..6fb41c56
 +  static void ForgetIsolate(Isolate* isolate);
 +};
 +
++// Finds deadlocks, like Go's "all goroutines are asleep": every isolate
++// thread sleeps, in its event loop with nothing to run or blocked in a wait,
++// and no timer can wake one. Then the channel and lock waits fail with a
++// DeadlockError.
++class Deadlocks {
++ public:
++  // Watches the event loops; called once, before any isolate starts.
++  static void Install();
++  // On the isolate's own thread: Enter() before another thread can wait for
++  // it, Leave() when it is disposed.
++  static void Enter(Isolate* isolate);
++  static void Leave(Isolate* isolate);
++  // The isolate's thread blocks until another thread wakes it. Unblock() is
++  // called by the thread that wakes it, and again by the thread itself.
++  static void Block(Isolate* isolate);
++  static void Unblock(Isolate* isolate);
++  // A pending timer can still change things: no deadlock until it fires.
++  static void TimerPosted();
++  static void TimerDone();
++};
++
 +}  // namespace v8
 +
 +#endif  // V8_D8_D8_CHANNEL_H_
 diff --git a/src/d8/d8-port.cc b/src/d8/d8-port.cc
 new file mode 100644
-index 00000000..78bc2b42
+index 00000000..044c45cf
 --- /dev/null
 +++ b/src/d8/d8-port.cc
-@@ -0,0 +1,1034 @@
+@@ -0,0 +1,1061 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -3441,6 +3715,15 @@ index 00000000..78bc2b42
 +  bool gone_reported = false;
 +  // Tasks sent whose reply the client has not taken yet.
 +  int expected = 0;
++  // The client is blocked in port.take(), as far as the deadlock check knows.
++  bool client_parked = false;
++
++  // Called with the mutex held when a reply arrives or the server goes away.
++  void WakeClientLocked() {
++    if (!client_parked) return;
++    client_parked = false;
++    Deadlocks::Unblock(client);
++  }
 +
 +  PortServer* ServerOf(Isolate* isolate) {
 +    for (PortServer& server : servers) {
@@ -3984,6 +4267,7 @@ index 00000000..78bc2b42
 +    }
 +    state->outbox.push_back(std::move(message));
 +    state->outbox_size.fetch_add(1, std::memory_order_release);
++    state->WakeClientLocked();
 +    if (state->listening && !state->client_drain_scheduled) {
 +      state->client_drain_scheduled = true;
 +      runner = state->client_runner;
@@ -4028,6 +4312,14 @@ index 00000000..78bc2b42
 +      continue;
 +    }
 +    bool terminated = false;
++    {
++      base::MutexGuard guard(&state->mutex);
++      if (state->outbox.empty() &&
++          !state->server_gone.load(std::memory_order_relaxed)) {
++        state->client_parked = true;
++        Deadlocks::Block(isolate);
++      }
++    }
 +    i_isolate->main_thread_local_isolate()->ExecuteMainThreadWhileParked(
 +        [&](const i::ParkedScope&) {
 +          while (!state->reply_signal.WaitFor(
@@ -4039,6 +4331,10 @@ index 00000000..78bc2b42
 +            }
 +          }
 +        });
++    {
++      base::MutexGuard guard(&state->mutex);
++      state->WakeClientLocked();
++    }
 +    if (terminated) {
 +      isolate->TerminateExecution();
 +      return;
@@ -4080,6 +4376,7 @@ index 00000000..78bc2b42
 +      if (state->client_runner) {
 +        state->outbox.push_back(AbortReply(std::move(task), id, name, message));
 +        state->outbox_size.fetch_add(1, std::memory_order_release);
++        state->WakeClientLocked();
 +        answered = true;
 +        if (state->listening && !state->client_drain_scheduled) {
 +          state->client_drain_scheduled = true;
@@ -4113,7 +4410,10 @@ index 00000000..78bc2b42
 +      : state_(std::move(state)),
 +        id_(id),
 +        name_(std::move(name)),
-+        message_(std::move(message)) {}
++        message_(std::move(message)) {
++    Deadlocks::TimerPosted();
++  }
++  ~AbortAfterTask() override { Deadlocks::TimerDone(); }
 +  void Run() override {
 +    if (std::shared_ptr<PortState> state = state_.lock()) {
 +      AbortPortTask(state, id_, name_, message_);
@@ -4360,6 +4660,7 @@ index 00000000..78bc2b42
 +        state->server_gone.store(true, std::memory_order_release);
 +        state->inbox.clear();
 +      }
++      if (replies > 0 || state->server_gone) state->WakeClientLocked();
 +      if ((replies > 0 || state->server_gone) && state->listening &&
 +          state->client_runner && !state->client_drain_scheduled) {
 +        state->client_drain_scheduled = true;
@@ -4495,7 +4796,7 @@ index 00000000..bd767012
 +
 +#endif  // V8_D8_D8_PORT_H_
 diff --git a/src/d8/d8.cc b/src/d8/d8.cc
-index 49121fe1..70e573b5 100644
+index 49121fe1..21fb8a73 100644
 --- a/src/d8/d8.cc
 +++ b/src/d8/d8.cc
 @@ -14,6 +14,7 @@
@@ -4550,7 +4851,7 @@ index 49121fe1..70e573b5 100644
      Shell::CompleteMessageLoop(isolate);
    }
  
-@@ -2400,7 +2408,50 @@ PerIsolateData::PerIsolateData(Isolate* isolate) : isolate_(isolate) {
+@@ -2400,7 +2408,51 @@ PerIsolateData::PerIsolateData(Isolate* isolate) : isolate_(isolate) {
    ignore_unhandled_promises_ = false;
  }
  
@@ -4590,6 +4891,7 @@ index 49121fe1..70e573b5 100644
 +}
 +
  PerIsolateData::~PerIsolateData() {
++  Deadlocks::Leave(isolate_);
 +  Channels::ForgetIsolate(isolate_);
 +  Ports::ForgetIsolate(isolate_);
 +  // Weak callbacks do not run when an isolate is disposed.
@@ -4601,7 +4903,7 @@ index 49121fe1..70e573b5 100644
    isolate_->SetData(0, nullptr);  // Not really needed, just to be sure...
    if (i::v8_flags.expose_async_hooks) {
      delete async_hooks_wrapper_;  // This uses the isolate
-@@ -2483,10 +2534,37 @@ void PerIsolateData::SetDomNodeCtor(Local<FunctionTemplate> ctor) {
+@@ -2483,10 +2535,37 @@ void PerIsolateData::SetDomNodeCtor(Local<FunctionTemplate> ctor) {
    dom_node_ctor_.Reset(isolate_, ctor);
  }
  
@@ -4641,7 +4943,7 @@ index 49121fe1..70e573b5 100644
  }
  
  void PerIsolateData::RegisterWorker(std::shared_ptr<Worker> worker) {
-@@ -2519,6 +2597,11 @@ std::pair<Local<Context>, Local<Function>> PerIsolateData::GetWorkerOnMessage(
+@@ -2519,6 +2598,11 @@ std::pair<Local<Context>, Local<Function>> PerIsolateData::GetWorkerOnMessage(
    return {it->second.first.Get(isolate_), it->second.second.Get(isolate_)};
  }
  
@@ -4653,7 +4955,7 @@ index 49121fe1..70e573b5 100644
  void PerIsolateData::UnregisterWorker(const std::shared_ptr<Worker>& worker) {
    registered_workers_.erase(worker);
    worker_message_callbacks_.erase(worker);
-@@ -4366,11 +4449,21 @@ void Shell::WorkerOnMessageSetter(
+@@ -4366,11 +4450,21 @@ void Shell::WorkerOnMessageSetter(
    }
  
    Local<Value> callback = info[0];
@@ -4676,7 +4978,7 @@ index 49121fe1..70e573b5 100644
  }
  
  void Shell::WorkerTerminate(const v8::FunctionCallbackInfo<v8::Value>& info) {
-@@ -4804,6 +4897,14 @@ Local<ObjectTemplate> Shell::CreateGlobalTemplate(Isolate* isolate) {
+@@ -4804,6 +4898,14 @@ Local<ObjectTemplate> Shell::CreateGlobalTemplate(Isolate* isolate) {
    global_template->Set(isolate, "performance",
                         Shell::CreatePerformanceTemplate(isolate));
    global_template->Set(isolate, "Worker", Shell::CreateWorkerTemplate(isolate));
@@ -4691,7 +4993,7 @@ index 49121fe1..70e573b5 100644
  
    // Prevent fuzzers from creating side effects.
    if (!i::v8_flags.fuzzing) {
-@@ -4899,6 +5000,1070 @@ Local<FunctionTemplate> Shell::CreateWorkerTemplate(Isolate* isolate) {
+@@ -4899,6 +5001,1070 @@ Local<FunctionTemplate> Shell::CreateWorkerTemplate(Isolate* isolate) {
    return worker_fun_template;
  }
  
@@ -5762,7 +6064,7 @@ index 49121fe1..70e573b5 100644
  Local<ObjectTemplate> Shell::CreateAsyncHookTemplate(Isolate* isolate) {
    Local<ObjectTemplate> async_hooks_templ = ObjectTemplate::New(isolate);
    async_hooks_templ->Set(isolate, "createHook",
-@@ -5376,9 +6541,755 @@ MaybeLocal<Context> Shell::CreateEvaluationContext(Isolate* isolate) {
+@@ -5376,9 +6542,755 @@ MaybeLocal<Context> Shell::CreateEvaluationContext(Isolate* isolate) {
    }
  #endif  // V8_ENABLE_HARDWARE_WATCHPOINT_SUPPORT
  
@@ -6518,7 +6820,7 @@ index 49121fe1..70e573b5 100644
  namespace {
  int LineFromOffset(Local<debug::Script> script, int offset) {
    debug::Location location = script->GetSourceLocation(offset);
-@@ -6538,6 +8449,7 @@ void SourceGroup::JoinThread(const i::ParkedScope& parked) {
+@@ -6538,6 +8450,7 @@ void SourceGroup::JoinThread(const i::ParkedScope& parked) {
  void SerializationDataQueue::Enqueue(std::unique_ptr<SerializationData> data) {
    base::MutexGuard lock_guard(&mutex_);
    data_.push_back(std::move(data));
@@ -6526,7 +6828,7 @@ index 49121fe1..70e573b5 100644
  }
  
  bool SerializationDataQueue::Dequeue(
-@@ -6547,6 +8459,7 @@ bool SerializationDataQueue::Dequeue(
+@@ -6547,6 +8460,7 @@ bool SerializationDataQueue::Dequeue(
    if (data_.empty()) return false;
    *out_data = std::move(data_[0]);
    data_.erase(data_.begin());
@@ -6534,7 +6836,7 @@ index 49121fe1..70e573b5 100644
    return true;
  }
  
-@@ -6558,6 +8471,7 @@ bool SerializationDataQueue::IsEmpty() {
+@@ -6558,6 +8472,7 @@ bool SerializationDataQueue::IsEmpty() {
  void SerializationDataQueue::Clear() {
    base::MutexGuard lock_guard(&mutex_);
    data_.clear();
@@ -6542,7 +6844,7 @@ index 49121fe1..70e573b5 100644
  }
  
  Worker::Worker(Isolate* parent_isolate, const char* script)
-@@ -6668,6 +8582,12 @@ std::unique_ptr<SerializationData> Worker::GetMessage(Isolate* requester) {
+@@ -6668,6 +8583,12 @@ std::unique_ptr<SerializationData> Worker::GetMessage(Isolate* requester) {
        out_queue_.Dequeue(&result);
        break;
      }
@@ -6555,7 +6857,7 @@ index 49121fe1..70e573b5 100644
      out_semaphore_.ParkedWait(
          reinterpret_cast<i::Isolate*>(requester)->main_thread_local_isolate());
    }
-@@ -6705,6 +8625,8 @@ void Worker::Terminate() {
+@@ -6705,6 +8626,8 @@ void Worker::Terminate() {
    // returning to the event queue. Since we checked the state before, and we are
    // holding the {worker_mutex_}, it's safe to access the isolate.
    isolate_->TerminateExecution();
@@ -6564,7 +6866,23 @@ index 49121fe1..70e573b5 100644
  }
  
  void Worker::EnterTerminatedState() {
-@@ -7310,6 +9232,9 @@ bool Shell::SetOptions(int argc, char* argv[]) {
+@@ -6791,6 +8714,7 @@ Worker* Worker::GetCurrentWorker() { return current_worker_; }
+ void Worker::ExecuteInThread() {
+   Isolate::CreateParams create_params = GetDefaultIsolateCreateParams();
+   isolate_ = Isolate::New(create_params);
++  Deadlocks::Enter(isolate_);
+ 
+   // TODO(mdanylo): can we omit dump disable here?
+ #ifdef V8_DUMPLING
+@@ -6926,6 +8850,7 @@ void Worker::ExecuteInThread() {
+     platform::NotifyIsolateShutdown(g_default_platform, isolate_);
+   }
+ 
++  Deadlocks::Leave(isolate_);
+   isolate_->Dispose();
+   isolate_ = nullptr;
+ 
+@@ -7310,6 +9235,9 @@ bool Shell::SetOptions(int argc, char* argv[]) {
                                    argv, &i)) {
        // Value is expressed in MB.
        options.max_serializer_memory = atoi(flag_value) * i::MB;
@@ -6574,7 +6892,7 @@ index 49121fe1..70e573b5 100644
      } else if (FlagMatches("--bundle", &argv[i])) {
        options.bundle = true;
  #ifdef V8_FUZZILLI
-@@ -7921,6 +9846,27 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7921,6 +9849,27 @@ class Serializer : public ValueSerializer::Delegate {
      return true;
    }
  
@@ -6602,7 +6920,7 @@ index 49121fe1..70e573b5 100644
   private:
    Maybe<bool> PrepareTransfer(Local<Context> context, Local<Value> transfer) {
      if (transfer->IsArray()) {
-@@ -7929,6 +9875,22 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7929,6 +9878,22 @@ class Serializer : public ValueSerializer::Delegate {
        for (uint32_t i = 0; i < length; ++i) {
          Local<Value> element;
          if (transfer_array->Get(context, i).ToLocal(&element)) {
@@ -6625,7 +6943,7 @@ index 49121fe1..70e573b5 100644
            if (!element->IsArrayBuffer()) {
              ThrowError(isolate_,
                         "Transfer array elements must be an ArrayBuffer");
-@@ -7961,7 +9923,52 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7961,7 +9926,52 @@ class Serializer : public ValueSerializer::Delegate {
      }
    }
  
@@ -6678,7 +6996,7 @@ index 49121fe1..70e573b5 100644
      for (const auto& global_array_buffer : array_buffers_) {
        Local<ArrayBuffer> array_buffer =
            Local<ArrayBuffer>::New(isolate_, global_array_buffer);
-@@ -7987,6 +9994,7 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7987,6 +9997,7 @@ class Serializer : public ValueSerializer::Delegate {
    ValueSerializer serializer_;
    std::unique_ptr<SerializationData> data_;
    std::vector<Global<ArrayBuffer>> array_buffers_;
@@ -6686,7 +7004,7 @@ index 49121fe1..70e573b5 100644
    std::vector<Global<SharedArrayBuffer>> shared_array_buffers_;
    std::vector<Global<WasmModuleObject>> wasm_modules_;
    std::vector<std::shared_ptr<v8::BackingStore>> backing_stores_;
-@@ -8013,6 +10021,21 @@ class Deserializer : public ValueDeserializer::Delegate {
+@@ -8013,6 +10024,21 @@ class Deserializer : public ValueDeserializer::Delegate {
        return MaybeLocal<Value>();
      }
  
@@ -6708,7 +7026,7 @@ index 49121fe1..70e573b5 100644
      uint32_t index = 0;
      for (const auto& backing_store : data_->backing_stores()) {
        Local<ArrayBuffer> array_buffer =
-@@ -8049,6 +10072,21 @@ class Deserializer : public ValueDeserializer::Delegate {
+@@ -8049,6 +10075,21 @@ class Deserializer : public ValueDeserializer::Delegate {
      return nullptr;
    }
  
@@ -6730,7 +7048,7 @@ index 49121fe1..70e573b5 100644
   private:
    Isolate* isolate_;
    ValueDeserializer deserializer_;
-@@ -8309,6 +10347,8 @@ int Shell::Main(int argc, char* argv[]) {
+@@ -8309,9 +10350,13 @@ int Shell::Main(int argc, char* argv[]) {
    // The platform is owned by wrapper platform despite the `std::move` below.
    START_IGNORE_LIFETIME_SAFETY_WARNINGS()
    g_default_platform = g_platform.get();
@@ -6739,6 +7057,19 @@ index 49121fe1..70e573b5 100644
    END_IGNORE_LIFETIME_SAFETY_WARNINGS()
    if (i::v8_flags.predictable) {
      g_platform = MakePredictablePlatform(std::move(g_platform));
++  } else {
++    Deadlocks::Install();
+   }
+   if (options.stress_delay_tasks) {
+     int64_t random_seed = i::v8_flags.fuzzer_random_seed;
+@@ -8438,6 +10483,7 @@ int Shell::Main(int argc, char* argv[]) {
+   }
+ 
+   Isolate* isolate = Isolate::New(create_params);
++  Deadlocks::Enter(isolate);
+ 
+ #ifdef V8_FUZZILLI
+ 
 diff --git a/src/d8/d8.h b/src/d8/d8.h
 index 0c7ad50a..0c8b064d 100644
 --- a/src/d8/d8.h
@@ -7907,7 +8238,7 @@ index cb1a6166..0a54d999 100644
    Result stack_push = StackPush(object, key);
    if (stack_push != SUCCESS) return stack_push;
 diff --git a/src/libplatform/default-foreground-task-runner.cc b/src/libplatform/default-foreground-task-runner.cc
-index 2ed5a034..1b903b3d 100644
+index 2ed5a034..9ace7e67 100644
 --- a/src/libplatform/default-foreground-task-runner.cc
 +++ b/src/libplatform/default-foreground-task-runner.cc
 @@ -4,8 +4,11 @@
@@ -7922,25 +8253,48 @@ index 2ed5a034..1b903b3d 100644
  
  namespace v8 {
  namespace platform {
-@@ -52,6 +55,7 @@ std::unique_ptr<Task> DefaultForegroundTaskRunner::PostTaskLocked(
+@@ -52,6 +55,8 @@ std::unique_ptr<Task> DefaultForegroundTaskRunner::PostTaskLocked(
    mutex_.AssertHeld();
    if (terminated_) return task;
    task_queue_.push_back(std::make_pair(nestability, std::move(task)));
 +  posted_.fetch_add(1, std::memory_order_release);
++  WakeSleeperLocked();
    event_loop_control_.NotifyOne();
    return {};
  }
-@@ -196,8 +200,46 @@ std::unique_ptr<IdleTask> DefaultForegroundTaskRunner::PopTaskFromIdleQueue() {
+@@ -74,6 +79,7 @@ void DefaultForegroundTaskRunner::PostDelayedTaskLocked(
+   if (terminated_) return;
+   double deadline = MonotonicallyIncreasingTime() + delay_in_seconds;
+   delayed_task_queue_.push({deadline, nestability, std::move(task)});
++  WakeSleeperLocked();
+   event_loop_control_.NotifyOne();
+ }
+ 
+@@ -196,8 +202,66 @@ std::unique_ptr<IdleTask> DefaultForegroundTaskRunner::PopTaskFromIdleQueue() {
    return task;
  }
  
 +namespace {
 +std::atomic<int> spin_wait_us{0};
++std::atomic<DefaultForegroundTaskRunner::SleepObserver*> sleep_observer{
++    nullptr};
 +}  // namespace
 +
 +// static
 +void DefaultForegroundTaskRunner::SetSpinWaitMicroseconds(int microseconds) {
 +  spin_wait_us.store(microseconds, std::memory_order_relaxed);
++}
++
++// static
++void DefaultForegroundTaskRunner::SetSleepObserver(SleepObserver* observer) {
++  sleep_observer.store(observer, std::memory_order_release);
++}
++
++void DefaultForegroundTaskRunner::WakeSleeperLocked() {
++  mutex_.AssertHeld();
++  if (!sleeper_) return;
++  sleep_observer.load(std::memory_order_acquire)->Woken(sleeper_);
++  sleeper_ = nullptr;
 +}
 +
  void DefaultForegroundTaskRunner::WaitForTaskLocked() {
@@ -7974,11 +8328,25 @@ index 2ed5a034..1b903b3d 100644
 +    // The caller checks the queue again.
 +    if (posted || posted_.load(std::memory_order_acquire) != seen) return;
 +  }
++  // A delayed task is the engine's own, not the embedder's: the sleep
++  // observer sees a wait for one as sleep too.
++  if (SleepObserver* observer =
++          sleep_observer.load(std::memory_order_acquire)) {
++    sleeper_ = observer->Sleeping();
++  }
    if (!delayed_task_queue_.empty()) {
      double now = MonotonicallyIncreasingTime();
      const DelayedEntry& entry = delayed_task_queue_.top();
+@@ -212,6 +276,7 @@ void DefaultForegroundTaskRunner::WaitForTaskLocked() {
+   } else {
+     event_loop_control_.Wait(&mutex_);
+   }
++  WakeSleeperLocked();
+ }
+ 
+ }  // namespace platform
 diff --git a/src/libplatform/default-foreground-task-runner.h b/src/libplatform/default-foreground-task-runner.h
-index 6bfaf56f..35705666 100644
+index 6bfaf56f..17d8cee8 100644
 --- a/src/libplatform/default-foreground-task-runner.h
 +++ b/src/libplatform/default-foreground-task-runner.h
 @@ -5,6 +5,7 @@
@@ -7989,7 +8357,7 @@ index 6bfaf56f..35705666 100644
  #include <memory>
  #include <queue>
  
-@@ -37,6 +38,10 @@ class V8_PLATFORM_EXPORT DefaultForegroundTaskRunner
+@@ -37,6 +38,22 @@ class V8_PLATFORM_EXPORT DefaultForegroundTaskRunner
  
    void Terminate();
  
@@ -7997,11 +8365,31 @@ index 6bfaf56f..35705666 100644
 +  // thread costs several microseconds. 0 (the default) disables spinning.
 +  static void SetSpinWaitMicroseconds(int microseconds);
 +
++  // Sees event loops sleep until another thread posts a task. Sleeping() runs
++  // on the waiting thread before a wait without a deadline; what it returns
++  // is passed to Woken() when a task is posted or the wait ends. Both run with
++  // the task runner's lock held and must not post tasks to task runners.
++  class SleepObserver {
++   public:
++    virtual ~SleepObserver() = default;
++    virtual void* Sleeping() = 0;
++    virtual void Woken(void* sleeper) = 0;
++  };
++  static void SetSleepObserver(SleepObserver* observer);
++
    std::unique_ptr<Task> PopTaskFromQueue(MessageLoopBehavior wait_for_work);
  
    std::unique_ptr<IdleTask> PopTaskFromIdleQueue();
-@@ -94,6 +99,9 @@ class V8_PLATFORM_EXPORT DefaultForegroundTaskRunner
+@@ -91,9 +108,17 @@ class V8_PLATFORM_EXPORT DefaultForegroundTaskRunner
+   // terminated.
+   std::vector<std::unique_ptr<Task>> MoveExpiredDelayedTasksLocked();
+ 
++  // Tells the sleep observer that the thread waiting for a task wakes up.
++  void WakeSleeperLocked();
++
    bool terminated_ = false;
++  // What the sleep observer returned for the thread waiting now, if any.
++  void* sleeper_ = nullptr;
    base::Mutex mutex_;
    base::ConditionVariable event_loop_control_;
 +  // Counts posted tasks, so that a spinning thread sees new work without
