@@ -133,7 +133,7 @@ index 5b3113a3..50d810c2 100644
  #include 'src/objects/js-weak-refs.h'
  #include 'src/objects/objects.h'
 diff --git a/src/builtins/builtins-array-gen.cc b/src/builtins/builtins-array-gen.cc
-index d1be4eba..b5a8c051 100644
+index d1be4eba..98c19f66 100644
 --- a/src/builtins/builtins-array-gen.cc
 +++ b/src/builtins/builtins-array-gen.cc
 @@ -23,6 +23,7 @@
@@ -173,6 +173,29 @@ index d1be4eba..b5a8c051 100644
      // We are not using Parameter(Descriptor::kJSTarget) and loading the value
      // from the current frame here in order to reduce register pressure on the
      // fast path.
+@@ -1545,6 +1568,22 @@ TF_BUILTIN(ArrayIteratorPrototypeNext, CodeStubAssembler) {
+   {
+     GotoIf(InstanceTypeEqual(array_type, JS_DETACHED_TYPED_ARRAY_TYPE),
+            &if_detached_typed_array);
++    // A region array: its length and elements straight from the array.
++    Label not_region(this);
++    GotoIfNot(TaggedIsSmi(index), &not_region);
++    TNode<Smi> region_length = TryLoadRegionArrayLength(array, &not_region);
++    GotoIfNot(SmiLessThan(CAST(index), region_length), &set_done);
++    StoreJSArrayIteratorNextIndex(iterator, SmiAdd(CAST(index), SmiConstant(1)));
++    var_done = FalseConstant();
++    var_value = index;
++    GotoIf(Word32Equal(LoadAndUntagToWord32ObjectField(
++                           iterator, offsetof(JSArrayIterator, kind_)),
++                       Int32Constant(static_cast<int>(IterationKind::kKeys))),
++           &allocate_iterator_result);
++    var_value =
++        TryLoadRegionArrayElement(array, SmiUntag(CAST(index)), &if_generic);
++    Goto(&allocate_entry_if_needed);
++    BIND(&not_region);
+     // We cannot enter here with either JSArray's or JSTypedArray's.
+     CSA_DCHECK(this, Word32BinaryNot(IsJSArrayInstanceType(array_type)));
+     CSA_DCHECK(this, Word32BinaryNot(IsJSTypedArrayInstanceType(array_type)));
 diff --git a/src/builtins/builtins-definitions.h b/src/builtins/builtins-definitions.h
 index 34cc7706..72d9d441 100644
 --- a/src/builtins/builtins-definitions.h
@@ -190,7 +213,7 @@ index 34cc7706..72d9d441 100644
    TFS(CloneFastJSArray, NeedsContext{true}, kSource)                           \
    TFS(CloneFastJSArrayFillingHoles, NeedsContext{true}, kSource)               \
 diff --git a/src/builtins/builtins-internal-gen.cc b/src/builtins/builtins-internal-gen.cc
-index 330b40b1..e0e03d43 100644
+index 330b40b1..2038059e 100644
 --- a/src/builtins/builtins-internal-gen.cc
 +++ b/src/builtins/builtins-internal-gen.cc
 @@ -324,6 +324,9 @@ class WriteBarrierCodeStubAssembler : public CodeStubAssembler {
@@ -203,6 +226,84 @@ index 330b40b1..e0e03d43 100644
      CallCFunctionWithCallerSavedRegisters(
          function, MachineTypeOf<Int32T>::value, fp_mode,
          std::make_pair(MachineTypeOf<IntPtrT>::value, object),
+@@ -1556,6 +1559,21 @@ TF_BUILTIN(GetProperty, CodeStubAssembler) {
+   Label if_notfound(this), if_proxy(this, Label::kDeferred),
+       if_slow(this, Label::kDeferred);
+ 
++  // Region arrays, as generic array builtins (map, forEach, at, ...) read
++  // them: elements and length straight from the array.
++  {
++    Label not_region(this), if_length(this);
++    GotoIf(TaggedIsSmi(object), &not_region);
++    GotoIf(TaggedEqual(key, HeapConstantNoHole(factory()->length_string())),
++           &if_length);
++    GotoIfNot(TaggedIsSmi(key), &not_region);
++    Return(TryLoadRegionArrayElement(CAST(object), SmiUntag(CAST(key)),
++                                     &not_region));
++    BIND(&if_length);
++    Return(TryLoadRegionArrayLength(CAST(object), &not_region));
++    BIND(&not_region);
++  }
++
+   CodeStubAssembler::LookupPropertyInHolder lookup_property_in_holder =
+       [=, this](TNode<JSAnyNotSmi> receiver, TNode<JSAnyNotSmi> holder,
+                 TNode<Map> holder_map, TNode<Int32T> holder_instance_type,
+diff --git a/src/builtins/builtins-iterator-gen.cc b/src/builtins/builtins-iterator-gen.cc
+index 3de7f820..ad83afa5 100644
+--- a/src/builtins/builtins-iterator-gen.cc
++++ b/src/builtins/builtins-iterator-gen.cc
+@@ -14,6 +14,7 @@
+ #include "src/codegen/code-stub-assembler-inl.h"
+ #include "src/compiler/code-assembler.h"
+ #include "src/heap/factory-inl.h"
++#include "src/objects/js-region.h"
+ #include "src/objects/oddball.h"
+ 
+ namespace v8 {
+@@ -443,6 +444,43 @@ void IteratorBuiltinsAssembler::FastIterableToList(
+ 
+     BIND(&check_next);
+   }
++  // A region array iterated the default way: a local copy of its values.
++  {
++    Label check_next(this);
++    GotoIf(IsArrayIteratorProtectorCellInvalid(), &check_next);
++    TNode<Smi> length = TryLoadRegionArrayLength(iterable, &check_next);
++    GotoIf(SmiGreaterThan(length, SmiConstant(JSArray::kMaxFastArrayLength)),
++           &check_next);
++    TNode<FixedArray> values = LoadObjectField<FixedArray>(
++        iterable, offsetof(JSRegionObject, values_));
++    TNode<IntPtrT> count = SmiUntag(length);
++    GotoIf(IntPtrGreaterThan(count, LoadFixedArrayBaseLength(values)),
++           &check_next);
++    TNode<JSArray> array = AllocateJSArray(
++        PACKED_ELEMENTS,
++        LoadJSArrayElementsMap(PACKED_ELEMENTS, LoadNativeContext(context)),
++        count, length);
++    TNode<FixedArray> elements = CAST(LoadElements(array));
++    // A typed array is read as a fresh view: such arrays take the generic
++    // path.
++    BuildFastLoop<IntPtrT>(
++        IntPtrConstant(0), count,
++        [&](TNode<IntPtrT> i) {
++          TNode<Object> value = LoadFixedArrayElement(values, i);
++          Label store(this);
++          GotoIf(TaggedIsSmi(value), &store);
++          GotoIf(HasInstanceType(CAST(value), JS_REGION_TYPED_ARRAY_TYPE),
++                 &check_next);
++          Goto(&store);
++          BIND(&store);
++          StoreFixedArrayElement(elements, i, value);
++        },
++        1, kNoLoopUnrolling, IndexAdvanceMode::kPost);
++    *var_result = array;
++    Goto(&done);
++
++    BIND(&check_next);
++  }
+   // Check StringPrimitiveWithNoCustomIteration case.
+   {
+     Label if_fast(this), check_next(this);
 diff --git a/src/builtins/builtins-object.cc b/src/builtins/builtins-object.cc
 index 7677d9c3..fc762f96 100644
 --- a/src/builtins/builtins-object.cc
@@ -632,7 +733,7 @@ index 36439464..29842b91 100644
      case Builtin::kInterpreterEntryTrampolineForProfiling:
      // Tiering builtins are set directly into the dispatch table and never
 diff --git a/src/codegen/code-stub-assembler.cc b/src/codegen/code-stub-assembler.cc
-index 976c1b3e..70fca1dc 100644
+index 976c1b3e..39d46174 100644
 --- a/src/codegen/code-stub-assembler.cc
 +++ b/src/codegen/code-stub-assembler.cc
 @@ -40,6 +40,7 @@
@@ -643,7 +744,26 @@ index 976c1b3e..70fca1dc 100644
  #include "src/objects/map.h"
  #include "src/objects/objects.h"
  #include "src/objects/oddball.h"
-@@ -21983,6 +21984,151 @@ void CodeStubAssembler::SharedValueBarrier(
+@@ -18548,6 +18549,18 @@ TNode<Boolean> CodeStubAssembler::HasProperty(TNode<Context> context,
+                          &return_true, &return_false, next_holder, if_bailout);
+       };
+ 
++  // Region arrays have no holes: every index below the length is present.
++  {
++    Label not_region(this);
++    GotoIf(TaggedIsSmi(object), &not_region);
++    GotoIfNot(TaggedIsSmi(key), &not_region);
++    TNode<IntPtrT> index = SmiUntag(CAST(key));
++    GotoIf(IntPtrLessThan(index, IntPtrConstant(0)), &not_region);
++    TNode<Smi> length = TryLoadRegionArrayLength(CAST(object), &not_region);
++    Branch(IntPtrLessThan(index, SmiUntag(length)), &return_true, &not_region);
++    BIND(&not_region);
++  }
++
+   const bool kHandlePrivateNames = mode == HasPropertyLookupMode::kHasProperty;
+   TryPrototypeChainLookup(object, object, key, lookup_property_in_holder,
+                           lookup_element_in_holder, &return_false,
+@@ -21983,6 +21996,179 @@ void CodeStubAssembler::SharedValueBarrier(
    BIND(&done);
  }
  
@@ -723,6 +843,34 @@ index 976c1b3e..70fca1dc 100644
 +  BIND(&store);
 +}
 +
++TNode<Smi> CodeStubAssembler::TryLoadRegionArrayLength(TNode<HeapObject> object,
++                                                      Label* if_not) {
++  GotoIfNot(HasInstanceType(object, JS_REGION_OBJECT_TYPE), if_not);
++  GotoIfRegionAccessDenied(object, false, if_not);
++  GotoIfNot(IsUndefined(LoadObjectField(object, offsetof(JSRegionObject, keys_))),
++            if_not);
++  return LoadObjectField<Smi>(object, offsetof(JSRegionObject, array_length_));
++}
++
++TNode<Object> CodeStubAssembler::TryLoadRegionArrayElement(
++    TNode<HeapObject> object, TNode<IntPtrT> index, Label* if_not) {
++  TNode<Smi> length = TryLoadRegionArrayLength(object, if_not);
++  GotoIf(IntPtrLessThan(index, IntPtrConstant(0)), if_not);
++  GotoIfNot(IntPtrLessThan(index, SmiUntag(length)), if_not);
++  // A reader of a frozen array may race with a thaw that replaces values(),
++  // so the index is checked against the values() it loaded as well.
++  TNode<FixedArray> values =
++      LoadObjectField<FixedArray>(object, offsetof(JSRegionObject, values_));
++  GotoIfNot(IntPtrLessThan(index, LoadFixedArrayBaseLength(values)), if_not);
++  TNode<Object> value = LoadFixedArrayElement(values, index);
++  Label done(this);
++  GotoIf(TaggedIsSmi(value), &done);
++  Branch(HasInstanceType(CAST(value), JS_REGION_TYPED_ARRAY_TYPE), if_not,
++         &done);
++  BIND(&done);
++  return value;
++}
++
 +void CodeStubAssembler::InitializeSharedSeqString(TNode<HeapObject> string,
 +                                                  RootIndex map,
 +                                                  TNode<Uint32T> length) {
@@ -796,10 +944,10 @@ index 976c1b3e..70fca1dc 100644
    TVARIABLE(ArrayList, result);
    Label empty(this), nonempty(this), done(this);
 diff --git a/src/codegen/code-stub-assembler.h b/src/codegen/code-stub-assembler.h
-index f214a151..a8d6b4e5 100644
+index f214a151..6e1b2fc3 100644
 --- a/src/codegen/code-stub-assembler.h
 +++ b/src/codegen/code-stub-assembler.h
-@@ -2805,6 +2805,35 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
+@@ -2805,6 +2805,44 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
    void SharedValueBarrier(TNode<Context> context,
                            TVariable<Object>* var_shared_value);
  
@@ -815,6 +963,15 @@ index f214a151..a8d6b4e5 100644
 +  // region. The runtime shares or rejects everything else.
 +  void GotoIfNotStorableInRegion(TNode<Smi> region, TNode<Object> value,
 +                                 Label* slow);
++  // The length of a region array that this isolate may read, or a jump to
++  // |if_not|: not a region array, or a region it may not read.
++  TNode<Smi> TryLoadRegionArrayLength(TNode<HeapObject> object, Label* if_not);
++  // Element |index| of a region array that this isolate may read, or a jump
++  // to |if_not|: not a region array, an index outside its length, a region it
++  // may not read, or a typed array, which is read as a fresh view elsewhere.
++  TNode<Object> TryLoadRegionArrayElement(TNode<HeapObject> object,
++                                          TNode<IntPtrT> index, Label* if_not);
++
 +  // Allocates |size_in_bytes| in the shared space linear allocation area of
 +  // this thread, or in the runtime when it is full. The caller initializes
 +  // the object before anything else can allocate, and stores into it with
@@ -7737,10 +7894,10 @@ index 00000000..844041ef
 +#endif  // V8_OBJECTS_JS_REGION_INL_H_
 diff --git a/src/objects/js-region.cc b/src/objects/js-region.cc
 new file mode 100644
-index 00000000..4bf11c72
+index 00000000..bccce0ef
 --- /dev/null
 +++ b/src/objects/js-region.cc
-@@ -0,0 +1,1746 @@
+@@ -0,0 +1,1790 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -9244,6 +9401,50 @@ index 00000000..4bf11c72
 +}
 +
 +// static
++bool JSRegionObject::FindInArray(Isolate* isolate, Tagged<JSRegionObject> array,
++                                 Tagged<Object> search, int64_t from,
++                                 int64_t length, bool same_value_zero,
++                                 int64_t* found) {
++  if (!array->is_array() ||
++      !CanAccess(isolate, array->region_id(), Access::kRead)) {
++    return false;
++  }
++  DisallowGarbageCollection no_gc;
++  Tagged<FixedArray> values = array->values();
++  int64_t end = std::min<int64_t>(
++      {length, static_cast<int64_t>(array->array_length()),
++       static_cast<int64_t>(values->ulength().value())});
++  // A typed array is read as a fresh view, which equals nothing; its holder
++  // here equals nothing either.
++  if (IsSmi(search)) {
++    // The common case: a small integer is the same Smi, or a heap number
++    // with its value.
++    double number = Smi::ToInt(search);
++    for (int64_t i = from; i < end; i++) {
++      Tagged<Object> value = values->get(static_cast<int>(i));
++      if (value == search ||
++          (IsHeapNumber(value) &&
++           Cast<HeapNumber>(value)->value() == number)) {
++        *found = i;
++        return true;
++      }
++    }
++    *found = -1;
++    return true;
++  }
++  for (int64_t i = from; i < end; i++) {
++    Tagged<Object> value = values->get(static_cast<int>(i));
++    if (same_value_zero ? Object::SameValueZero(search, value)
++                        : Object::StrictEquals(search, value)) {
++      *found = i;
++      return true;
++    }
++  }
++  *found = -1;
++  return true;
++}
++
++// static
 +uint32_t JSRegionObject::LiteralCacheHash(
 +    const DirectHandleVector<String>& keys) {
 +  uint32_t hash = static_cast<uint32_t>(keys.size());
@@ -9489,10 +9690,10 @@ index 00000000..4bf11c72
 +}  // namespace v8
 diff --git a/src/objects/js-region.h b/src/objects/js-region.h
 new file mode 100644
-index 00000000..cc7dc911
+index 00000000..9b998a5b
 --- /dev/null
 +++ b/src/objects/js-region.h
-@@ -0,0 +1,304 @@
+@@ -0,0 +1,313 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -9726,6 +9927,15 @@ index 00000000..cc7dc911
 +  static MaybeDirectHandle<JSTypedArray> NewTypedArray(
 +      Isolate* isolate, int region, DirectHandle<Object> constructor,
 +      DirectHandle<Object> length);
++
++  // For Array.prototype.includes and indexOf: looks for `search` among
++  // elements [from, length) of `array` straight in values(), with
++  // SameValueZero or strict equality. Returns false when the caller must take
++  // the generic path (not an array, or a region this isolate may not read);
++  // otherwise sets `found` to the index or -1.
++  static bool FindInArray(Isolate* isolate, Tagged<JSRegionObject> array,
++                          Tagged<Object> search, int64_t from, int64_t length,
++                          bool same_value_zero, int64_t* found);
 +
 +  // A value of #{} or #[] as the object holds it: as it is, shared, copied
 +  // or rejected. Counts the bytes of a string copied into the region.
@@ -10242,6 +10452,52 @@ index a851946a..0058f7be 100644
                                                                                \
    /* Illegal token - not able to scan. */                                     \
    T(kIllegal, "ILLEGAL", 0)                                                   \
+diff --git a/src/runtime/runtime-array.cc b/src/runtime/runtime-array.cc
+index f1965938..f9402452 100644
+--- a/src/runtime/runtime-array.cc
++++ b/src/runtime/runtime-array.cc
+@@ -10,6 +10,7 @@
+ #include "src/objects/allocation-site-inl.h"
+ #include "src/objects/elements.h"
+ #include "src/objects/js-array-inl.h"
++#include "src/objects/js-region-inl.h"
+ #include "src/objects/object-conversions-inl.h"
+ 
+ namespace v8 {
+@@ -297,6 +298,16 @@ RUNTIME_FUNCTION(Runtime_ArrayIncludes_Slow) {
+     return *isolate->factory()->ToBoolean(result.FromJust());
+   }
+ 
++  // Arrays of ownership regions: straight through their values.
++  if (IsJSRegionObject(*object)) {
++    int64_t found;
++    if (JSRegionObject::FindInArray(isolate, Cast<JSRegionObject>(*object),
++                                    *search_element, index, len, true,
++                                    &found)) {
++      return *isolate->factory()->ToBoolean(found >= 0);
++    }
++  }
++
+   // Otherwise, perform slow lookups for special receiver types.
+   for (; index < len; ++index) {
+     HandleScope iteration_hs(isolate);
+@@ -396,6 +407,16 @@ RUNTIME_FUNCTION(Runtime_ArrayIndexOf) {
+     return *isolate->factory()->NewNumberFromInt64(result.FromJust());
+   }
+ 
++  // Arrays of ownership regions: straight through their values.
++  if (IsJSRegionObject(*object)) {
++    int64_t found;
++    if (JSRegionObject::FindInArray(isolate, Cast<JSRegionObject>(*object),
++                                    *search_element, index, len, false,
++                                    &found)) {
++      return *isolate->factory()->NewNumberFromInt64(found);
++    }
++  }
++
+   if (V8_UNLIKELY(v8_flags.fast_api_indexof &&
+                   object->map()->has_indexed_interceptor() &&
+                   len <= kMaxUInt32)) {
 diff --git a/src/runtime/runtime-forin.cc b/src/runtime/runtime-forin.cc
 index 2ab60bab..433e7430 100644
 --- a/src/runtime/runtime-forin.cc
