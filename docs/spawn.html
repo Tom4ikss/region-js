@@ -381,10 +381,10 @@ start = performance.<span class="tok-fn">now</span>();
 <span class="tok-fn">six</span>(<span class="tok-string">'пул из 4'</span>);
 <span class="tok-api">spawn</span>.<span class="tok-api">poolSize</span> = <span class="tok-number">6</span>;
 <span class="tok-fn">six</span>(<span class="tok-string">'пул из 6'</span>);</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8; время у вас будет другим</span></div><pre class="out">результаты совпадают: true
-по очереди: 497 ms
-все сразу:  138 ms (x3.6)
-6 задач, пул из 4: 255 ms
-6 задач, пул из 6: 141 ms</pre></figure>
+по очереди: 534 ms
+все сразу:  171 ms (x3.1)
+6 задач, пул из 4: 259 ms
+6 задач, пул из 6: 150 ms</pre></figure>
 
 <p>Четыре задачи сразу идут примерно в 3,5 раза быстрее, чем по очереди. Ровно в 4 раза не выходит, и дело не в запуске: он стоит несколько микросекунд, а задача считается больше ста миллисекунд. Причину мы отдельно не разбирали.</p>
 <p>Если задач больше, чем воркеров, лишние ждут очереди: шесть задач с пулом из четырёх идут почти вдвое дольше одной. Пул можно увеличить, например под 6 быстрых ядер этой машины: <code>spawn.poolSize = 6</code>. Больше, чем ядер, ставить нет смысла: потоки начнут делить одни и те же ядра. Значения меньше 1 и не числа <code>spawn</code> считает за 1.</p>
@@ -442,8 +442,8 @@ poolSize здесь: 6 | в задаче: 4</pre></figure>
   ms = performance.<span class="tok-fn">now</span>() - start;
   <span class="tok-fn">print</span>(<span class="tok-string">`${</span>M<span class="tok-string">} задач сразу (await): ${</span>ms.<span class="tok-fn">toFixed</span>(<span class="tok-number">0</span>)<span class="tok-string">} ms, последний результат ${</span>results[M - <span class="tok-number">1</span>]<span class="tok-string">}`</span>);
 })();</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8; время у вас будет другим</span></div><pre class="out">воркеров в пуле: 4
-100000 задач по очереди (join): 342 ms, 3 µs на задачу
-20000 задач сразу (await): 74 ms, последний результат 20000</pre></figure>
+100000 задач по очереди (join): 354 ms, 4 µs на задачу
+20000 задач сразу (await): 87 ms, последний результат 20000</pre></figure>
 
 <p>Задачи, запущенные все сразу, стоят примерно столько же, около 4 мкс на штуку. Почему запуск вообще стал таким дешёвым, рассказано на странице <a href="inside.html#fast-spawn">«Как это устроено»</a>.</p>
 <p>Для задач от миллисекунды и дольше эти накладные расходы почти не видны. Для мелких задач они могут оказаться больше самой работы. Как с этим быть, показано на странице <a href="practices.html#batch">«Как делать и как не делать»</a>.</p>
