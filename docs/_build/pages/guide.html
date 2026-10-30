@@ -70,7 +70,7 @@
 <p><code>postMessage</code> со списком transfer — самый низкий уровень, на нём построено всё остальное. Обычно удобнее <a href="spawn.html"><code>spawn</code></a> и <a href="channels.html">каналы</a>: они перемещают регионы сами, без списка transfer, а <code>spawn</code> к тому же идёт мимо <code>postMessage</code>, через свою очередь, и обходится дешевле.</p>
 
 <h2 id="of">6. Вернуть регион обратно: <code>Region.of</code></h2>
-<p>В воркере нет переменной <code>region</code>, есть только полученные объекты. <code>Region.of(obj)</code> находит регион по любому его объекту. С ним воркер может вернуть данные тем же способом. Для списка transfer хватит и самого объекта (<a href="#move">раздел 5</a>), а <code>Region.of</code> нужен, чтобы вызвать методы региона: <code>borrow()</code>, <code>freeze()</code>, <code>free()</code>. Проверить, лежит ли значение в регионе, не ловя ошибку, можно через <code>Region.isRegionObject(value)</code>.</p>
+<p>В воркере нет переменной <code>region</code>, есть только полученные объекты. <code>Region.of(obj)</code> находит регион по любому его объекту. С ним воркер может вернуть данные тем же способом. Для списка transfer хватит и самого объекта (<a href="#move">раздел 5</a>), а <code>Region.of</code> нужен, чтобы вызвать методы региона: <code>borrow()</code>, <code>freeze()</code>, <code>free()</code>. Проверить, лежит ли значение в регионе, не ловя ошибку, можно через <code>Region.isRegionObject(value)</code>. У региона в одном потоке одна ручка: <code>Region.of(a) === Region.of(b)</code>, если <code>a</code> и <code>b</code> из одного региона, и <code>Region.of(obj) === region</code> для того <code>region</code>, в котором объект создан.</p>
 
 <!--ex:07-ping-pong.js timing-->
 

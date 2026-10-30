@@ -40,3 +40,14 @@ try {
 print('worker got:', w.getMessage());
 print('region owner:', region.owner);
 w.terminate();
+
+// One handle per region in a thread: Region.of() of any object of a region,
+// and the Region it was created with, are the same object.
+{
+  const r = new Region();
+  const a = r.run(() => ({ x: 1 }));
+  const b = r.run(() => [1, 2]);
+  const other = new Region().run(() => ({}));
+  print('same handle:', Region.of(a) === Region.of(b), Region.of(a) === r,
+        Region.of(other) !== r);
+}

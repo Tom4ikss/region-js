@@ -2529,7 +2529,7 @@ index 00000000..bd767012
 +
 +#endif  // V8_D8_D8_PORT_H_
 diff --git a/src/d8/d8.cc b/src/d8/d8.cc
-index 49121fe1..bca2524e 100644
+index 49121fe1..9ac42ff0 100644
 --- a/src/d8/d8.cc
 +++ b/src/d8/d8.cc
 @@ -14,6 +14,7 @@
@@ -2584,7 +2584,7 @@ index 49121fe1..bca2524e 100644
      Shell::CompleteMessageLoop(isolate);
    }
  
-@@ -2400,7 +2408,43 @@ PerIsolateData::PerIsolateData(Isolate* isolate) : isolate_(isolate) {
+@@ -2400,7 +2408,50 @@ PerIsolateData::PerIsolateData(Isolate* isolate) : isolate_(isolate) {
    ignore_unhandled_promises_ = false;
  }
  
@@ -2601,26 +2601,33 @@ index 49121fe1..bca2524e 100644
 +};
 +
 +void PerIsolateData::TrackRegionHandle(Local<Object> handle, int region) {
++  DCHECK_EQ(region_handles_.count(region), 0);
 +  i::RegionRegistry::AddHandle(region);
 +  auto* tracked = new RegionHandle{this, region, Global<Object>(isolate_, handle)};
 +  tracked->handle.SetWeak(
 +      tracked,
 +      [](const WeakCallbackInfo<RegionHandle>& info) {
 +        RegionHandle* tracked = info.GetParameter();
-+        tracked->data->region_handles_.erase(tracked);
++        tracked->data->region_handles_.erase(tracked->region);
 +        i::RegionRegistry::RemoveHandle(tracked->region);
 +        tracked->handle.Reset();
 +        delete tracked;
 +      },
 +      WeakCallbackType::kParameter);
-+  region_handles_.insert(tracked);
++  region_handles_[region] = tracked;
++}
++
++MaybeLocal<Object> PerIsolateData::RegionHandleFor(int region) {
++  auto it = region_handles_.find(region);
++  if (it == region_handles_.end()) return {};
++  return it->second->handle.Get(isolate_);
 +}
 +
  PerIsolateData::~PerIsolateData() {
 +  Channels::ForgetIsolate(isolate_);
 +  Ports::ForgetIsolate(isolate_);
 +  // Weak callbacks do not run when an isolate is disposed.
-+  for (RegionHandle* tracked : region_handles_) {
++  for (auto& [region, tracked] : region_handles_) {
 +    i::RegionRegistry::RemoveHandle(tracked->region);
 +    tracked->handle.Reset();
 +    delete tracked;
@@ -2628,7 +2635,7 @@ index 49121fe1..bca2524e 100644
    isolate_->SetData(0, nullptr);  // Not really needed, just to be sure...
    if (i::v8_flags.expose_async_hooks) {
      delete async_hooks_wrapper_;  // This uses the isolate
-@@ -2483,10 +2527,37 @@ void PerIsolateData::SetDomNodeCtor(Local<FunctionTemplate> ctor) {
+@@ -2483,10 +2534,37 @@ void PerIsolateData::SetDomNodeCtor(Local<FunctionTemplate> ctor) {
    dom_node_ctor_.Reset(isolate_, ctor);
  }
  
@@ -2668,7 +2675,7 @@ index 49121fe1..bca2524e 100644
  }
  
  void PerIsolateData::RegisterWorker(std::shared_ptr<Worker> worker) {
-@@ -2519,6 +2590,11 @@ std::pair<Local<Context>, Local<Function>> PerIsolateData::GetWorkerOnMessage(
+@@ -2519,6 +2597,11 @@ std::pair<Local<Context>, Local<Function>> PerIsolateData::GetWorkerOnMessage(
    return {it->second.first.Get(isolate_), it->second.second.Get(isolate_)};
  }
  
@@ -2680,7 +2687,7 @@ index 49121fe1..bca2524e 100644
  void PerIsolateData::UnregisterWorker(const std::shared_ptr<Worker>& worker) {
    registered_workers_.erase(worker);
    worker_message_callbacks_.erase(worker);
-@@ -4366,11 +4442,21 @@ void Shell::WorkerOnMessageSetter(
+@@ -4366,11 +4449,21 @@ void Shell::WorkerOnMessageSetter(
    }
  
    Local<Value> callback = info[0];
@@ -2703,7 +2710,7 @@ index 49121fe1..bca2524e 100644
  }
  
  void Shell::WorkerTerminate(const v8::FunctionCallbackInfo<v8::Value>& info) {
-@@ -4804,6 +4890,12 @@ Local<ObjectTemplate> Shell::CreateGlobalTemplate(Isolate* isolate) {
+@@ -4804,6 +4897,12 @@ Local<ObjectTemplate> Shell::CreateGlobalTemplate(Isolate* isolate) {
    global_template->Set(isolate, "performance",
                         Shell::CreatePerformanceTemplate(isolate));
    global_template->Set(isolate, "Worker", Shell::CreateWorkerTemplate(isolate));
@@ -2716,7 +2723,7 @@ index 49121fe1..bca2524e 100644
  
    // Prevent fuzzers from creating side effects.
    if (!i::v8_flags.fuzzing) {
-@@ -4899,6 +4991,988 @@ Local<FunctionTemplate> Shell::CreateWorkerTemplate(Isolate* isolate) {
+@@ -4899,6 +4998,992 @@ Local<FunctionTemplate> Shell::CreateWorkerTemplate(Isolate* isolate) {
    return worker_fun_template;
  }
  
@@ -2884,6 +2891,10 @@ index 49121fe1..bca2524e 100644
 +  }
 +  int region = i::Cast<i::JSRegionObject>(*value)->region_id();
 +  Local<Object> handle;
++  if (PerIsolateData::Get(isolate)->RegionHandleFor(region).ToLocal(&handle)) {
++    info.GetReturnValue().Set(handle);
++    return;
++  }
 +  if (!PerIsolateData::Get(isolate)
 +           ->GetRegionCtor()
 +           ->InstanceTemplate()
@@ -3705,7 +3716,7 @@ index 49121fe1..bca2524e 100644
  Local<ObjectTemplate> Shell::CreateAsyncHookTemplate(Isolate* isolate) {
    Local<ObjectTemplate> async_hooks_templ = ObjectTemplate::New(isolate);
    async_hooks_templ->Set(isolate, "createHook",
-@@ -5376,9 +6450,593 @@ MaybeLocal<Context> Shell::CreateEvaluationContext(Isolate* isolate) {
+@@ -5376,9 +6461,593 @@ MaybeLocal<Context> Shell::CreateEvaluationContext(Isolate* isolate) {
    }
  #endif  // V8_ENABLE_HARDWARE_WATCHPOINT_SUPPORT
  
@@ -4299,7 +4310,7 @@ index 49121fe1..bca2524e 100644
  namespace {
  int LineFromOffset(Local<debug::Script> script, int offset) {
    debug::Location location = script->GetSourceLocation(offset);
-@@ -6538,6 +8196,7 @@ void SourceGroup::JoinThread(const i::ParkedScope& parked) {
+@@ -6538,6 +8207,7 @@ void SourceGroup::JoinThread(const i::ParkedScope& parked) {
  void SerializationDataQueue::Enqueue(std::unique_ptr<SerializationData> data) {
    base::MutexGuard lock_guard(&mutex_);
    data_.push_back(std::move(data));
@@ -4307,7 +4318,7 @@ index 49121fe1..bca2524e 100644
  }
  
  bool SerializationDataQueue::Dequeue(
-@@ -6547,6 +8206,7 @@ bool SerializationDataQueue::Dequeue(
+@@ -6547,6 +8217,7 @@ bool SerializationDataQueue::Dequeue(
    if (data_.empty()) return false;
    *out_data = std::move(data_[0]);
    data_.erase(data_.begin());
@@ -4315,7 +4326,7 @@ index 49121fe1..bca2524e 100644
    return true;
  }
  
-@@ -6558,6 +8218,7 @@ bool SerializationDataQueue::IsEmpty() {
+@@ -6558,6 +8229,7 @@ bool SerializationDataQueue::IsEmpty() {
  void SerializationDataQueue::Clear() {
    base::MutexGuard lock_guard(&mutex_);
    data_.clear();
@@ -4323,7 +4334,7 @@ index 49121fe1..bca2524e 100644
  }
  
  Worker::Worker(Isolate* parent_isolate, const char* script)
-@@ -6668,6 +8329,12 @@ std::unique_ptr<SerializationData> Worker::GetMessage(Isolate* requester) {
+@@ -6668,6 +8340,12 @@ std::unique_ptr<SerializationData> Worker::GetMessage(Isolate* requester) {
        out_queue_.Dequeue(&result);
        break;
      }
@@ -4336,7 +4347,7 @@ index 49121fe1..bca2524e 100644
      out_semaphore_.ParkedWait(
          reinterpret_cast<i::Isolate*>(requester)->main_thread_local_isolate());
    }
-@@ -6705,6 +8372,8 @@ void Worker::Terminate() {
+@@ -6705,6 +8383,8 @@ void Worker::Terminate() {
    // returning to the event queue. Since we checked the state before, and we are
    // holding the {worker_mutex_}, it's safe to access the isolate.
    isolate_->TerminateExecution();
@@ -4345,7 +4356,7 @@ index 49121fe1..bca2524e 100644
  }
  
  void Worker::EnterTerminatedState() {
-@@ -7310,6 +8979,9 @@ bool Shell::SetOptions(int argc, char* argv[]) {
+@@ -7310,6 +8990,9 @@ bool Shell::SetOptions(int argc, char* argv[]) {
                                    argv, &i)) {
        // Value is expressed in MB.
        options.max_serializer_memory = atoi(flag_value) * i::MB;
@@ -4355,7 +4366,7 @@ index 49121fe1..bca2524e 100644
      } else if (FlagMatches("--bundle", &argv[i])) {
        options.bundle = true;
  #ifdef V8_FUZZILLI
-@@ -7921,6 +9593,27 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7921,6 +9604,27 @@ class Serializer : public ValueSerializer::Delegate {
      return true;
    }
  
@@ -4383,7 +4394,7 @@ index 49121fe1..bca2524e 100644
   private:
    Maybe<bool> PrepareTransfer(Local<Context> context, Local<Value> transfer) {
      if (transfer->IsArray()) {
-@@ -7929,6 +9622,22 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7929,6 +9633,22 @@ class Serializer : public ValueSerializer::Delegate {
        for (uint32_t i = 0; i < length; ++i) {
          Local<Value> element;
          if (transfer_array->Get(context, i).ToLocal(&element)) {
@@ -4406,7 +4417,7 @@ index 49121fe1..bca2524e 100644
            if (!element->IsArrayBuffer()) {
              ThrowError(isolate_,
                         "Transfer array elements must be an ArrayBuffer");
-@@ -7961,7 +9670,48 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7961,7 +9681,48 @@ class Serializer : public ValueSerializer::Delegate {
      }
    }
  
@@ -4455,7 +4466,7 @@ index 49121fe1..bca2524e 100644
      for (const auto& global_array_buffer : array_buffers_) {
        Local<ArrayBuffer> array_buffer =
            Local<ArrayBuffer>::New(isolate_, global_array_buffer);
-@@ -7987,6 +9737,7 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7987,6 +9748,7 @@ class Serializer : public ValueSerializer::Delegate {
    ValueSerializer serializer_;
    std::unique_ptr<SerializationData> data_;
    std::vector<Global<ArrayBuffer>> array_buffers_;
@@ -4463,7 +4474,7 @@ index 49121fe1..bca2524e 100644
    std::vector<Global<SharedArrayBuffer>> shared_array_buffers_;
    std::vector<Global<WasmModuleObject>> wasm_modules_;
    std::vector<std::shared_ptr<v8::BackingStore>> backing_stores_;
-@@ -8013,6 +9764,21 @@ class Deserializer : public ValueDeserializer::Delegate {
+@@ -8013,6 +9775,21 @@ class Deserializer : public ValueDeserializer::Delegate {
        return MaybeLocal<Value>();
      }
  
@@ -4485,7 +4496,7 @@ index 49121fe1..bca2524e 100644
      uint32_t index = 0;
      for (const auto& backing_store : data_->backing_stores()) {
        Local<ArrayBuffer> array_buffer =
-@@ -8049,6 +9815,21 @@ class Deserializer : public ValueDeserializer::Delegate {
+@@ -8049,6 +9826,21 @@ class Deserializer : public ValueDeserializer::Delegate {
      return nullptr;
    }
  
@@ -4507,7 +4518,7 @@ index 49121fe1..bca2524e 100644
   private:
    Isolate* isolate_;
    ValueDeserializer deserializer_;
-@@ -8309,6 +10090,8 @@ int Shell::Main(int argc, char* argv[]) {
+@@ -8309,6 +10101,8 @@ int Shell::Main(int argc, char* argv[]) {
    // The platform is owned by wrapper platform despite the `std::move` below.
    START_IGNORE_LIFETIME_SAFETY_WARNINGS()
    g_default_platform = g_platform.get();
@@ -4517,7 +4528,7 @@ index 49121fe1..bca2524e 100644
    if (i::v8_flags.predictable) {
      g_platform = MakePredictablePlatform(std::move(g_platform));
 diff --git a/src/d8/d8.h b/src/d8/d8.h
-index 0c7ad50a..98f687c6 100644
+index 0c7ad50a..ad665d29 100644
 --- a/src/d8/d8.h
 +++ b/src/d8/d8.h
 @@ -8,6 +8,7 @@
@@ -4597,7 +4608,7 @@ index 0c7ad50a..98f687c6 100644
    std::vector<std::unique_ptr<SerializationData>> data_;
  };
  
-@@ -432,8 +460,22 @@ class PerIsolateData {
+@@ -432,8 +460,25 @@ class PerIsolateData {
    Local<FunctionTemplate> GetDomNodeCtor() const;
    void SetDomNodeCtor(Local<FunctionTemplate> ctor);
  
@@ -4610,9 +4621,12 @@ index 0c7ad50a..98f687c6 100644
 +  Local<Context> GetSpawnProbeContext() const;
 +  void SetSpawnProbeContext(Local<Context> context);
 +
-+  // Counts `handle` as a JS handle to `region` until it is collected or the
-+  // isolate is disposed.
++  // Counts `handle` as the JS handle to `region` in this isolate until it is
++  // collected or the isolate is disposed.
 +  void TrackRegionHandle(Local<Object> handle, int region);
++  // The live handle to `region` in this isolate, if any: every Region.of()
++  // of the region returns the same object while one is alive.
++  MaybeLocal<Object> RegionHandleFor(int region);
 +
    bool HasRunningSubscribedWorkers();
    void RegisterWorker(std::shared_ptr<Worker> worker);
@@ -4620,7 +4634,7 @@ index 0c7ad50a..98f687c6 100644
    void SubscribeWorkerOnMessage(const std::shared_ptr<Worker>& worker,
                                  Local<Context> context,
                                  Local<Function> callback);
-@@ -457,6 +499,33 @@ class PerIsolateData {
+@@ -457,6 +502,33 @@ class PerIsolateData {
    std::unordered_set<DynamicImportData*> import_data_;
    Global<FunctionTemplate> test_api_object_ctor_;
    Global<FunctionTemplate> dom_node_ctor_;
@@ -4650,11 +4664,11 @@ index 0c7ad50a..98f687c6 100644
 +  Global<FunctionTemplate> region_scope_ctor_;
 +  std::vector<SpawnCode> spawn_codes_;
 +  struct RegionHandle;
-+  std::unordered_set<RegionHandle*> region_handles_;
++  std::unordered_map<int, RegionHandle*> region_handles_;
    // See Shell::GetOrCreateLeafInterfaceTypeTemplate.
    Global<FunctionTemplate> leaf_interface_type_template_;
    // The template of the global object of all contexts that d8 creates in this
-@@ -641,6 +710,9 @@ class ShellOptions {
+@@ -641,6 +713,9 @@ class ShellOptions {
    DisallowReassignment<bool> expose_fast_api = {"expose-fast-api", false};
    DisallowReassignment<size_t> max_serializer_memory = {"max-serializer-memory",
                                                          1 * i::MB};
@@ -4664,7 +4678,7 @@ index 0c7ad50a..98f687c6 100644
    DisallowReassignment<bool> bundle = {"bundle", false};
  };
  
-@@ -713,6 +785,21 @@ class Shell : public i::AllStatic {
+@@ -713,6 +788,21 @@ class Shell : public i::AllStatic {
  
    static bool HandleUnhandledPromiseRejections(Isolate* isolate);
  
@@ -4686,7 +4700,7 @@ index 0c7ad50a..98f687c6 100644
    static std::unique_ptr<SerializationData> SerializeValue(
        Isolate* isolate, Local<Value> value, Local<Value> transfer);
    static MaybeLocal<Value> DeserializeValue(
-@@ -1007,6 +1094,41 @@ class Shell : public i::AllStatic {
+@@ -1007,6 +1097,41 @@ class Shell : public i::AllStatic {
    static Local<ObjectTemplate> GetOrCreateGlobalTemplate(Isolate* isolate);
    static Local<ObjectTemplate> CreateOSTemplate(Isolate* isolate);
    static Local<FunctionTemplate> CreateWorkerTemplate(Isolate* isolate);

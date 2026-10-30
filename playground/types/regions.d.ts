@@ -109,7 +109,8 @@ declare class Region implements Disposable {
   static stats(): { regions: number; freed: number; bytes: number };
 
   /** A handle to the region of a region object, e.g. to put it into a
-   * transfer list. Does not change ownership. */
+   * transfer list. Does not change ownership. A thread has one handle per
+   * region, so handles of the same region are `===`. */
   static of(value: object): Region;
   /** Whether `value` is an object of some region; never throws. */
   static isRegionObject(value: unknown): boolean;

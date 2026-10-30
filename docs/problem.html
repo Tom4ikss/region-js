@@ -148,7 +148,7 @@
   <span class="tok-keyword">for</span> (<span class="tok-keyword">const</span> w <span class="tok-keyword">of</span> workers) w.<span class="tok-api">getMessage</span>();
   <span class="tok-fn">print</span>(atomic ? <span class="tok-string">'с Atomics.add:'</span> : <span class="tok-string">'без Atomics:  '</span>, counter[<span class="tok-number">0</span>], <span class="tok-string">'из 2000000'</span>);
   <span class="tok-keyword">for</span> (<span class="tok-keyword">const</span> w <span class="tok-keyword">of</span> workers) w.<span class="tok-api">terminate</span>();
-}</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8; числа меняются от запуска к запуску</span></div><pre class="out">без Atomics:   1698039 из 2000000
+}</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8; числа меняются от запуска к запуску</span></div><pre class="out">без Atomics:   1539655 из 2000000
 с Atomics.add: 2000000 из 2000000</pre></figure>
 
 <p>Без <code>Atomics</code> счётчик не дошёл до двух миллионов: часть прибавлений потерялась. Сколько именно, каждый раз по-разному. Дело в том, что <code>c[0] = c[0] + 1</code> — это три шага: прочитать, прибавить, записать. Оба потока читают, скажем, 10, оба прибавляют единицу и оба записывают 11. Одно прибавление потерялось.</p>
