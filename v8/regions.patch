@@ -1979,10 +1979,10 @@ index 8aab5f56..b2e7c4d5 100644
        CheckValueInputIs(node, 1, Type::Any());
 diff --git a/src/d8/d8-channel.cc b/src/d8/d8-channel.cc
 new file mode 100644
-index 00000000..fe0626db
+index 00000000..ec9dac6f
 --- /dev/null
 +++ b/src/d8/d8-channel.cc
-@@ -0,0 +1,789 @@
+@@ -0,0 +1,822 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -2079,7 +2079,11 @@ index 00000000..fe0626db
 +  bool closed = false;
 +  size_t accepted = 0;
 +  std::deque<Item> items;
++  // Waiting receives in arrival order. An entry stays here after its waiter
++  // completes through another channel or is cancelled; `stale` counts such
++  // entries, which are skipped and dropped once they are half of the queue.
 +  std::deque<Receiver> receivers;
++  size_t stale = 0;
 +};
 +
 +namespace {
@@ -2111,6 +2115,8 @@ index 00000000..fe0626db
 +};
 +
 +base::LazyMutex isolates_mutex = LAZY_MUTEX_INITIALIZER;
++// Bumped whenever an entry of AllData() is erased.
++std::atomic<uint64_t> data_epoch{1};
 +
 +// Guarded by the channels mutex: threads blocked in a channel operation, and
 +// isolates being terminated, whose waiters must not get values any more.
@@ -2131,8 +2137,18 @@ index 00000000..fe0626db
 +// Elements of an unordered_map keep their address, so the entry can be used
 +// without the lock.
 +IsolateChannels& DataOf(Isolate* isolate) {
++  // The entry is cached per thread; erasing any entry invalidates the cache,
++  // as a new isolate may get the address of a disposed one.
++  thread_local Isolate* cached_isolate = nullptr;
++  thread_local IsolateChannels* cached_data = nullptr;
++  thread_local uint64_t cached_epoch = 0;
++  uint64_t epoch = data_epoch.load(std::memory_order_acquire);
++  if (cached_isolate == isolate && cached_epoch == epoch) return *cached_data;
 +  base::MutexGuard guard(isolates_mutex.Pointer());
-+  return AllData()[isolate];
++  cached_data = &AllData()[isolate];
++  cached_isolate = isolate;
++  cached_epoch = epoch;
++  return *cached_data;
 +}
 +
 +void ThrowTypeError(Isolate* isolate, const char* message) {
@@ -2154,13 +2170,25 @@ index 00000000..fe0626db
 +
 +// The following functions run with the channels mutex held.
 +
-+void CompleteLocked(const std::shared_ptr<ChannelWaiter>& waiter) {
-+  waiter->done = true;
++// The waiter, already marked done, leaves entries in the receive queues of
++// its channels except `taken_from`, whose entry was already removed.
++void LeaveQueuesLocked(ChannelWaiter* waiter, const ChannelState* taken_from) {
++  if (waiter->kind != ChannelWaiter::Kind::kReceive) return;
 +  for (const std::shared_ptr<ChannelState>& state : waiter->channels) {
-+    std::erase_if(state->receivers, [&](const ChannelState::Receiver& r) {
-+      return r.waiter == waiter;
-+    });
++    if (state.get() == taken_from) continue;
++    if (++state->stale * 2 > state->receivers.size()) {
++      std::erase_if(state->receivers, [](const ChannelState::Receiver& r) {
++        return r.waiter->done;
++      });
++      state->stale = 0;
++    }
 +  }
++}
++
++void CompleteLocked(const std::shared_ptr<ChannelWaiter>& waiter,
++                    const ChannelState* taken_from = nullptr) {
++  waiter->done = true;
++  LeaveQueuesLocked(waiter.get(), taken_from);
 +  waiter->channels.clear();
 +  if (waiter->blocking) {
 +    waiter->ready.store(true, std::memory_order_release);
@@ -2172,13 +2200,12 @@ index 00000000..fe0626db
 +  }
 +}
 +
-+void CancelLocked(ChannelWaiter* waiter) {
++void CancelLocked(ChannelWaiter* waiter,
++                  const ChannelState* taken_from = nullptr) {
 +  if (waiter->done) return;
 +  waiter->done = true;
++  LeaveQueuesLocked(waiter, taken_from);
 +  for (const std::shared_ptr<ChannelState>& state : waiter->channels) {
-+    std::erase_if(state->receivers, [&](const ChannelState::Receiver& r) {
-+      return r.waiter.get() == waiter;
-+    });
 +    // A cancelled sender leaves its value in the channel.
 +    for (ChannelState::Item& item : state->items) {
 +      if (item.sender.get() == waiter) item.sender = nullptr;
@@ -2193,8 +2220,12 @@ index 00000000..fe0626db
 +  while (!state->receivers.empty()) {
 +    ChannelState::Receiver receiver = std::move(state->receivers.front());
 +    state->receivers.pop_front();
++    if (receiver.waiter->done) {
++      if (state->stale > 0) state->stale--;
++      continue;
++    }
 +    if (TerminatingIsolates().contains(receiver.waiter->isolate)) {
-+      CancelLocked(receiver.waiter.get());
++      CancelLocked(receiver.waiter.get(), state);
 +      continue;
 +    }
 +    *index = receiver.index;
@@ -2209,7 +2240,7 @@ index 00000000..fe0626db
 +  receiver.waiter->data = std::move(data);
 +  receiver.waiter->index = receiver.index;
 +  receiver.waiter->source = state;
-+  CompleteLocked(receiver.waiter);
++  CompleteLocked(receiver.waiter, state.get());
 +}
 +
 +// A value delivered to an isolate that went away before reading it goes back
@@ -2616,11 +2647,12 @@ index 00000000..fe0626db
 +      std::deque<ChannelState::Receiver> receivers =
 +          std::move(state->receivers);
 +      state->receivers.clear();
++      state->stale = 0;
 +      for (ChannelState::Receiver& receiver : receivers) {
 +        if (receiver.waiter->done) continue;
 +        receiver.waiter->closed = true;
 +        receiver.waiter->index = receiver.index;
-+        CompleteLocked(receiver.waiter);
++        CompleteLocked(receiver.waiter, state.get());
 +      }
 +    }
 +  }
@@ -2769,6 +2801,7 @@ index 00000000..fe0626db
 +  data.ctor.Reset();
 +  base::MutexGuard guard(isolates_mutex.Pointer());
 +  AllData().erase(isolate);
++  data_epoch.fetch_add(1, std::memory_order_release);
 +}
 +
 +}  // namespace v8
@@ -2824,10 +2857,10 @@ index 00000000..b7c2e120
 +#endif  // V8_D8_D8_CHANNEL_H_
 diff --git a/src/d8/d8-port.cc b/src/d8/d8-port.cc
 new file mode 100644
-index 00000000..8b9263a3
+index 00000000..3fe2d28e
 --- /dev/null
 +++ b/src/d8/d8-port.cc
-@@ -0,0 +1,850 @@
+@@ -0,0 +1,879 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -2954,6 +2987,8 @@ index 00000000..8b9263a3
 +};
 +
 +base::LazyMutex isolates_mutex = LAZY_MUTEX_INITIALIZER;
++// Bumped whenever an entry of AllData() is erased.
++std::atomic<uint64_t> data_epoch{1};
 +
 +std::unordered_map<Isolate*, IsolatePorts>& AllData() {
 +  static base::LeakyObject<std::unordered_map<Isolate*, IsolatePorts>> all;
@@ -2963,8 +2998,18 @@ index 00000000..8b9263a3
 +// Elements of an unordered_map keep their address; only the isolate's own
 +// thread uses its entry.
 +IsolatePorts& DataOf(Isolate* isolate) {
++  // The entry is cached per thread; erasing any entry invalidates the cache,
++  // as a new isolate may get the address of a disposed one.
++  thread_local Isolate* cached_isolate = nullptr;
++  thread_local IsolatePorts* cached_data = nullptr;
++  thread_local uint64_t cached_epoch = 0;
++  uint64_t epoch = data_epoch.load(std::memory_order_acquire);
++  if (cached_isolate == isolate && cached_epoch == epoch) return *cached_data;
 +  base::MutexGuard guard(isolates_mutex.Pointer());
-+  return AllData()[isolate];
++  cached_data = &AllData()[isolate];
++  cached_isolate = isolate;
++  cached_epoch = epoch;
++  return *cached_data;
 +}
 +
 +void ThrowTypeError(Isolate* isolate, const char* message) {
@@ -3083,17 +3128,33 @@ index 00000000..8b9263a3
 +  }
 +  Local<Array> array = value.As<Array>();
 +  auto message = std::make_unique<PortMessage>();
-+  uint32_t length = array->Length();
-+  message->slots.reserve(length);
-+  for (uint32_t i = 0; i < length; i++) {
-+    Local<Value> element;
-+    if (!array->Get(context, i).ToLocal(&element)) return nullptr;
-+    if (!AppendSlot(isolate, message.get(), element)) {
-+      ThrowTypeError(isolate,
-+                     "a task port message can only hold primitives, strings, "
-+                     "region objects and channels");
-+      return nullptr;
-+    }
++  message->slots.reserve(array->Length());
++  struct Data {
++    Isolate* isolate;
++    PortMessage* message;
++    bool unsendable = false;
++  } data{isolate, message.get()};
++  // Iterate() reads the elements of a plain array directly.
++  if (array
++          ->Iterate(
++              context,
++              [](uint32_t, Local<Value> element, void* opaque) {
++                Data* data = static_cast<Data*>(opaque);
++                if (AppendSlot(data->isolate, data->message, element)) {
++                  return Array::CallbackResult::kContinue;
++                }
++                data->unsendable = true;
++                return Array::CallbackResult::kBreak;
++              },
++              &data)
++          .IsNothing()) {
++    return nullptr;
++  }
++  if (data.unsendable) {
++    ThrowTypeError(isolate,
++                   "a task port message can only hold primitives, strings, "
++                   "region objects and channels");
++    return nullptr;
 +  }
 +  if (!AddTransfer(isolate, message.get(), transfer)) return nullptr;
 +  return message;
@@ -3675,6 +3736,7 @@ index 00000000..8b9263a3
 +  data.ctor.Reset();
 +  base::MutexGuard guard(isolates_mutex.Pointer());
 +  AllData().erase(isolate);
++  data_epoch.fetch_add(1, std::memory_order_release);
 +}
 +
 +}  // namespace v8
