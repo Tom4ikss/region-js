@@ -27,7 +27,7 @@ print('payload items:', await worker); // 3
 
 Работает только в тестовой оболочке движка `d8`, в браузер и Node это не попадает.
 
-**Документация:** https://tom4ikss.github.io/region-js/ · **Релиз:** [v0.1.0-alpha](https://github.com/Tom4ikss/region-js/releases/tag/v0.1.0-alpha)
+**Документация:** https://tom4ikss.github.io/region-js/ · **Релиз:** [v0.2.0-alpha](https://github.com/Tom4ikss/region-js/releases/tag/v0.2.0-alpha)
 
 ## Что умеет
 
