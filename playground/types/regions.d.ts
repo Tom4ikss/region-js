@@ -72,9 +72,21 @@ declare class Region implements Disposable {
   /** An array of `items` in this region. Region arrays grow and shrink:
    * push, pop, splice and length work. */
   array<T extends RegionData>(...items: T[]): T[];
+  /** A typed array of `length` zeros whose bytes belong to this region from
+   * the start: storing it in the region, e.g. in #{ }, copies nothing. A view
+   * like those read from a region: detached when the region moves or
+   * freezes. */
+  typedArray<T extends RegionTypedArray>(
+    constructor: { new (length: number): T },
+    length: number,
+  ): T;
   /** The same in the current region (see enter()). */
   static object<T extends { readonly [key: string]: RegionData }>(value: T): T;
   static array<T extends RegionData>(...items: T[]): T[];
+  static typedArray<T extends RegionTypedArray>(
+    constructor: { new (length: number): T },
+    length: number,
+  ): T;
 
   /** Everyone may read, nobody may write. Detaches the owner's typed array
    * views; readers get immutable views. */

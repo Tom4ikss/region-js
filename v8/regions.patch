@@ -3476,7 +3476,7 @@ index 00000000..bd767012
 +
 +#endif  // V8_D8_D8_PORT_H_
 diff --git a/src/d8/d8.cc b/src/d8/d8.cc
-index 49121fe1..9ac42ff0 100644
+index 49121fe1..1ad01972 100644
 --- a/src/d8/d8.cc
 +++ b/src/d8/d8.cc
 @@ -14,6 +14,7 @@
@@ -3670,7 +3670,7 @@ index 49121fe1..9ac42ff0 100644
  
    // Prevent fuzzers from creating side effects.
    if (!i::v8_flags.fuzzing) {
-@@ -4899,6 +4998,992 @@ Local<FunctionTemplate> Shell::CreateWorkerTemplate(Isolate* isolate) {
+@@ -4899,6 +4998,1041 @@ Local<FunctionTemplate> Shell::CreateWorkerTemplate(Isolate* isolate) {
    return worker_fun_template;
  }
  
@@ -3701,6 +3701,9 @@ index 49121fe1..9ac42ff0 100644
 +                       FunctionTemplate::New(isolate, RegionCurrentObject));
 +  region_template->Set(isolate, "array",
 +                       FunctionTemplate::New(isolate, RegionCurrentArray));
++  region_template->Set(
++      isolate, "typedArray",
++      FunctionTemplate::New(isolate, RegionCurrentTypedArray));
 +  {
 +    // Scopes returned by region.enter(): [region id or undefined].
 +    Local<FunctionTemplate> scope_template = FunctionTemplate::New(isolate);
@@ -3741,7 +3744,8 @@ index 49121fe1..9ac42ff0 100644
 +       {std::pair{"freeze", RegionFreeze}, std::pair{"thaw", RegionThaw},
 +        std::pair{"borrow", RegionBorrow}, std::pair{"free", RegionFree},
 +        std::pair{"enter", RegionEnter}, std::pair{"object", RegionNewObject},
-+        std::pair{"array", RegionNewArray}}) {
++        std::pair{"array", RegionNewArray},
++        std::pair{"typedArray", RegionNewTypedArray}}) {
 +    region_template->PrototypeTemplate()->Set(
 +        String::NewFromUtf8(isolate, name).ToLocalChecked(),
 +        FunctionTemplate::New(isolate, callback, Local<Value>(), signature, 0,
@@ -4607,6 +4611,51 @@ index 49121fe1..9ac42ff0 100644
 +  CreateInRegion(info, region, items);
 +}
 +
++namespace {
++
++// A typed array whose bytes belong to `region` from the start.
++void CreateTypedArrayInRegion(const v8::FunctionCallbackInfo<v8::Value>& info,
++                              int region, const char* name) {
++  Isolate* isolate = info.GetIsolate();
++  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
++  i::DirectHandle<i::Object> constructor =
++      info.Length() > 0 ? Utils::OpenDirectHandle(*info[0])
++                        : i_isolate->factory()->undefined_value();
++  i::DirectHandle<i::Object> length =
++      info.Length() > 1 ? Utils::OpenDirectHandle(*info[1])
++                        : i_isolate->factory()->undefined_value();
++  i::DirectHandle<i::JSTypedArray> result;
++  if (!i::JSRegionObject::NewTypedArray(i_isolate, region, constructor, length)
++           .ToHandle(&result)) {
++    if (!i_isolate->has_exception()) {
++      std::string message = std::string(name) +
++                            "() expects a typed array constructor, such as "
++                            "Float64Array, and a length";
++      isolate->ThrowException(Exception::TypeError(
++          String::NewFromUtf8(isolate, message.c_str()).ToLocalChecked()));
++    }
++    return;
++  }
++  info.GetReturnValue().Set(Utils::ToLocal(i::Cast<i::JSObject>(result)));
++}
++
++}  // namespace
++
++// region.typedArray(Float64Array, length) and Region.typedArray(...) for the
++// current region.
++void Shell::RegionNewTypedArray(
++    const v8::FunctionCallbackInfo<v8::Value>& info) {
++  DCHECK(i::ValidateCallbackInfo(info));
++  CreateTypedArrayInRegion(info, RegionIdOf(info), "region.typedArray");
++}
++
++void Shell::RegionCurrentTypedArray(
++    const v8::FunctionCallbackInfo<v8::Value>& info) {
++  DCHECK(i::ValidateCallbackInfo(info));
++  int region = CurrentRegion(info, "typedArray");
++  if (region >= 0) CreateTypedArrayInRegion(info, region, "Region.typedArray");
++}
++
 +// region.enter(): makes the region current until the returned scope is
 +// disposed, e.g. by `using _ = region.enter()`.
 +void Shell::RegionEnter(const v8::FunctionCallbackInfo<v8::Value>& info) {
@@ -4663,7 +4712,7 @@ index 49121fe1..9ac42ff0 100644
  Local<ObjectTemplate> Shell::CreateAsyncHookTemplate(Isolate* isolate) {
    Local<ObjectTemplate> async_hooks_templ = ObjectTemplate::New(isolate);
    async_hooks_templ->Set(isolate, "createHook",
-@@ -5376,9 +6461,593 @@ MaybeLocal<Context> Shell::CreateEvaluationContext(Isolate* isolate) {
+@@ -5376,9 +6510,593 @@ MaybeLocal<Context> Shell::CreateEvaluationContext(Isolate* isolate) {
    }
  #endif  // V8_ENABLE_HARDWARE_WATCHPOINT_SUPPORT
  
@@ -5257,7 +5306,7 @@ index 49121fe1..9ac42ff0 100644
  namespace {
  int LineFromOffset(Local<debug::Script> script, int offset) {
    debug::Location location = script->GetSourceLocation(offset);
-@@ -6538,6 +8207,7 @@ void SourceGroup::JoinThread(const i::ParkedScope& parked) {
+@@ -6538,6 +8256,7 @@ void SourceGroup::JoinThread(const i::ParkedScope& parked) {
  void SerializationDataQueue::Enqueue(std::unique_ptr<SerializationData> data) {
    base::MutexGuard lock_guard(&mutex_);
    data_.push_back(std::move(data));
@@ -5265,7 +5314,7 @@ index 49121fe1..9ac42ff0 100644
  }
  
  bool SerializationDataQueue::Dequeue(
-@@ -6547,6 +8217,7 @@ bool SerializationDataQueue::Dequeue(
+@@ -6547,6 +8266,7 @@ bool SerializationDataQueue::Dequeue(
    if (data_.empty()) return false;
    *out_data = std::move(data_[0]);
    data_.erase(data_.begin());
@@ -5273,7 +5322,7 @@ index 49121fe1..9ac42ff0 100644
    return true;
  }
  
-@@ -6558,6 +8229,7 @@ bool SerializationDataQueue::IsEmpty() {
+@@ -6558,6 +8278,7 @@ bool SerializationDataQueue::IsEmpty() {
  void SerializationDataQueue::Clear() {
    base::MutexGuard lock_guard(&mutex_);
    data_.clear();
@@ -5281,7 +5330,7 @@ index 49121fe1..9ac42ff0 100644
  }
  
  Worker::Worker(Isolate* parent_isolate, const char* script)
-@@ -6668,6 +8340,12 @@ std::unique_ptr<SerializationData> Worker::GetMessage(Isolate* requester) {
+@@ -6668,6 +8389,12 @@ std::unique_ptr<SerializationData> Worker::GetMessage(Isolate* requester) {
        out_queue_.Dequeue(&result);
        break;
      }
@@ -5294,7 +5343,7 @@ index 49121fe1..9ac42ff0 100644
      out_semaphore_.ParkedWait(
          reinterpret_cast<i::Isolate*>(requester)->main_thread_local_isolate());
    }
-@@ -6705,6 +8383,8 @@ void Worker::Terminate() {
+@@ -6705,6 +8432,8 @@ void Worker::Terminate() {
    // returning to the event queue. Since we checked the state before, and we are
    // holding the {worker_mutex_}, it's safe to access the isolate.
    isolate_->TerminateExecution();
@@ -5303,7 +5352,7 @@ index 49121fe1..9ac42ff0 100644
  }
  
  void Worker::EnterTerminatedState() {
-@@ -7310,6 +8990,9 @@ bool Shell::SetOptions(int argc, char* argv[]) {
+@@ -7310,6 +9039,9 @@ bool Shell::SetOptions(int argc, char* argv[]) {
                                    argv, &i)) {
        // Value is expressed in MB.
        options.max_serializer_memory = atoi(flag_value) * i::MB;
@@ -5313,7 +5362,7 @@ index 49121fe1..9ac42ff0 100644
      } else if (FlagMatches("--bundle", &argv[i])) {
        options.bundle = true;
  #ifdef V8_FUZZILLI
-@@ -7921,6 +9604,27 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7921,6 +9653,27 @@ class Serializer : public ValueSerializer::Delegate {
      return true;
    }
  
@@ -5341,7 +5390,7 @@ index 49121fe1..9ac42ff0 100644
   private:
    Maybe<bool> PrepareTransfer(Local<Context> context, Local<Value> transfer) {
      if (transfer->IsArray()) {
-@@ -7929,6 +9633,22 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7929,6 +9682,22 @@ class Serializer : public ValueSerializer::Delegate {
        for (uint32_t i = 0; i < length; ++i) {
          Local<Value> element;
          if (transfer_array->Get(context, i).ToLocal(&element)) {
@@ -5364,7 +5413,7 @@ index 49121fe1..9ac42ff0 100644
            if (!element->IsArrayBuffer()) {
              ThrowError(isolate_,
                         "Transfer array elements must be an ArrayBuffer");
-@@ -7961,7 +9681,48 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7961,7 +9730,48 @@ class Serializer : public ValueSerializer::Delegate {
      }
    }
  
@@ -5413,7 +5462,7 @@ index 49121fe1..9ac42ff0 100644
      for (const auto& global_array_buffer : array_buffers_) {
        Local<ArrayBuffer> array_buffer =
            Local<ArrayBuffer>::New(isolate_, global_array_buffer);
-@@ -7987,6 +9748,7 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7987,6 +9797,7 @@ class Serializer : public ValueSerializer::Delegate {
    ValueSerializer serializer_;
    std::unique_ptr<SerializationData> data_;
    std::vector<Global<ArrayBuffer>> array_buffers_;
@@ -5421,7 +5470,7 @@ index 49121fe1..9ac42ff0 100644
    std::vector<Global<SharedArrayBuffer>> shared_array_buffers_;
    std::vector<Global<WasmModuleObject>> wasm_modules_;
    std::vector<std::shared_ptr<v8::BackingStore>> backing_stores_;
-@@ -8013,6 +9775,21 @@ class Deserializer : public ValueDeserializer::Delegate {
+@@ -8013,6 +9824,21 @@ class Deserializer : public ValueDeserializer::Delegate {
        return MaybeLocal<Value>();
      }
  
@@ -5443,7 +5492,7 @@ index 49121fe1..9ac42ff0 100644
      uint32_t index = 0;
      for (const auto& backing_store : data_->backing_stores()) {
        Local<ArrayBuffer> array_buffer =
-@@ -8049,6 +9826,21 @@ class Deserializer : public ValueDeserializer::Delegate {
+@@ -8049,6 +9875,21 @@ class Deserializer : public ValueDeserializer::Delegate {
      return nullptr;
    }
  
@@ -5465,7 +5514,7 @@ index 49121fe1..9ac42ff0 100644
   private:
    Isolate* isolate_;
    ValueDeserializer deserializer_;
-@@ -8309,6 +10101,8 @@ int Shell::Main(int argc, char* argv[]) {
+@@ -8309,6 +10150,8 @@ int Shell::Main(int argc, char* argv[]) {
    // The platform is owned by wrapper platform despite the `std::move` below.
    START_IGNORE_LIFETIME_SAFETY_WARNINGS()
    g_default_platform = g_platform.get();
@@ -5475,7 +5524,7 @@ index 49121fe1..9ac42ff0 100644
    if (i::v8_flags.predictable) {
      g_platform = MakePredictablePlatform(std::move(g_platform));
 diff --git a/src/d8/d8.h b/src/d8/d8.h
-index 0c7ad50a..ad665d29 100644
+index 0c7ad50a..746d4304 100644
 --- a/src/d8/d8.h
 +++ b/src/d8/d8.h
 @@ -8,6 +8,7 @@
@@ -5647,7 +5696,7 @@ index 0c7ad50a..ad665d29 100644
    static std::unique_ptr<SerializationData> SerializeValue(
        Isolate* isolate, Local<Value> value, Local<Value> transfer);
    static MaybeLocal<Value> DeserializeValue(
-@@ -1007,6 +1097,41 @@ class Shell : public i::AllStatic {
+@@ -1007,6 +1097,45 @@ class Shell : public i::AllStatic {
    static Local<ObjectTemplate> GetOrCreateGlobalTemplate(Isolate* isolate);
    static Local<ObjectTemplate> CreateOSTemplate(Isolate* isolate);
    static Local<FunctionTemplate> CreateWorkerTemplate(Isolate* isolate);
@@ -5671,6 +5720,10 @@ index 0c7ad50a..ad665d29 100644
 +  static void RegionScopeExit(const v8::FunctionCallbackInfo<v8::Value>& info);
 +  static void RegionNewObject(const v8::FunctionCallbackInfo<v8::Value>& info);
 +  static void RegionNewArray(const v8::FunctionCallbackInfo<v8::Value>& info);
++  static void RegionNewTypedArray(
++      const v8::FunctionCallbackInfo<v8::Value>& info);
++  static void RegionCurrentTypedArray(
++      const v8::FunctionCallbackInfo<v8::Value>& info);
 +  static void RegionCurrentObject(
 +      const v8::FunctionCallbackInfo<v8::Value>& info);
 +  static void RegionCurrentArray(
@@ -7684,10 +7737,10 @@ index 00000000..844041ef
 +#endif  // V8_OBJECTS_JS_REGION_INL_H_
 diff --git a/src/objects/js-region.cc b/src/objects/js-region.cc
 new file mode 100644
-index 00000000..c87fad57
+index 00000000..4bf11c72
 --- /dev/null
 +++ b/src/objects/js-region.cc
-@@ -0,0 +1,1673 @@
+@@ -0,0 +1,1746 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -7776,6 +7829,20 @@ index 00000000..c87fad57
 +    }
 +  }
 +
++  // The store of `region` with these bytes, or -1: a view of the region's
++  // own bytes goes back into the region without a copy.
++  static int Find(const BackingStore* store, int region) {
++    if (store == nullptr) return -1;
++    base::MutexGuard guard(Mutex());
++    std::vector<std::shared_ptr<BackingStore>>& stores = Stores();
++    for (size_t id = 0; id < stores.size(); id++) {
++      if (stores[id].get() == store && Regions()[id] == region) {
++        return static_cast<int>(id);
++      }
++    }
++    return -1;
++  }
++
 +  static std::shared_ptr<BackingStore> Get(int id) {
 +    if (id < 0) return nullptr;
 +    base::MutexGuard guard(Mutex());
@@ -7787,13 +7854,14 @@ index 00000000..c87fad57
 +    return static_cast<int>(Stores().size());
 +  }
 +
-+  // Drops the stores no live JSRegionTypedArray refers to. Views created from
-+  // them keep their own references, so the memory goes away with the last one.
++  // Drops the stores that neither a live JSRegionTypedArray nor a view refers
++  // to. A view keeps its store registered, so that it can go back into the
++  // region without a copy, as views from Region.typedArray() do.
 +  static void ReleaseUnused(const std::vector<bool>& live) {
 +    base::MutexGuard guard(Mutex());
 +    std::vector<std::shared_ptr<BackingStore>>& stores = Stores();
 +    for (size_t id = 0; id < live.size(); id++) {
-+      if (live[id] || !stores[id]) continue;
++      if (live[id] || !stores[id] || stores[id].use_count() > 1) continue;
 +      stores[id].reset();
 +      Free().push_back(static_cast<int>(id));
 +    }
@@ -8563,7 +8631,13 @@ index 00000000..c87fad57
 +
 +    int store = -1;
 +    size_t region_offset = 0;
-+    if (IsTransferred(buffer)) {
++    int own_store =
++        RegionBackingStores::Find(buffer->GetBackingStore().get(), region_);
++    if (own_store >= 0) {
++      // A view of this region's own bytes, e.g. from Region.typedArray().
++      store = own_store;
++      region_offset = byte_offset;
++    } else if (IsTransferred(buffer)) {
 +      if (!buffer->is_detachable()) {
 +        THROW_NEW_ERROR(isolate_, NewTypeError(MessageTemplate::kRegionCannotMove,
 +                                               source));
@@ -9118,6 +9192,58 @@ index 00000000..c87fad57
 +}
 +
 +// static
++MaybeDirectHandle<JSTypedArray> JSRegionObject::NewTypedArray(
++    Isolate* isolate, int region, DirectHandle<Object> constructor,
++    DirectHandle<Object> length) {
++  if (!RegionRegistry::IsOwner(region, isolate)) {
++    ThrowAccessError(isolate, region, Access::kWrite);
++    return {};
++  }
++  Tagged<NativeContext> context = isolate->raw_native_context();
++  std::optional<ExternalArrayType> type;
++  size_t element_size = 0;
++#define TYPED_ARRAY_CASE(Type, type_name, TYPE, ctype) \
++  if (*constructor == context->type_name##_array_fun()) { \
++    type = kExternal##Type##Array;                       \
++    element_size = sizeof(ctype);                        \
++  }
++  TYPED_ARRAYS(TYPED_ARRAY_CASE)
++#undef TYPED_ARRAY_CASE
++  if (!type.has_value()) return {};
++  DirectHandle<Object> index;
++  if (!Object::ToIndex(isolate, length,
++                       MessageTemplate::kInvalidTypedArrayLength)
++           .ToHandle(&index)) {
++    return {};
++  }
++  double requested = Object::NumberValue(*index);
++  if (requested > static_cast<double>(JSTypedArray::kMaxByteLength /
++                                      element_size) ||
++      requested > Smi::kMaxValue) {
++    THROW_NEW_ERROR(isolate,
++                    NewRangeError(MessageTemplate::kInvalidTypedArrayLength,
++                                  length));
++  }
++  size_t count = static_cast<size_t>(requested);
++  size_t byte_length = count * element_size;
++  Factory* factory = isolate->factory();
++  DirectHandle<JSArrayBuffer> buffer;
++  ASSIGN_RETURN_ON_EXCEPTION(
++      isolate, buffer,
++      factory->NewJSArrayBufferAndBackingStore(byte_length,
++                                               InitializedFlag{true}));
++  // The bytes belong to the region from the start; the view is tracked like
++  // every view of a region typed array, and detached when this isolate
++  // gives up the region.
++  if (byte_length > 0) {
++    RegionBackingStores::Add(buffer->GetBackingStore(), region);
++    RegionRegistry::AddBytes(region, byte_length);
++  }
++  RegionViews::Track(isolate, region, buffer);
++  return factory->NewJSTypedArray(*type, buffer, 0, count);
++}
++
++// static
 +uint32_t JSRegionObject::LiteralCacheHash(
 +    const DirectHandleVector<String>& keys) {
 +  uint32_t hash = static_cast<uint32_t>(keys.size());
@@ -9363,10 +9489,10 @@ index 00000000..c87fad57
 +}  // namespace v8
 diff --git a/src/objects/js-region.h b/src/objects/js-region.h
 new file mode 100644
-index 00000000..832bd328
+index 00000000..cc7dc911
 --- /dev/null
 +++ b/src/objects/js-region.h
-@@ -0,0 +1,294 @@
+@@ -0,0 +1,304 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -9590,6 +9716,16 @@ index 00000000..832bd328
 +  static MaybeDirectHandle<JSRegionObject> NewLiteral(
 +      Isolate* isolate, DirectHandleVector<String>* keys,
 +      const DirectHandleVector<Object>& values);
++
++  // A typed array of `length` elements made by `constructor` (Float64Array
++  // and the like), whose bytes belong to `region` from the start: storing it
++  // in the region later copies nothing. Returns a view, as reading a typed
++  // array from a region does. Throws unless this isolate owns the region;
++  // returns an empty handle without an exception if `constructor` is not a
++  // typed array constructor.
++  static MaybeDirectHandle<JSTypedArray> NewTypedArray(
++      Isolate* isolate, int region, DirectHandle<Object> constructor,
++      DirectHandle<Object> length);
 +
 +  // A value of #{} or #[] as the object holds it: as it is, shared, copied
 +  // or rejected. Counts the bytes of a string copied into the region.
