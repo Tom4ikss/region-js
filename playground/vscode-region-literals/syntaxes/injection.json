@@ -1,0 +1,11 @@
+{
+  "scopeName": "region-literals.injection",
+  "injectionSelector": "L:source.js -comment -string",
+  "patterns": [
+    {
+      "comment": "The # of #{ and #[: a region literal, not a private name.",
+      "match": "#(?=[{\\[])",
+      "name": "keyword.operator.new.region.js"
+    }
+  ]
+}
