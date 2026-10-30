@@ -1985,10 +1985,10 @@ index 8aab5f56..b2e7c4d5 100644
        CheckValueInputIs(node, 1, Type::Any());
 diff --git a/src/d8/d8-channel.cc b/src/d8/d8-channel.cc
 new file mode 100644
-index 00000000..02bbde80
+index 00000000..228f1352
 --- /dev/null
 +++ b/src/d8/d8-channel.cc
-@@ -0,0 +1,1147 @@
+@@ -0,0 +1,1312 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -1999,6 +1999,7 @@ index 00000000..02bbde80
 +#include <atomic>
 +#include <cmath>
 +#include <deque>
++#include <string>
 +#include <unordered_map>
 +#include <unordered_set>
 +#include <vector>
@@ -2070,6 +2071,10 @@ index 00000000..02bbde80
 +  // Set together with the signal, for a waiter that spins before blocking.
 +  std::atomic<bool> ready{false};
 +  bool cancelled = false;
++  // The spawn() task that waits (-1 outside tasks), and whether the wait was
++  // cancelled because that task was aborted.
++  double task = -1;
++  bool aborted = false;
 +};
 +
 +// An RwLock: one region that threads take turns to write, or read together.
@@ -2172,6 +2177,20 @@ index 00000000..02bbde80
 +  return *isolates.get();
 +}
 +
++// Why a task was aborted: the error name and message its waits fail with.
++struct AbortReason {
++  std::string name;
++  std::string message;
++};
++// Aborted spawn() tasks of each isolate, until they end.
++std::unordered_map<Isolate*, std::unordered_map<double, AbortReason>>&
++AbortedTasks() {
++  static base::LeakyObject<
++      std::unordered_map<Isolate*, std::unordered_map<double, AbortReason>>>
++      tasks;
++  return *tasks.get();
++}
++
 +std::unordered_map<Isolate*, IsolateChannels>& AllData() {
 +  static base::LeakyObject<std::unordered_map<Isolate*, IsolateChannels>> all;
 +  return *all.get();
@@ -2197,6 +2216,42 @@ index 00000000..02bbde80
 +void ThrowTypeError(Isolate* isolate, const char* message) {
 +  isolate->ThrowException(Exception::TypeError(
 +      String::NewFromUtf8(isolate, message).ToLocalChecked()));
++}
++
++Local<Value> AbortError(Isolate* isolate, const AbortReason& reason) {
++  Local<Value> error = Exception::Error(
++      String::NewFromUtf8(isolate, reason.message.c_str()).ToLocalChecked());
++  USE(error.As<Object>()->Set(
++      isolate->GetCurrentContext(), String::NewFromUtf8Literal(isolate, "name"),
++      String::NewFromUtf8(isolate, reason.name.c_str()).ToLocalChecked()));
++  return error;
++}
++
++// The spawn() task the running code belongs to: pool workers set it as
++// continuation data, so it follows the task through its awaits.
++double CurrentTask(Isolate* isolate) {
++  Local<Data> data = isolate->GetContinuationPreservedEmbedderData();
++  if (data.IsEmpty() || !data->IsValue() || !data.As<Value>()->IsNumber()) {
++    return -1;
++  }
++  return data.As<Value>().As<Number>()->Value();
++}
++
++// Throws and returns true if the running task was aborted: it may not start
++// waiting again.
++bool ThrowIfAborted(Isolate* isolate, double task) {
++  if (task < 0) return false;
++  AbortReason reason;
++  {
++    base::MutexGuard guard(channels_mutex.Pointer());
++    auto it = AbortedTasks().find(isolate);
++    if (it == AbortedTasks().end()) return false;
++    auto entry = it->second.find(task);
++    if (entry == it->second.end()) return false;
++    reason = entry->second;
++  }
++  isolate->ThrowException(AbortError(isolate, reason));
++  return true;
 +}
 +
 +// Wakes the isolate of a completed asynchronous waiter: the promise is
@@ -2443,9 +2498,21 @@ index 00000000..02bbde80
 +          return;
 +        }
 +      });
-+  base::MutexGuard guard(channels_mutex.Pointer());
-+  BlockingWaiters().erase(waiter.get());
-+  return !waiter->cancelled;
++  AbortReason reason;
++  {
++    base::MutexGuard guard(channels_mutex.Pointer());
++    BlockingWaiters().erase(waiter.get());
++    if (!waiter->cancelled) return true;
++    if (!waiter->aborted) return false;
++    reason = AbortReason{"AbortError", "spawn() task was aborted"};
++    auto tasks = AbortedTasks().find(waiter->isolate);
++    if (tasks != AbortedTasks().end()) {
++      auto it = tasks->second.find(waiter->task);
++      if (it != tasks->second.end()) reason = it->second;
++    }
++  }
++  waiter->isolate->ThrowException(AbortError(waiter->isolate, reason));
++  return false;
 +}
 +
 +// Takes up a lock granted to this isolate: the writer claims the region, a
@@ -2653,6 +2720,8 @@ index 00000000..02bbde80
 +  std::shared_ptr<ChannelState> state = ThisState(info);
 +  if (!state) return;
 +  bool blocking = info[2]->IsTrue();
++  double task = CurrentTask(isolate);
++  if (ThrowIfAborted(isolate, task)) return;
 +  bool closed;
 +  {
 +    base::MutexGuard guard(channels_mutex.Pointer());
@@ -2687,6 +2756,7 @@ index 00000000..02bbde80
 +    } else {
 +      waiter = std::make_shared<ChannelWaiter>(ChannelWaiter::Kind::kSend,
 +                                               isolate, blocking, id);
++      waiter->task = task;
 +      state->items.push_back({std::move(data), false, waiter});
 +      waiter->channels.push_back(state);
 +    }
@@ -2715,6 +2785,8 @@ index 00000000..02bbde80
 +  Isolate* isolate = info.GetIsolate();
 +  Local<Context> context = isolate->GetCurrentContext();
 +  static thread_local uint32_t rotation = 0;
++  double task = CurrentTask(isolate);
++  if (ThrowIfAborted(isolate, task)) return;
 +  size_t count = states.size();
 +  size_t start = count > 1 ? rotation++ % count : 0;
 +
@@ -2739,6 +2811,7 @@ index 00000000..02bbde80
 +    if (index < 0) {
 +      waiter = std::make_shared<ChannelWaiter>(ChannelWaiter::Kind::kReceive,
 +                                               isolate, blocking, id);
++      waiter->task = task;
 +      for (size_t i = 0; i < count; i++) {
 +        states[i]->receivers.push_back({waiter, static_cast<int>(i)});
 +        waiter->channels.push_back(states[i]);
@@ -2928,6 +3001,8 @@ index 00000000..02bbde80
 +  bool write = info[0]->IsTrue();
 +  int mode = info[1]->Int32Value(isolate->GetCurrentContext()).FromMaybe(0);
 +  bool blocking = mode == 1;
++  double task = CurrentTask(isolate);
++  if (mode != 2 && ThrowIfAborted(isolate, task)) return;
 +  auto kind = write ? ChannelWaiter::Kind::kWrite : ChannelWaiter::Kind::kRead;
 +  LockData* lock = state->lock.get();
 +  bool granted = false;
@@ -2940,6 +3015,7 @@ index 00000000..02bbde80
 +      granted = true;
 +    } else if (mode != 2) {
 +      waiter = std::make_shared<ChannelWaiter>(kind, isolate, blocking, id);
++      waiter->task = task;
 +      waiter->channels.push_back(state);
 +      lock->queue.push_back(waiter);
 +    }
@@ -3089,6 +3165,94 @@ index 00000000..02bbde80
 +  }
 +}
 +
++namespace {
++
++// Fails the pending waits of an aborted task on its isolate's thread.
++class AbortWaitsTask : public Task {
++ public:
++  AbortWaitsTask(Isolate* isolate, double task) : isolate_(isolate), task_(task) {}
++
++  void Run() override {
++    IsolateChannels& data = DataOf(isolate_);
++    std::vector<PendingWait> failed;
++    AbortReason reason;
++    {
++      base::MutexGuard guard(channels_mutex.Pointer());
++      auto tasks = AbortedTasks().find(isolate_);
++      if (tasks == AbortedTasks().end()) return;
++      auto entry = tasks->second.find(task_);
++      if (entry == tasks->second.end()) return;  // The task ended meanwhile.
++      reason = entry->second;
++      for (auto it = data.pending.begin(); it != data.pending.end();) {
++        ChannelWaiter* waiter = it->second.waiter.get();
++        if (waiter->task != task_) {
++          ++it;
++          continue;
++        }
++        if (waiter->done) {
++          ReturnUndeliveredLocked(waiter);
++        } else {
++          CancelLocked(waiter);
++        }
++        failed.push_back(std::move(it->second));
++        it = data.pending.erase(it);
++      }
++    }
++    if (isolate_->IsExecutionTerminating()) return;
++    for (PendingWait& pending : failed) {
++      HandleScope scope(isolate_);
++      Local<Context> context = pending.context.Get(isolate_);
++      Context::Scope context_scope(context);
++      USE(pending.resolver.Get(isolate_)->Reject(context,
++                                                 AbortError(isolate_, reason)));
++      pending.resolver.Reset();
++      pending.context.Reset();
++    }
++  }
++
++ private:
++  Isolate* const isolate_;
++  const double task_;
++};
++
++}  // namespace
++
++// static
++void Channels::AbortTask(Isolate* isolate, double task, const char* name,
++                         const char* message) {
++  {
++    base::MutexGuard guard(channels_mutex.Pointer());
++    AbortedTasks()[isolate].insert_or_assign(task, AbortReason{name, message});
++    // A blocked thread cannot run the task below: its wait ends here.
++    for (ChannelWaiter* waiter : BlockingWaiters()) {
++      if (waiter->isolate != isolate || waiter->task != task ||
++          waiter->cancelled) {
++        continue;
++      }
++      if (waiter->done) {
++        ReturnUndeliveredLocked(waiter);
++      } else {
++        CancelLocked(waiter);
++      }
++      waiter->cancelled = true;
++      waiter->aborted = true;
++      waiter->ready.store(true, std::memory_order_release);
++      waiter->completed.Signal();
++    }
++  }
++  i::V8::GetCurrentPlatform()->GetForegroundTaskRunner(isolate)->PostTask(
++      std::make_unique<AbortWaitsTask>(isolate, task));
++}
++
++// static
++void Channels::TaskEnded(Isolate* isolate, double task) {
++  base::MutexGuard guard(channels_mutex.Pointer());
++  auto it = AbortedTasks().find(isolate);
++  if (it == AbortedTasks().end()) return;
++  it->second.erase(task);
++  if (it->second.empty()) AbortedTasks().erase(it);
++}
++
 +// static
 +bool Channels::HasPendingWaits(Isolate* isolate) {
 +  if (DataOf(isolate).pending.empty()) return false;
@@ -3103,6 +3267,7 @@ index 00000000..02bbde80
 +  {
 +    base::MutexGuard guard(channels_mutex.Pointer());
 +    TerminatingIsolates().erase(isolate);
++    AbortedTasks().erase(isolate);
 +    for (auto& [id, pending] : data.pending) {
 +      if (pending.waiter->done) {
 +        ReturnUndeliveredLocked(pending.waiter.get());
@@ -3138,10 +3303,10 @@ index 00000000..02bbde80
 +}  // namespace v8
 diff --git a/src/d8/d8-channel.h b/src/d8/d8-channel.h
 new file mode 100644
-index 00000000..970a5f96
+index 00000000..6fb41c56
 --- /dev/null
 +++ b/src/d8/d8-channel.h
-@@ -0,0 +1,46 @@
+@@ -0,0 +1,51 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -3181,6 +3346,11 @@ index 00000000..970a5f96
 +  // Called when an isolate is asked to terminate: its blocked channel
 +  // operations return, and values no longer go to it.
 +  static void TerminateIsolate(Isolate* isolate);
++  // A spawn() task of the isolate was aborted: its channel and lock waits
++  // fail with an error named `name`, now and until TaskEnded(). Any thread.
++  static void AbortTask(Isolate* isolate, double task, const char* name,
++                        const char* message);
++  static void TaskEnded(Isolate* isolate, double task);
 +  // Cancels the pending operations of an isolate that is being disposed.
 +  static void ForgetIsolate(Isolate* isolate);
 +};
@@ -3190,10 +3360,10 @@ index 00000000..970a5f96
 +#endif  // V8_D8_D8_CHANNEL_H_
 diff --git a/src/d8/d8-port.cc b/src/d8/d8-port.cc
 new file mode 100644
-index 00000000..bdfec316
+index 00000000..78bc2b42
 --- /dev/null
 +++ b/src/d8/d8-port.cc
-@@ -0,0 +1,883 @@
+@@ -0,0 +1,1034 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -3260,6 +3430,9 @@ index 00000000..bdfec316
 +  int expected_servers = 0;
 +  // Task code by key: sent once, taken by servers that have not seen it.
 +  std::unordered_map<int, std::u16string> codes;
++  // Running tasks the client aborted, with the error name and message their
++  // result is replaced with.
++  std::unordered_map<double, std::pair<std::string, std::string>> aborted;
 +  std::deque<std::unique_ptr<PortMessage>> outbox;
 +  Isolate* client = nullptr;
 +  std::shared_ptr<TaskRunner> client_runner;
@@ -3587,6 +3760,31 @@ index 00000000..bdfec316
 +  return reply;
 +}
 +
++// The reply for a task aborted before a server took it: [id, undefined,
++// name, message], with the regions it moved, which go back to the client.
++std::unique_ptr<PortMessage> AbortReply(std::unique_ptr<PortMessage> task,
++                                        double id, const std::string& name,
++                                        const std::string& message) {
++  using Kind = PortMessage::Kind;
++  task->slots.clear();
++  task->strings.clear();
++  task->channels.clear();
++  task->slots.push_back({Kind::kNumber, id, 0});
++  task->slots.push_back({Kind::kUndefined, 0, 0});
++  task->slots.push_back({Kind::kString, 0, 0});
++  task->strings.emplace_back(name.begin(), name.end());
++  task->slots.push_back({Kind::kString, 0, 1});
++  task->strings.emplace_back(message.begin(), message.end());
++  return task;
++}
++
++class DrainTask;
++
++// Aborts task `id`: a task still in the inbox is answered at once; a running
++// one has its channel and lock waits fail, and its result is replaced.
++void AbortPortTask(const std::shared_ptr<PortState>& state, double id,
++                   const std::string& name, const std::string& message);
++
 +class DrainTask : public Task {
 + public:
 +  DrainTask(Isolate* isolate, std::shared_ptr<PortState> state, bool server)
@@ -3780,6 +3978,8 @@ index 00000000..bdfec316
 +    if (PortServer* server = state->ServerOf(isolate)) {
 +      if (std::optional<double> id = TaskIdOf(message.get())) {
 +        server->in_flight.erase(*id);
++        state->aborted.erase(*id);
++        Channels::TaskEnded(isolate, *id);
 +      }
 +    }
 +    state->outbox.push_back(std::move(message));
@@ -3861,6 +4061,125 @@ index 00000000..bdfec316
 +  info.GetReturnValue().Set(state->server_gone.load(std::memory_order_acquire));
 +}
 +
++void AbortPortTask(const std::shared_ptr<PortState>& state, double id,
++                   const std::string& name, const std::string& message) {
++  Isolate* server = nullptr;
++  std::shared_ptr<TaskRunner> runner;
++  Isolate* client = nullptr;
++  bool answered = false;
++  {
++    base::MutexGuard guard(&state->mutex);
++    auto queued = std::find_if(
++        state->inbox.begin(), state->inbox.end(),
++        [&](const std::unique_ptr<PortMessage>& message) {
++          return TaskIdOf(message.get()) == id;
++        });
++    if (queued != state->inbox.end()) {
++      std::unique_ptr<PortMessage> task = std::move(*queued);
++      state->inbox.erase(queued);
++      if (state->client_runner) {
++        state->outbox.push_back(AbortReply(std::move(task), id, name, message));
++        state->outbox_size.fetch_add(1, std::memory_order_release);
++        answered = true;
++        if (state->listening && !state->client_drain_scheduled) {
++          state->client_drain_scheduled = true;
++          runner = state->client_runner;
++          client = state->client;
++        }
++      }
++    } else {
++      for (PortServer& candidate : state->servers) {
++        if (candidate.in_flight.contains(id)) {
++          state->aborted.insert_or_assign(id, std::pair{name, message});
++          server = candidate.isolate;
++          break;
++        }
++      }
++    }
++  }
++  if (answered) state->reply_signal.Signal();
++  if (runner) {
++    runner->PostTask(std::make_unique<DrainTask>(client, state, false));
++  }
++  if (server) {
++    Channels::AbortTask(server, id, name.c_str(), message.c_str());
++  }
++}
++
++class AbortAfterTask : public Task {
++ public:
++  AbortAfterTask(std::weak_ptr<PortState> state, double id, std::string name,
++                 std::string message)
++      : state_(std::move(state)),
++        id_(id),
++        name_(std::move(name)),
++        message_(std::move(message)) {}
++  void Run() override {
++    if (std::shared_ptr<PortState> state = state_.lock()) {
++      AbortPortTask(state, id_, name_, message_);
++    }
++  }
++
++ private:
++  const std::weak_ptr<PortState> state_;
++  const double id_;
++  const std::string name_;
++  const std::string message_;
++};
++
++std::string StringArgument(Isolate* isolate, Local<Value> value) {
++  String::Utf8Value utf8(isolate, value);
++  return *utf8 ? std::string(*utf8, utf8.length()) : std::string();
++}
++
++// port.abort(id, name, message[, delayMs]): client side. With a delay the
++// abort happens later, on a platform thread, if the task has not replied.
++void PortAbort(const FunctionCallbackInfo<Value>& info) {
++  Isolate* isolate = info.GetIsolate();
++  std::shared_ptr<PortState> state = ThisState(info);
++  if (!state) return;
++  Local<Context> context = isolate->GetCurrentContext();
++  double id;
++  if (!info[0]->NumberValue(context).To(&id)) return;
++  std::string name = StringArgument(isolate, info[1]);
++  std::string message = StringArgument(isolate, info[2]);
++  if (info[3]->IsNumber()) {
++    double delay = std::max(0.0, info[3].As<Number>()->Value()) / 1000;
++    i::V8::GetCurrentPlatform()->PostDelayedTaskOnWorkerThread(
++        TaskPriority::kUserBlocking,
++        std::make_unique<AbortAfterTask>(state, id, std::move(name),
++                                         std::move(message)),
++        delay);
++    return;
++  }
++  AbortPortTask(state, id, name, message);
++}
++
++// port.aborted(id): server side. The error name the task was aborted with,
++// or undefined.
++void PortAborted(const FunctionCallbackInfo<Value>& info) {
++  Isolate* isolate = info.GetIsolate();
++  std::shared_ptr<PortState> state = ThisState(info);
++  if (!state || !info[0]->IsNumber()) return;
++  double id = info[0].As<Number>()->Value();
++  std::string name;
++  std::string message;
++  {
++    base::MutexGuard guard(&state->mutex);
++    auto it = state->aborted.find(id);
++    if (it == state->aborted.end()) return;
++    name = it->second.first;
++    message = it->second.second;
++  }
++  Local<Array> reason = Array::New(isolate, 2);
++  Local<Context> context = isolate->GetCurrentContext();
++  USE(reason->Set(context, 0,
++                  String::NewFromUtf8(isolate, name.c_str()).ToLocalChecked()));
++  USE(reason->Set(
++      context, 1, String::NewFromUtf8(isolate, message.c_str()).ToLocalChecked()));
++  info.GetReturnValue().Set(reason);
++}
++
 +// port.code(key, source) stores the code of tasks with `key`; port.code(key)
 +// returns it, or undefined. A task carries only its key, so whichever server
 +// takes it can compile it.
@@ -3939,7 +4258,8 @@ index 00000000..bdfec316
 +       {std::pair{"serve", PortServe}, std::pair{"send", PortSend},
 +        std::pair{"reply", PortReply}, std::pair{"take", PortTake},
 +        std::pair{"listen", PortListen}, std::pair{"code", PortCode},
-+        std::pair{"expect", PortExpect}, std::pair{"gone", PortGone}}) {
++        std::pair{"expect", PortExpect}, std::pair{"gone", PortGone},
++        std::pair{"abort", PortAbort}, std::pair{"aborted", PortAborted}}) {
 +    ctor->PrototypeTemplate()->Set(
 +        String::NewFromUtf8(isolate, name).ToLocalChecked(),
 +        FunctionTemplate::New(isolate, callback, Local<Value>(), signature, 0,
@@ -4028,6 +4348,7 @@ index 00000000..bdfec316
 +      if (it != state->servers.end()) {
 +        if (state->client_runner) {
 +          for (double id : it->in_flight) {
++            state->aborted.erase(id);
 +            state->outbox.push_back(GoneReply(id));
 +            state->outbox_size.fetch_add(1, std::memory_order_release);
 +            replies++;
@@ -4174,7 +4495,7 @@ index 00000000..bd767012
 +
 +#endif  // V8_D8_D8_PORT_H_
 diff --git a/src/d8/d8.cc b/src/d8/d8.cc
-index 49121fe1..86f83244 100644
+index 49121fe1..70e573b5 100644
 --- a/src/d8/d8.cc
 +++ b/src/d8/d8.cc
 @@ -14,6 +14,7 @@
@@ -4370,7 +4691,7 @@ index 49121fe1..86f83244 100644
  
    // Prevent fuzzers from creating side effects.
    if (!i::v8_flags.fuzzing) {
-@@ -4899,6 +5000,1051 @@ Local<FunctionTemplate> Shell::CreateWorkerTemplate(Isolate* isolate) {
+@@ -4899,6 +5000,1070 @@ Local<FunctionTemplate> Shell::CreateWorkerTemplate(Isolate* isolate) {
    return worker_fun_template;
  }
  
@@ -4397,6 +4718,8 @@ index 49121fe1..86f83244 100644
 +                       FunctionTemplate::New(isolate, RegionIsRegionObject));
 +  region_template->Set(isolate, "__info",
 +                       FunctionTemplate::New(isolate, RegionInfo));
++  region_template->Set(isolate, "__task",
++                       FunctionTemplate::New(isolate, RegionTask));
 +  region_template->Set(isolate, "object",
 +                       FunctionTemplate::New(isolate, RegionCurrentObject));
 +  region_template->Set(isolate, "array",
@@ -4571,6 +4894,23 @@ index 49121fe1..86f83244 100644
 +// frozen, 2 if it is frozen and this isolate may thaw it, and 3 if this isolate
 +// cannot access it. Used by the spawn() and channel code on every value, so it
 +// creates no handles.
++// Region.__task(): the spawn() task the running code belongs to, or
++// undefined; Region.__task(id) sets it. Kept as continuation data, it follows
++// the task through its awaits.
++void Shell::RegionTask(const v8::FunctionCallbackInfo<v8::Value>& info) {
++  DCHECK(i::ValidateCallbackInfo(info));
++  Isolate* isolate = info.GetIsolate();
++  if (info.Length() > 0) {
++    isolate->SetContinuationPreservedEmbedderData(
++        info[0]->IsNumber() ? info[0] : Undefined(isolate).As<Value>());
++    return;
++  }
++  Local<Data> data = isolate->GetContinuationPreservedEmbedderData();
++  if (!data.IsEmpty() && data->IsValue() && data.As<Value>()->IsNumber()) {
++    info.GetReturnValue().Set(data.As<Value>());
++  }
++}
++
 +void Shell::RegionInfo(const v8::FunctionCallbackInfo<v8::Value>& info) {
 +  DCHECK(i::ValidateCallbackInfo(info));
 +  if (info.Length() < 1) {
@@ -5422,7 +5762,7 @@ index 49121fe1..86f83244 100644
  Local<ObjectTemplate> Shell::CreateAsyncHookTemplate(Isolate* isolate) {
    Local<ObjectTemplate> async_hooks_templ = ObjectTemplate::New(isolate);
    async_hooks_templ->Set(isolate, "createHook",
-@@ -5376,9 +6522,649 @@ MaybeLocal<Context> Shell::CreateEvaluationContext(Isolate* isolate) {
+@@ -5376,9 +6541,755 @@ MaybeLocal<Context> Shell::CreateEvaluationContext(Isolate* isolate) {
    }
  #endif  // V8_ENABLE_HARDWARE_WATCHPOINT_SUPPORT
  
@@ -5540,6 +5880,11 @@ index 49121fe1..86f83244 100644
 +};
 +
 +const __reply = (id, regions, value) => {
++  const aborted = __port.aborted(id);
++  if (aborted) {
++    __fail(id, regions, { name: aborted[0], message: aborted[1] });
++    return;
++  }
 +  __endTask(id, regions);
 +  try {
 +    if (value === null ||
@@ -5563,7 +5908,16 @@ index 49121fe1..86f83244 100644
 +
 +const __fail = (id, regions, e, end = true) => {
 +  if (end) __endTask(id, regions);
++  const aborted = __port.aborted(id);
++  if (aborted) e = { name: aborted[0], message: aborted[1] };
 +  __port.reply(__failure(id, e), __returning(regions, null));
++};
++
++// Whether the running task was aborted, for code that does not wait on
++// channels or locks, whose waits fail by themselves.
++spawn.aborted = () => {
++  const id = Region.__task();
++  return id !== undefined && __port.aborted(id) !== undefined;
 +};
 +
 +// Tasks come through a task port, handed over by the first message; the
@@ -5575,7 +5929,18 @@ index 49121fe1..86f83244 100644
 +  __port.serve(__onTask);
 +};
 +
++// The task id is kept as continuation data while the task runs, so that its
++// channel and lock waits, also after awaits, can be failed if it is aborted.
 +function __onTask(data) {
++  Region.__task(data[0]);
++  try {
++    __runTask(data);
++  } finally {
++    Region.__task(undefined);
++  }
++}
++
++function __runTask(data) {
 +  const id = data[0];
 +  const input = data[4];
 +  const count = data.length - ${kSlots};
@@ -5643,6 +6008,8 @@ index 49121fe1..86f83244 100644
 +      const isError = typeof ErrorType === 'function' &&
 +          (ErrorType === Error || ErrorType.prototype instanceof Error);
 +      task.error = isError ? new ErrorType(reply[3]) : new Error(reply[3]);
++      // AbortError, TimeoutError and classes the caller does not have.
++      if (!isError && reply[2]) task.error.name = reply[2];
 +    }
 +    if (task.resolve) {
 +      if (task.ok) task.resolve(task.value);
@@ -5710,7 +6077,7 @@ index 49121fe1..86f83244 100644
 +      inFlight++;
 +      if (this.pending++ === 0) this.port.listen(this.#deliver);
 +      const task = {
-+        settled: false, ok: false, joined: false, value: undefined,
++        id, settled: false, ok: false, joined: false, value: undefined,
 +        error: undefined, outcome: null, resolve: null, reject: null,
 +      };
 +      this.#tasks.set(id, task);
@@ -5723,6 +6090,13 @@ index 49121fe1..86f83244 100644
 +      const task = this.#tasks.get(reply[0]);
 +      this.#tasks.delete(reply[0]);
 +      settle(task, reply);
++    }
++
++    // A task still queued is answered at once; a running one has its
++    // channel and lock waits fail, and its result is replaced. With `delay`
++    // (ms) this happens later, unless the task has finished by then.
++    abort(task, name, message, delay) {
++      if (!task.settled) this.port.abort(task.id, name, message, delay);
 +    }
 +
 +    // Every worker is gone: none of the tasks will reply.
@@ -5784,7 +6158,77 @@ index 49121fe1..86f83244 100644
 +    then(onFulfilled, onRejected) {
 +      return outcomeOf(this.#task).then(onFulfilled, onRejected);
 +    }
++    // The task fails with an AbortError. One that has not started never
++    // runs; a running one has its channel and lock waits fail, and code that
++    // waits on nothing can check spawn.aborted().
++    abort() {
++      this.#pool.abort(this.#task, 'AbortError', 'spawn() task was aborted');
++    }
++    // Aborts the task with a TimeoutError if it has not finished in `ms`.
++    timeout(ms) {
++      const delay = Number(ms);
++      if (!(delay >= 0)) throw new RangeError('timeout() expects milliseconds');
++      this.#pool.abort(this.#task, 'TimeoutError',
++                       'spawn() task did not finish in ' + delay + ' ms', delay);
++      return this;
++    }
 +  }
++
++  // Tasks whose results are taken as they finish, like JoinSet in tokio.
++  // Leaving a `using` block aborts the tasks still running.
++  class JoinSet {
++    #running = new Set();
++    #finished = [];
++    #waiters = [];
++    spawn(callback, ...args) {
++      return this.add(spawn(callback, ...args));
++    }
++    add(handle) {
++      this.#running.add(handle);
++      handle.then((value) => this.#done(handle, { status: 'fulfilled', value }),
++                  (reason) => this.#done(handle, { status: 'rejected', reason }));
++      return handle;
++    }
++    #done(handle, result) {
++      if (!this.#running.delete(handle)) return;
++      const waiter = this.#waiters.shift();
++      if (waiter) {
++        waiter(result);
++      } else {
++        this.#finished.push(result);
++      }
++      if (this.#running.size === 0) {
++        for (const resolve of this.#waiters.splice(0)) resolve(undefined);
++      }
++    }
++    // Tasks not taken yet by next().
++    get size() {
++      return this.#running.size + this.#finished.length;
++    }
++    // The next finished task as { status, value } or { status, reason }, like
++    // Promise.allSettled(); undefined once the set is empty.
++    next() {
++      if (this.#finished.length > 0) {
++        return Promise.resolve(this.#finished.shift());
++      }
++      if (this.#running.size === 0) return Promise.resolve(undefined);
++      return new Promise((resolve) => this.#waiters.push(resolve));
++    }
++    abortAll() {
++      for (const handle of this.#running) handle.abort();
++    }
++    async *[Symbol.asyncIterator]() {
++      for (;;) {
++        const result = await this.next();
++        if (result === undefined) return;
++        yield result;
++      }
++    }
++    [Symbol.dispose]() {
++      this.abortAll();
++    }
++  }
++  globalThis.JoinSet = JoinSet;
 +
 +  // Channels and locks are shared by reference.
 +  const isChannel = (value) =>
@@ -5904,6 +6348,8 @@ index 49121fe1..86f83244 100644
 +  spawn.poolSize = 4;
 +  // Tasks spawned by this thread that have not finished yet.
 +  spawn.pending = () => inFlight;
++  // Outside a task nothing is aborted; pool workers replace this.
++  spawn.aborted = () => false;
 +
 +  // Keeps the region borrowed until fn returns or, if it returns a promise,
 +  // until that promise settles.
@@ -6072,7 +6518,7 @@ index 49121fe1..86f83244 100644
  namespace {
  int LineFromOffset(Local<debug::Script> script, int offset) {
    debug::Location location = script->GetSourceLocation(offset);
-@@ -6538,6 +8324,7 @@ void SourceGroup::JoinThread(const i::ParkedScope& parked) {
+@@ -6538,6 +8449,7 @@ void SourceGroup::JoinThread(const i::ParkedScope& parked) {
  void SerializationDataQueue::Enqueue(std::unique_ptr<SerializationData> data) {
    base::MutexGuard lock_guard(&mutex_);
    data_.push_back(std::move(data));
@@ -6080,7 +6526,7 @@ index 49121fe1..86f83244 100644
  }
  
  bool SerializationDataQueue::Dequeue(
-@@ -6547,6 +8334,7 @@ bool SerializationDataQueue::Dequeue(
+@@ -6547,6 +8459,7 @@ bool SerializationDataQueue::Dequeue(
    if (data_.empty()) return false;
    *out_data = std::move(data_[0]);
    data_.erase(data_.begin());
@@ -6088,7 +6534,7 @@ index 49121fe1..86f83244 100644
    return true;
  }
  
-@@ -6558,6 +8346,7 @@ bool SerializationDataQueue::IsEmpty() {
+@@ -6558,6 +8471,7 @@ bool SerializationDataQueue::IsEmpty() {
  void SerializationDataQueue::Clear() {
    base::MutexGuard lock_guard(&mutex_);
    data_.clear();
@@ -6096,7 +6542,7 @@ index 49121fe1..86f83244 100644
  }
  
  Worker::Worker(Isolate* parent_isolate, const char* script)
-@@ -6668,6 +8457,12 @@ std::unique_ptr<SerializationData> Worker::GetMessage(Isolate* requester) {
+@@ -6668,6 +8582,12 @@ std::unique_ptr<SerializationData> Worker::GetMessage(Isolate* requester) {
        out_queue_.Dequeue(&result);
        break;
      }
@@ -6109,7 +6555,7 @@ index 49121fe1..86f83244 100644
      out_semaphore_.ParkedWait(
          reinterpret_cast<i::Isolate*>(requester)->main_thread_local_isolate());
    }
-@@ -6705,6 +8500,8 @@ void Worker::Terminate() {
+@@ -6705,6 +8625,8 @@ void Worker::Terminate() {
    // returning to the event queue. Since we checked the state before, and we are
    // holding the {worker_mutex_}, it's safe to access the isolate.
    isolate_->TerminateExecution();
@@ -6118,7 +6564,7 @@ index 49121fe1..86f83244 100644
  }
  
  void Worker::EnterTerminatedState() {
-@@ -7310,6 +9107,9 @@ bool Shell::SetOptions(int argc, char* argv[]) {
+@@ -7310,6 +9232,9 @@ bool Shell::SetOptions(int argc, char* argv[]) {
                                    argv, &i)) {
        // Value is expressed in MB.
        options.max_serializer_memory = atoi(flag_value) * i::MB;
@@ -6128,7 +6574,7 @@ index 49121fe1..86f83244 100644
      } else if (FlagMatches("--bundle", &argv[i])) {
        options.bundle = true;
  #ifdef V8_FUZZILLI
-@@ -7921,6 +9721,27 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7921,6 +9846,27 @@ class Serializer : public ValueSerializer::Delegate {
      return true;
    }
  
@@ -6156,7 +6602,7 @@ index 49121fe1..86f83244 100644
   private:
    Maybe<bool> PrepareTransfer(Local<Context> context, Local<Value> transfer) {
      if (transfer->IsArray()) {
-@@ -7929,6 +9750,22 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7929,6 +9875,22 @@ class Serializer : public ValueSerializer::Delegate {
        for (uint32_t i = 0; i < length; ++i) {
          Local<Value> element;
          if (transfer_array->Get(context, i).ToLocal(&element)) {
@@ -6179,7 +6625,7 @@ index 49121fe1..86f83244 100644
            if (!element->IsArrayBuffer()) {
              ThrowError(isolate_,
                         "Transfer array elements must be an ArrayBuffer");
-@@ -7961,7 +9798,52 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7961,7 +9923,52 @@ class Serializer : public ValueSerializer::Delegate {
      }
    }
  
@@ -6232,7 +6678,7 @@ index 49121fe1..86f83244 100644
      for (const auto& global_array_buffer : array_buffers_) {
        Local<ArrayBuffer> array_buffer =
            Local<ArrayBuffer>::New(isolate_, global_array_buffer);
-@@ -7987,6 +9869,7 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7987,6 +9994,7 @@ class Serializer : public ValueSerializer::Delegate {
    ValueSerializer serializer_;
    std::unique_ptr<SerializationData> data_;
    std::vector<Global<ArrayBuffer>> array_buffers_;
@@ -6240,7 +6686,7 @@ index 49121fe1..86f83244 100644
    std::vector<Global<SharedArrayBuffer>> shared_array_buffers_;
    std::vector<Global<WasmModuleObject>> wasm_modules_;
    std::vector<std::shared_ptr<v8::BackingStore>> backing_stores_;
-@@ -8013,6 +9896,21 @@ class Deserializer : public ValueDeserializer::Delegate {
+@@ -8013,6 +10021,21 @@ class Deserializer : public ValueDeserializer::Delegate {
        return MaybeLocal<Value>();
      }
  
@@ -6262,7 +6708,7 @@ index 49121fe1..86f83244 100644
      uint32_t index = 0;
      for (const auto& backing_store : data_->backing_stores()) {
        Local<ArrayBuffer> array_buffer =
-@@ -8049,6 +9947,21 @@ class Deserializer : public ValueDeserializer::Delegate {
+@@ -8049,6 +10072,21 @@ class Deserializer : public ValueDeserializer::Delegate {
      return nullptr;
    }
  
@@ -6284,7 +6730,7 @@ index 49121fe1..86f83244 100644
   private:
    Isolate* isolate_;
    ValueDeserializer deserializer_;
-@@ -8309,6 +10222,8 @@ int Shell::Main(int argc, char* argv[]) {
+@@ -8309,6 +10347,8 @@ int Shell::Main(int argc, char* argv[]) {
    // The platform is owned by wrapper platform despite the `std::move` below.
    START_IGNORE_LIFETIME_SAFETY_WARNINGS()
    g_default_platform = g_platform.get();
@@ -6294,7 +6740,7 @@ index 49121fe1..86f83244 100644
    if (i::v8_flags.predictable) {
      g_platform = MakePredictablePlatform(std::move(g_platform));
 diff --git a/src/d8/d8.h b/src/d8/d8.h
-index 0c7ad50a..746d4304 100644
+index 0c7ad50a..0c8b064d 100644
 --- a/src/d8/d8.h
 +++ b/src/d8/d8.h
 @@ -8,6 +8,7 @@
@@ -6466,7 +6912,7 @@ index 0c7ad50a..746d4304 100644
    static std::unique_ptr<SerializationData> SerializeValue(
        Isolate* isolate, Local<Value> value, Local<Value> transfer);
    static MaybeLocal<Value> DeserializeValue(
-@@ -1007,6 +1097,45 @@ class Shell : public i::AllStatic {
+@@ -1007,6 +1097,46 @@ class Shell : public i::AllStatic {
    static Local<ObjectTemplate> GetOrCreateGlobalTemplate(Isolate* isolate);
    static Local<ObjectTemplate> CreateOSTemplate(Isolate* isolate);
    static Local<FunctionTemplate> CreateWorkerTemplate(Isolate* isolate);
@@ -6486,6 +6932,7 @@ index 0c7ad50a..746d4304 100644
 +  static void RegionIsRegionObject(
 +      const v8::FunctionCallbackInfo<v8::Value>& info);
 +  static void RegionInfo(const v8::FunctionCallbackInfo<v8::Value>& info);
++  static void RegionTask(const v8::FunctionCallbackInfo<v8::Value>& info);
 +  static void RegionEnter(const v8::FunctionCallbackInfo<v8::Value>& info);
 +  static void RegionScopeExit(const v8::FunctionCallbackInfo<v8::Value>& info);
 +  static void RegionNewObject(const v8::FunctionCallbackInfo<v8::Value>& info);

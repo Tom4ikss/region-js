@@ -1,3 +1,8 @@
 всего: 400 | писали задачи 1, 2, 3, 4
 запись под read(): OwnershipError: region 0 is locked for reading; use lock.write() to change it
 после отпуска: OwnershipError: region 0 is in an RwLock; use it through lock.read() or lock.write()
+unnamed:129: ReferenceError: spawn is not defined
+spawn.aborted = () => {
+^
+ReferenceError: spawn is not defined
+    at unnamed:129:1

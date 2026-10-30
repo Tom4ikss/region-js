@@ -1,4 +1,4 @@
 узлов в дереве: 131071
-копия (structured clone): 121.44 ms
-переезд региона:          0.08 ms
+копия (structured clone): 123.26 ms
+переезд региона:          0.07 ms
 главный поток после переезда: OwnershipError: region 0 is owned by isolate 1, not by isolate 0

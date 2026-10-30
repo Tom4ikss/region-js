@@ -142,6 +142,29 @@ interface SpawnHandle<T> extends PromiseLike<T> {
   /** Blocks the calling thread until the task finishes. Prefer `await` on the
    * main thread. */
   join(): T;
+  /** The task fails with an `AbortError`. A task that has not started never
+   * runs; a running one has its channel and lock waits fail, and code that
+   * waits on nothing can check `spawn.aborted()`. No effect once finished. */
+  abort(): void;
+  /** Aborts the task with a `TimeoutError` if it has not finished in `ms`. */
+  timeout(ms: number): this;
+}
+
+/** Tasks whose results are taken as they finish, like `JoinSet` in tokio.
+ * Leaving a `using` block aborts the tasks still running. */
+declare class JoinSet<T = unknown> implements AsyncIterable<PromiseSettledResult<T>>, Disposable {
+  spawn<Args extends (RegionData | Channel | RwLock)[], Result extends T & (RegionData | void)>(
+    callback: (...args: Args) => Result | PromiseLike<Result>,
+    ...args: Args
+  ): SpawnHandle<Result>;
+  add(handle: SpawnHandle<T>): SpawnHandle<T>;
+  /** Tasks not taken yet by `next()`. */
+  readonly size: number;
+  /** The next finished task, or undefined once the set is empty. */
+  next(): Promise<PromiseSettledResult<T> | undefined>;
+  abortAll(): void;
+  [Symbol.asyncIterator](): AsyncIterator<PromiseSettledResult<T>>;
+  [Symbol.dispose](): void;
 }
 
 /**
@@ -160,6 +183,8 @@ declare namespace spawn {
   let poolSize: number;
   /** Resolves once every task spawned by this thread has finished. */
   function idle(): Promise<void>;
+  /** Whether the running task was aborted; false outside tasks. */
+  function aborted(): boolean;
 }
 
 /** What a receive gives: the value, or `done: true` once the channel is

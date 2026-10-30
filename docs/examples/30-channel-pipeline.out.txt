@@ -1,2 +1,7 @@
 суммы: 3 6 9 12 15 18 21 24 27 30 33 36
 всего посчитано: 12
+unnamed:129: ReferenceError: spawn is not defined
+spawn.aborted = () => {
+^
+ReferenceError: spawn is not defined
+    at unnamed:129:1

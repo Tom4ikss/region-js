@@ -1,3 +1,8 @@
 frozen: true | frozenHere: true
 длины из трёх задач: 5, 5, 5
 после thaw главный поток пишет: false
+unnamed:129: ReferenceError: spawn is not defined
+spawn.aborted = () => {
+^
+ReferenceError: spawn is not defined
+    at unnamed:129:1

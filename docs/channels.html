@@ -133,7 +133,12 @@ for await: {"text":"второе"}
 <span class="tok-keyword">const</span> counts = <span class="tok-keyword">await</span> Promise.<span class="tok-fn">all</span>(pricers);
 <span class="tok-fn">print</span>(<span class="tok-string">'суммы:'</span>, totals.<span class="tok-api">join</span>(<span class="tok-string">' '</span>));
 <span class="tok-fn">print</span>(<span class="tok-string">'всего посчитано:'</span>, counts.<span class="tok-fn">reduce</span>((a, b) =&gt; a + b, <span class="tok-number">0</span>));</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8 --module</span></div><pre class="out">суммы: 3 6 9 12 15 18 21 24 27 30 33 36
-всего посчитано: 12</pre></figure>
+всего посчитано: 12
+<span class="err">unnamed:129: ReferenceError: spawn is not defined</span>
+spawn.aborted = () =&gt; {
+^
+<span class="err">ReferenceError: spawn is not defined</span>
+    at unnamed:129:1</pre></figure>
 
 <p>Сколько заказов достанется каждой задаче, заранее неизвестно: кто первым освободился, тот и взял. Если нужен порядок, несите его в данных, как здесь <code>id</code>.</p>
 
@@ -219,7 +224,12 @@ worker.<span class="tok-api">terminate</span>();</code></pre><div class="out-hea
   <span class="tok-fn">print</span>(<span class="tok-string">'после отпуска:'</span>, e.message);
 }</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8 --module</span></div><pre class="out">всего: 400 | писали задачи 1, 2, 3, 4
 <span class="err">запись под read(): OwnershipError: region 0 is locked for reading; use lock.write() to change it</span>
-<span class="err">после отпуска: OwnershipError: region 0 is in an RwLock; use it through lock.read() or lock.write()</span></pre></figure>
+<span class="err">после отпуска: OwnershipError: region 0 is in an RwLock; use it through lock.read() or lock.write()</span>
+<span class="err">unnamed:129: ReferenceError: spawn is not defined</span>
+spawn.aborted = () =&gt; {
+^
+<span class="err">ReferenceError: spawn is not defined</span>
+    at unnamed:129:1</pre></figure>
 
 <p>Данные охраняет то же владение, что и всё остальное. Пока лок никто не держит, его регион не принадлежит никому. Поэтому ссылка, сохранённая из guard после отпуска, не работает: обращение к ней — ошибка, а не гонка данных, которую в Go ищет race detector. По той же причине регион лока нельзя освободить, заморозить, отправить в канал или через <code>postMessage</code> и взять на него <code>borrow()</code>: всё это обходило бы лок.</p>
 <p>Ждущие получают лок в порядке прихода. Читатель, пришедший после ждущего писателя, ждёт его, так что писатели не голодают. Поэтому взять <code>write()</code>, держа <code>read()</code> того же лока, нельзя: писатель ждёт, пока отпустят всех читателей, в том числе этот же поток.</p>
@@ -274,7 +284,7 @@ ping.<span class="tok-api">close</span>();
 worker.<span class="tok-api">terminate</span>();
 <span class="tok-fn">print</span>(<span class="tok-string">'канал, круг:'</span>, perTrip.<span class="tok-fn">toFixed</span>(<span class="tok-number">1</span>), <span class="tok-string">'µs'</span>);
 <span class="tok-fn">print</span>(<span class="tok-string">'postMessage + getMessage, круг:'</span>, perMessage.<span class="tok-fn">toFixed</span>(<span class="tok-number">1</span>), <span class="tok-string">'µs'</span>);</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8 --module; время у вас будет другим</span></div><pre class="out">канал, круг: 4.9 µs
-postMessage + getMessage, круг: 3.1 µs</pre></figure>
+postMessage + getMessage, круг: 2.9 µs</pre></figure>
 
 <p>Это единицы микросекунд, а у горутин в Go — доли микросекунды. Если гонять через канал по одному числу, больше 200 000 значений в секунду не выйдет, и в горячем цикле пересылка легко займёт больше времени, чем сама работа. Каналы подходят, чтобы передавать порции работы: заказ, кусок файла, пачку строк. Объединяйте мелкие значения в пачки, как и для <code>spawn</code> (<a href="practices.html#batch">подробнее</a>).</p>
 <nav class="pager" aria-label="Соседние страницы"><a class="prev" href="spawn.html"><span>← Назад</span>spawn: задачи в потоках</a><a class="next" href="practices.html"><span>Дальше →</span>Как делать и как не делать</a></nav>

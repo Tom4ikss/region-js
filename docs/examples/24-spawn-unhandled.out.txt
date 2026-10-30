@@ -1,10 +1,10 @@
 главный поток закончил
-undefined:210: RangeError: индекс за пределами
+undefined:235: RangeError: индекс за пределами
       task.error = isError ? new ErrorType(reply[3]) : new Error(reply[3]);
                              ^
 RangeError: индекс за пределами
-    at settle (<anonymous>:210:30)
-    at Pool.deliver (<anonymous>:290:7)
-    at #deliver (<anonymous>:251:17)
+    at settle (<anonymous>:235:30)
+    at Pool.deliver (<anonymous>:317:7)
+    at #deliver (<anonymous>:278:17)
 
 1 pending unhandled Promise rejection(s) detected.
