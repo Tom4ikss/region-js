@@ -861,7 +861,7 @@ index 8dae69c0..c17febaa 100644
    // the special Oddball ones that have no wrapper counterparts (i.e. Null,
    // Undefined and TheHole).
 diff --git a/src/compiler/js-native-context-specialization.cc b/src/compiler/js-native-context-specialization.cc
-index d97b04e4..7b74d47b 100644
+index d97b04e4..35b3f408 100644
 --- a/src/compiler/js-native-context-specialization.cc
 +++ b/src/compiler/js-native-context-specialization.cc
 @@ -38,7 +38,6 @@
@@ -880,18 +880,14 @@ index d97b04e4..7b74d47b 100644
        zone_(zone),
        shared_zone_(shared_zone),
        type_cache_(TypeCache::Get()),
-@@ -1373,6 +1373,170 @@ Reduction JSNativeContextSpecialization::ReduceMegaDOMPropertyAccess(
+@@ -1373,6 +1373,245 @@ Reduction JSNativeContextSpecialization::ReduceMegaDOMPropertyAccess(
    return Replace(value);
  }
  
 +namespace {
 +
-+bool HasOnlyRegionObjectMaps(ZoneVector<MapRef> const& maps) {
-+  if (maps.empty()) return false;
-+  for (MapRef map : maps) {
-+    if (map.instance_type() != JS_REGION_OBJECT_TYPE) return false;
-+  }
-+  return true;
++bool IsRegionObjectMap(MapRef map) {
++  return map.instance_type() == JS_REGION_OBJECT_TYPE;
 +}
 +
 +bool IsRegionAccessNode(Node* node) {
@@ -906,9 +902,10 @@ index d97b04e4..7b74d47b 100644
 +Reduction JSNativeContextSpecialization::ReduceRegionNamedAccess(
 +    Node* node, Node* value, NamedAccessFeedback const& feedback,
 +    AccessMode access_mode, ZoneVector<MapRef> const& maps, Node* key) {
-+  if ((access_mode != AccessMode::kLoad && access_mode != AccessMode::kStore) ||
-+      !IsRegionAccessNode(node) || !HasOnlyRegionObjectMaps(maps) ||
-+      region_fallbacks_.contains(node)) {
++  if (!v8_flags.inline_region_access ||
++      (access_mode != AccessMode::kLoad && access_mode != AccessMode::kStore) ||
++      !IsRegionAccessNode(node) || region_fallbacks_.contains(node) ||
++      std::none_of(maps.begin(), maps.end(), IsRegionObjectMap)) {
 +    return NoChange();
 +  }
 +  // The position in values() comes from the inline cache handlers. A region
@@ -916,6 +913,7 @@ index d97b04e4..7b74d47b 100644
 +  // property at the same position.
 +  std::optional<int> index;
 +  for (MapRef map : maps) {
++    if (!IsRegionObjectMap(map)) continue;
 +    OptionalObjectRef handler;
 +    for (const auto [m, h] : base::zip(feedback.maps(), feedback.handlers())) {
 +      if (m.equals(map)) {
@@ -948,102 +946,179 @@ index d97b04e4..7b74d47b 100644
 +    if (index.has_value() && *index != map_index) return NoChange();
 +    index = map_index;
 +  }
-+
-+  Node* receiver = NodeProperties::GetValueInput(node, 0);
 +  Effect effect{NodeProperties::GetEffectInput(node)};
 +  Control control{NodeProperties::GetControlInput(node)};
 +  if (key != nullptr) {
 +    effect = BuildCheckEqualsName(feedback.name(), key, effect, &control);
 +  }
-+  PropertyAccessBuilder(jsgraph(), broker())
-+      .BuildCheckMaps(receiver, &effect, control, maps);
-+  bool is_store = access_mode == AccessMode::kStore;
-+  Node* fast;
-+  if (is_store) {
-+    fast = effect =
-+        graph()->NewNode(simplified()->StoreRegionField(*index), receiver,
-+                         value, effect, control);
-+  } else {
-+    fast = effect = graph()->NewNode(simplified()->LoadRegionField(*index),
-+                                     receiver, effect, control);
-+  }
-+  return BuildRegionAccess(node, fast, effect, control, value, is_store);
++  return ReduceRegionAccess(node, maps, index, nullptr, value,
++                            access_mode == AccessMode::kStore, effect, control);
 +}
 +
 +Reduction JSNativeContextSpecialization::ReduceRegionElementAccess(
 +    Node* node, Node* index, Node* value, AccessMode access_mode,
 +    ZoneVector<MapRef> const& maps) {
-+  if ((access_mode != AccessMode::kLoad && access_mode != AccessMode::kStore) ||
-+      !IsRegionAccessNode(node) || !HasOnlyRegionObjectMaps(maps) ||
-+      region_fallbacks_.contains(node)) {
++  if (!v8_flags.inline_region_access ||
++      (access_mode != AccessMode::kLoad && access_mode != AccessMode::kStore) ||
++      !IsRegionAccessNode(node) || region_fallbacks_.contains(node) ||
++      std::none_of(maps.begin(), maps.end(), IsRegionObjectMap)) {
 +    return NoChange();
 +  }
-+  Node* receiver = NodeProperties::GetValueInput(node, 0);
-+  Effect effect{NodeProperties::GetEffectInput(node)};
-+  Control control{NodeProperties::GetControlInput(node)};
-+  PropertyAccessBuilder(jsgraph(), broker())
-+      .BuildCheckMaps(receiver, &effect, control, maps);
-+  bool is_store = access_mode == AccessMode::kStore;
-+  Node* fast;
-+  if (is_store) {
-+    fast = effect =
-+        graph()->NewNode(simplified()->StoreRegionElement(), receiver, index,
-+                         value, effect, control);
-+  } else {
-+    fast = effect = graph()->NewNode(simplified()->LoadRegionElement(),
-+                                     receiver, index, effect, control);
-+  }
-+  return BuildRegionAccess(node, fast, effect, control, value, is_store);
++  return ReduceRegionAccess(node, maps, std::nullopt, index, value,
++                            access_mode == AccessMode::kStore,
++                            Effect{NodeProperties::GetEffectInput(node)},
++                            Control{NodeProperties::GetControlInput(node)});
 +}
 +
-+Reduction JSNativeContextSpecialization::BuildRegionAccess(
-+    Node* node, Node* fast, Effect effect, Control control, Node* value,
-+    bool is_store) {
-+  // A load returns the hole and a store false when the generic access must
-+  // do the work: the region is not accessible, the value must be shared or
-+  // is a typed array, the index is out of range, and so on.
++Node* JSNativeContextSpecialization::BuildGenericAccessClone(
++    Node* node, Node* effect, Node* control, ZoneVector<Node*>* if_exceptions,
++    Node** success) {
++  Node* clone = graph()->CloneNode(node);
++  NodeProperties::ReplaceEffectInput(clone, effect);
++  NodeProperties::ReplaceControlInput(clone, control);
++  *success = clone;
++  if (if_exceptions != nullptr) {
++    if_exceptions->push_back(
++        graph()->NewNode(common()->IfException(), clone, clone));
++    *success = graph()->NewNode(common()->IfSuccess(), clone);
++  }
++  return clone;
++}
++
++Reduction JSNativeContextSpecialization::ReduceRegionAccess(
++    Node* node, ZoneVector<MapRef> const& maps, std::optional<int> field_index,
++    Node* key, Node* value, bool is_store, Effect effect, Control control) {
++  Node* receiver = NodeProperties::GetValueInput(node, 0);
++  ZoneVector<MapRef> region_maps(zone());
++  ZoneVector<MapRef> other_maps(zone());
++  for (MapRef map : maps) {
++    (IsRegionObjectMap(map) ? region_maps : other_maps).push_back(map);
++  }
++  // Region objects and other receivers can't share a fast path: those with
++  // other maps go to a copy of the access, which keeps its feedback and is
++  // specialized as usual once the map check narrows its maps.
++  for (MapRef map : other_maps) {
++    if (!map.IsJSObjectMap()) return NoChange();
++  }
++
++  ZoneVector<Node*> if_exception_nodes(zone());
++  ZoneVector<Node*>* if_exceptions = nullptr;
++  Node* if_exception = nullptr;
++  if (NodeProperties::IsExceptionalCall(node, &if_exception)) {
++    if_exceptions = &if_exception_nodes;
++  }
++
++  ZoneVector<Node*> values(zone());
++  ZoneVector<Node*> effects(zone());
++  ZoneVector<Node*> controls(zone());
++  PropertyAccessBuilder access_builder(jsgraph(), broker());
++
++  Control region_control = control;
++  if (other_maps.empty()) {
++    access_builder.BuildCheckMaps(receiver, &effect, control, region_maps);
++  } else {
++    receiver = effect = graph()->NewNode(simplified()->CheckHeapObject(),
++                                         receiver, effect, control);
++    ZoneRefSet<Map> region_map_set;
++    for (MapRef map : region_maps) region_map_set.insert(map, graph()->zone());
++    Node* is_region = effect = graph()->NewNode(
++        simplified()->CompareMaps(region_map_set), receiver, effect, control);
++    Node* branch = graph()->NewNode(common()->Branch(), is_region, control);
++    region_control = Control{graph()->NewNode(common()->IfTrue(), branch)};
++    Control other_control{graph()->NewNode(common()->IfFalse(), branch)};
++
++    Effect other_effect = effect;
++    access_builder.BuildCheckMaps(receiver, &other_effect, other_control,
++                                  other_maps);
++    Node* other_success;
++    Node* other = BuildGenericAccessClone(node, other_effect, other_control,
++                                          if_exceptions, &other_success);
++    // The map check narrows the maps of {receiver}, which the copy now uses,
++    // and is specialized for. It is never a region access again.
++    NodeProperties::ReplaceValueInput(other, receiver, 0);
++    region_fallbacks_.insert(other);
++    values.push_back(is_store ? value : other);
++    effects.push_back(other);
++    controls.push_back(other_success);
++  }
++
++  // The region path: the inline access, and the generic access when the
++  // fast path can't do it (the region is not accessible, the value must be
++  // shared or is a typed array, the index is out of range, and so on). Loads
++  // then return the hole and stores false.
++  Node* fast;
++  if (field_index.has_value()) {
++    fast = effect =
++        is_store
++            ? graph()->NewNode(simplified()->StoreRegionField(*field_index),
++                               receiver, value, effect, region_control)
++            : graph()->NewNode(simplified()->LoadRegionField(*field_index),
++                               receiver, effect, region_control);
++  } else {
++    fast = effect =
++        is_store ? graph()->NewNode(simplified()->StoreRegionElement(),
++                                    receiver, key, value, effect,
++                                    region_control)
++                 : graph()->NewNode(simplified()->LoadRegionElement(),
++                                    receiver, key, effect, region_control);
++  }
 +  Node* use_fast =
 +      is_store ? fast
 +               : graph()->NewNode(
 +                     simplified()->BooleanNot(),
 +                     graph()->NewNode(simplified()->ReferenceEqual(), fast,
 +                                      jsgraph()->TheHoleConstant()));
-+  Node* branch =
-+      graph()->NewNode(common()->Branch(BranchHint::kTrue), use_fast, control);
++  Node* branch = graph()->NewNode(common()->Branch(BranchHint::kTrue), use_fast,
++                                  region_control);
 +  Node* if_fast = graph()->NewNode(common()->IfTrue(), branch);
 +  Node* if_slow = graph()->NewNode(common()->IfFalse(), branch);
-+
-+  Node* fast_effect = effect;
-+  Node* fast_value = value;
-+  if (!is_store) {
-+    fast_value = fast_effect =
-+        graph()->NewNode(common()->TypeGuard(Type::NonInternal()), fast,
-+                         effect, if_fast);
++  if (is_store) {
++    values.push_back(value);
++    effects.push_back(effect);
++  } else {
++    Node* fast_value = graph()->NewNode(
++        common()->TypeGuard(Type::NonInternal()), fast, effect, if_fast);
++    values.push_back(fast_value);
++    effects.push_back(fast_value);
 +  }
++  controls.push_back(if_fast);
 +
-+  // The generic access goes through the inline cache, whose handlers do the
-+  // rest. It keeps its feedback, and is not specialized again.
-+  Node* slow = graph()->CloneNode(node);
++  Node* slow_success;
++  Node* slow =
++      BuildGenericAccessClone(node, effect, if_slow, if_exceptions, &slow_success);
 +  region_fallbacks_.insert(slow);
-+  NodeProperties::ReplaceEffectInput(slow, effect);
-+  NodeProperties::ReplaceControlInput(slow, if_slow);
-+  Node* slow_control = slow;
-+  Node* if_exception = nullptr;
-+  if (NodeProperties::IsExceptionalCall(node, &if_exception)) {
-+    // Only the generic access can throw.
-+    NodeProperties::ReplaceEffectInput(if_exception, slow);
-+    NodeProperties::ReplaceControlInput(if_exception, slow);
-+    slow_control = graph()->NewNode(common()->IfSuccess(), slow);
++  values.push_back(is_store ? value : slow);
++  effects.push_back(slow);
++  controls.push_back(slow_success);
++
++  int const count = static_cast<int>(controls.size());
++  control = Control{
++      graph()->NewNode(common()->Merge(count), count, &controls.front())};
++  values.push_back(control);
++  effects.push_back(control);
++  Node* result =
++      is_store ? value
++               : graph()->NewNode(
++                     common()->Phi(MachineRepresentation::kTagged, count),
++                     count + 1, &values.front());
++  effect = Effect{graph()->NewNode(common()->EffectPhi(count), count + 1,
++                                   &effects.front())};
++
++  // Only the generic accesses can throw.
++  if (!if_exception_nodes.empty()) {
++    int const if_exception_count = static_cast<int>(if_exceptions->size());
++    Node* merge = graph()->NewNode(common()->Merge(if_exception_count),
++                                   if_exception_count, &if_exceptions->front());
++    if_exceptions->push_back(merge);
++    Node* ephi =
++        graph()->NewNode(common()->EffectPhi(if_exception_count),
++                         if_exception_count + 1, &if_exceptions->front());
++    Node* phi = graph()->NewNode(
++        common()->Phi(MachineRepresentation::kTagged, if_exception_count),
++        if_exception_count + 1, &if_exceptions->front());
++    ReplaceWithValue(if_exception, phi, ephi, merge);
 +  }
 +
-+  control = graph()->NewNode(common()->Merge(2), if_fast, slow_control);
-+  effect = graph()->NewNode(common()->EffectPhi(2), fast_effect, slow, control);
-+  Node* result = value;
-+  if (!is_store) {
-+    result =
-+        graph()->NewNode(common()->Phi(MachineRepresentation::kTagged, 2),
-+                         fast_value, slow, control);
-+  }
 +  ReplaceWithValue(node, result, effect, control);
 +  return Replace(result);
 +}
@@ -1051,7 +1126,7 @@ index d97b04e4..7b74d47b 100644
  Reduction JSNativeContextSpecialization::ReduceNamedAccess(
      Node* node, Node* value, NamedAccessFeedback const& feedback,
      AccessMode access_mode, FeedbackSource const& source, Node* key) {
-@@ -1445,6 +1609,12 @@ Reduction JSNativeContextSpecialization::ReduceNamedAccess(
+@@ -1445,6 +1684,12 @@ Reduction JSNativeContextSpecialization::ReduceNamedAccess(
      }
    }
  
@@ -1064,7 +1139,7 @@ index d97b04e4..7b74d47b 100644
    ZoneVector<PropertyAccessInfo> access_infos(zone());
    {
      ZoneVector<PropertyAccessInfo> access_infos_for_feedback(zone());
-@@ -2300,6 +2470,18 @@ Reduction JSNativeContextSpecialization::ReduceElementAccess(
+@@ -2300,6 +2545,18 @@ Reduction JSNativeContextSpecialization::ReduceElementAccess(
    }
  
    AccessMode access_mode = refined_feedback.keyed_mode().access_mode();
@@ -1084,10 +1159,10 @@ index d97b04e4..7b74d47b 100644
        receiver->opcode() == IrOpcode::kHeapConstant) {
      Reduction reduction = ReduceElementLoadFromHeapConstant(
 diff --git a/src/compiler/js-native-context-specialization.h b/src/compiler/js-native-context-specialization.h
-index 4c7f0103..54ac7392 100644
+index 4c7f0103..062882c2 100644
 --- a/src/compiler/js-native-context-specialization.h
 +++ b/src/compiler/js-native-context-specialization.h
-@@ -97,6 +97,18 @@ class V8_EXPORT_PRIVATE JSNativeContextSpecialization final
+@@ -97,6 +97,26 @@ class V8_EXPORT_PRIVATE JSNativeContextSpecialization final
    Reduction ReduceJSStoreInArrayLiteral(Node* node);
    Reduction ReduceJSToObject(Node* node);
  
@@ -1100,13 +1175,21 @@ index 4c7f0103..54ac7392 100644
 +  Reduction ReduceRegionElementAccess(Node* node, Node* index, Node* value,
 +                                      AccessMode access_mode,
 +                                      ZoneVector<MapRef> const& maps);
-+  Reduction BuildRegionAccess(Node* node, Node* fast, Effect effect,
-+                              Control control, Node* value, bool is_store);
++  Reduction ReduceRegionAccess(Node* node, ZoneVector<MapRef> const& maps,
++                               std::optional<int> field_index, Node* key,
++                               Node* value, bool is_store, Effect effect,
++                               Control control);
++  // A copy of the generic access {node} at {effect} and {control}. Its
++  // IfException goes to {if_exceptions} if given; {success} gets the control
++  // that continues after it.
++  Node* BuildGenericAccessClone(Node* node, Node* effect, Node* control,
++                                ZoneVector<Node*>* if_exceptions,
++                                Node** success);
 +
    Reduction ReduceElementAccess(Node* node, Node* index, Node* value,
                                  ElementAccessFeedback const& feedback);
    // In the case of non-keyed (named) accesses, pass the name as {static_name}
-@@ -294,6 +306,9 @@ class V8_EXPORT_PRIVATE JSNativeContextSpecialization final
+@@ -294,6 +314,9 @@ class V8_EXPORT_PRIVATE JSNativeContextSpecialization final
    Flags const flags_;
    Handle<JSGlobalObject> global_object_;
    Handle<JSGlobalProxy> global_proxy_;
@@ -1575,6 +1658,40 @@ index 568f11e8..518d2cad 100644
      case IrOpcode::kCheckEqualsSymbol:
        DCHECK(dominating_frame_state.valid());
        __ DeoptimizeIfNot(
+diff --git a/src/compiler/turboshaft/turbolev-graph-builder.cc b/src/compiler/turboshaft/turbolev-graph-builder.cc
+index 4220021c..f984c75f 100644
+--- a/src/compiler/turboshaft/turbolev-graph-builder.cc
++++ b/src/compiler/turboshaft/turbolev-graph-builder.cc
+@@ -3511,6 +3511,29 @@ class GraphBuildingNodeProcessor {
+                          MemoryRepresentation::Int32(), node->offset()));
+     return maglev::ProcessResult::kContinue;
+   }
++  // Region nodes come only from Maglev's own graph building on arm64; Turbolev
++  // leaves such functions to Turbofan.
++  maglev::ProcessResult Process(maglev::LoadRegionField* node,
++                                const maglev::ProcessingState& state) {
++    *bailout_ = BailoutReason::kFunctionTooBig;
++    return maglev::ProcessResult::kAbort;
++  }
++  maglev::ProcessResult Process(maglev::LoadRegionElement* node,
++                                const maglev::ProcessingState& state) {
++    *bailout_ = BailoutReason::kFunctionTooBig;
++    return maglev::ProcessResult::kAbort;
++  }
++  maglev::ProcessResult Process(maglev::StoreRegionField* node,
++                                const maglev::ProcessingState& state) {
++    *bailout_ = BailoutReason::kFunctionTooBig;
++    return maglev::ProcessResult::kAbort;
++  }
++  maglev::ProcessResult Process(maglev::StoreRegionElement* node,
++                                const maglev::ProcessingState& state) {
++    *bailout_ = BailoutReason::kFunctionTooBig;
++    return maglev::ProcessResult::kAbort;
++  }
++
+   maglev::ProcessResult Process(maglev::LoadFixedArrayElement* node,
+                                 const maglev::ProcessingState& state) {
+     SetMap(node, __ LoadFixedArrayElement(
 diff --git a/src/compiler/verifier.cc b/src/compiler/verifier.cc
 index 8aab5f56..b2e7c4d5 100644
 --- a/src/compiler/verifier.cc
@@ -5623,10 +5740,10 @@ index 793be1a7..38cae9e7 100644
    // Certain objects may be allocated in RO space if suitable for the snapshot.
    bool enable_ro_allocation_for_snapshot_ = false;
 diff --git a/src/flags/flag-definitions.h b/src/flags/flag-definitions.h
-index f47b7006..cb8a3233 100644
+index f47b7006..26056c20 100644
 --- a/src/flags/flag-definitions.h
 +++ b/src/flags/flag-definitions.h
-@@ -1306,6 +1306,15 @@ DEFINE_WEAK_IMPLICATION(trace_baseline, trace_baseline_batch_compilation)
+@@ -1306,6 +1306,17 @@ DEFINE_WEAK_IMPLICATION(trace_baseline, trace_baseline_batch_compilation)
  // Internalize into a shared string table in the shared isolate
  DEFINE_BOOL(shared_strings, false, "allow sharing of strings")
  DEFINE_IMPLICATION(shared_strings, shared_heap)
@@ -5639,6 +5756,8 @@ index f47b7006..cb8a3233 100644
 +DEFINE_BOOL(harmony_region_literals, false,
 +            "#{} and #[] literals that create objects in the current region")
 +DEFINE_IMPLICATION(harmony_region_literals, harmony_regions)
++DEFINE_BOOL(inline_region_access, true,
++            "inline loads and stores of region objects in Maglev and Turbofan")
  DEFINE_BOOL_READONLY(
      harmony_struct, false,
      "DEPRECATED. harmony structs, shared structs, and shared arrays")
@@ -6522,6 +6641,666 @@ index 6bfaf56f..35705666 100644
    int nesting_depth_ = 0;
  
    using TaskQueueEntry = std::pair<Nestability, std::unique_ptr<Task>>;
+diff --git a/src/maglev/arm64/maglev-ir-arm64.cc b/src/maglev/arm64/maglev-ir-arm64.cc
+index cdeb38c6..68013687 100644
+--- a/src/maglev/arm64/maglev-ir-arm64.cc
++++ b/src/maglev/arm64/maglev-ir-arm64.cc
+@@ -7,6 +7,7 @@
+ #include "src/codegen/arm64/constants-arm64.h"
+ #include "src/codegen/arm64/register-arm64.h"
+ #include "src/codegen/interface-descriptors-inl.h"
++#include "src/ic/handler-configuration.h"
+ #include "src/maglev/arm64/maglev-assembler-arm64-inl.h"
+ #include "src/maglev/maglev-assembler-inl.h"
+ #include "src/maglev/maglev-graph-processor.h"
+@@ -17,6 +18,7 @@
+ #include "src/objects/feedback-cell.h"
+ #include "src/objects/instance-type.h"
+ #include "src/objects/js-function.h"
++#include "src/objects/js-region.h"
+ #include "src/objects/property-details.h"
+ #include "src/objects/swiss-name-dictionary.h"
+ 
+@@ -1235,6 +1237,275 @@ void LoadDictionaryField::GenerateCode(MaglevAssembler* masm,
+   __ bind(*done);
+ }
+ 
++namespace {
++
++// Objects of ownership regions. These mirror CodeStubAssembler::
++// GotoIfRegionIdAccessDenied and GotoIfNotStorableInRegion. Region ids and
++// indices are small Smis (31-bit, as pointer compression requires), untagged
++// into W registers, which zeroes the upper half for the address arithmetic.
++static_assert(kSmiTagSize == 1 && kSmiShiftSize == 0);
++
++void UntagRegionSmi(MaglevAssembler* masm, Register dst, Register smi) {
++  __ Asr(dst.W(), smi.W(), kSmiTagSize);
++}
++
++// Jumps to `denied` unless this isolate may access the region with the
++// untagged id `region`: it owns the region, or, for a read, the region is
++// frozen and marked readable in this isolate's read table.
++void EmitRegionAccessCheck(MaglevAssembler* masm, Register region,
++                           bool for_write, Label* denied, Register scratch1) {
++  MaglevAssembler::TemporaryRegisterScope temps(masm);
++  Register scratch2 = temps.AcquireScratch();
++  __ Move(scratch1, ExternalReference::region_registry_owners());
++  __ Ldr(scratch1,
++         MemOperand(scratch1, region.W(), UXTW, kSystemPointerSizeLog2));
++  __ Move(scratch2, ExternalReference::isolate_address());
++  __ Cmp(scratch1, scratch2);
++  if (for_write) {
++    __ B(ne, denied);
++    return;
++  }
++  Label allowed;
++  __ B(eq, &allowed);
++  __ Cmp(scratch1, Operand(static_cast<int64_t>(RegionRegistry::kFrozen)));
++  __ B(ne, denied);
++  __ Move(scratch1,
++          ExternalReference::region_read_table_address(masm->isolate()));
++  __ Ldr(scratch1, MemOperand(scratch1));
++  __ Cbz(scratch1, denied);
++  __ Ldrb(scratch1.W(), MemOperand(scratch1, region.W(), UXTW));
++  __ Cbz(scratch1.W(), denied);
++  __ Bind(&allowed);
++}
++
++// Jumps to `not_storable` unless `value` can be stored as it is in the
++// region with the tagged id `region`: Smis, read-only objects, primitives in
++// shared space and objects of the same region.
++void EmitRegionStorableCheck(MaglevAssembler* masm, Register region,
++                             Register value, Label* not_storable,
++                             Register scratch) {
++  Label storable, region_object;
++  __ JumpIfSmi(value, &storable);
++#if CONTIGUOUS_COMPRESSED_READ_ONLY_SPACE_BOOL
++  __ Cmp(value.W(),
++         Operand(static_cast<uint32_t>(kContiguousReadOnlyReservationSize)));
++  __ B(lo, &storable);
++#else
++  __ CheckPageFlag(value, MemoryChunk::READ_ONLY_HEAP, ne, &storable);
++#endif
++  __ LoadMap(scratch, value);
++  __ Ldrh(scratch.W(), FieldMemOperand(scratch, offsetof(Map, instance_type_)));
++  __ Cmp(scratch.W(), Operand(JS_REGION_OBJECT_TYPE));
++  __ B(eq, &region_object);
++  __ Cmp(scratch.W(), Operand(FIRST_JS_RECEIVER_TYPE));
++  __ B(hs, not_storable);
++  __ CheckPageFlag(value, MemoryChunk::IN_WRITABLE_SHARED_SPACE, eq,
++                   not_storable);
++  __ B(&storable);
++  __ Bind(&region_object);
++  __ LoadTaggedSignedField(scratch, value, offsetof(JSRegionObject, region_id_));
++  __ Cmp(scratch.W(), region.W());
++  __ B(ne, not_storable);
++  __ Bind(&storable);
++}
++
++// A typed array of the region is read as a fresh local view, by the generic
++// access.
++void JumpIfRegionTypedArray(MaglevAssembler* masm, Register value,
++                            Label* target) {
++  Label not_typed_array;
++  __ JumpIfSmi(value, &not_typed_array);
++  __ JumpIfObjectType(value, JS_REGION_TYPED_ARRAY_TYPE, target);
++  __ Bind(&not_typed_array);
++}
++
++}  // namespace
++
++void LoadRegionField::SetValueLocationConstraints() {
++  UseRegister(ObjectInput());
++  DefineAsRegister(this);
++  set_temporaries_needed(2);
++}
++
++void LoadRegionField::GenerateCode(MaglevAssembler* masm,
++                                   const ProcessingState& state) {
++  Register object = ToRegister(ObjectInput());
++  Register result = ToRegister(this->result());
++  MaglevAssembler::TemporaryRegisterScope temps(masm);
++  Register region = temps.Acquire();
++  Register scratch1 = temps.Acquire();
++  Label slow, done;
++  __ LoadTaggedSignedField(region, object,
++                           offsetof(JSRegionObject, region_id_));
++  UntagRegionSmi(masm, region, region);
++  EmitRegionAccessCheck(masm, region, false, &slow, scratch1);
++  if (index() == static_cast<int>(LoadHandler::kRegionArrayLengthIndex)) {
++    __ LoadTaggedField(scratch1, object,
++                       offsetof(JSRegionObject, array_length_));
++  } else {
++    // The map fixes the keys, so every object with it has this index.
++    __ LoadTaggedField(scratch1, object, offsetof(JSRegionObject, values_));
++    __ LoadTaggedField(scratch1, scratch1,
++                       FixedArray::OffsetOfElementAt(index()));
++    JumpIfRegionTypedArray(masm, scratch1, &slow);
++  }
++  __ Move(result, scratch1);
++  __ B(&done);
++  __ Bind(&slow);
++  __ LoadRoot(result, RootIndex::kTheHoleValue);
++  __ Bind(&done);
++}
++
++void LoadRegionElement::SetValueLocationConstraints() {
++  UseRegister(ObjectInput());
++  UseRegister(KeyInput());
++  DefineAsRegister(this);
++  set_temporaries_needed(3);
++}
++
++void LoadRegionElement::GenerateCode(MaglevAssembler* masm,
++                                     const ProcessingState& state) {
++  Register object = ToRegister(ObjectInput());
++  Register key = ToRegister(KeyInput());
++  Register result = ToRegister(this->result());
++  MaglevAssembler::TemporaryRegisterScope temps(masm);
++  Register index = temps.Acquire();
++  Register region = temps.Acquire();
++  Register scratch1 = temps.Acquire();
++  Label slow, done;
++  __ JumpIfNotSmi(key, &slow);
++  UntagRegionSmi(masm, index, key);
++  __ Tbnz(index.W(), 31, &slow);
++  __ LoadTaggedSignedField(region, object,
++                           offsetof(JSRegionObject, region_id_));
++  UntagRegionSmi(masm, region, region);
++  EmitRegionAccessCheck(masm, region, false, &slow, scratch1);
++  // Only arrays map element indices to values(). A reader of a frozen array
++  // may race with a thaw that replaces values(), so the index is checked
++  // against both the length and the size of the values() it loaded.
++  __ LoadTaggedField(scratch1, object, offsetof(JSRegionObject, keys_));
++  __ JumpIfNotRoot(scratch1, RootIndex::kUndefinedValue, &slow);
++  __ LoadTaggedSignedField(scratch1, object,
++                           offsetof(JSRegionObject, array_length_));
++  UntagRegionSmi(masm, scratch1, scratch1);
++  __ Cmp(index.W(), scratch1.W());
++  __ B(hs, &slow);
++  __ LoadTaggedField(region, object, offsetof(JSRegionObject, values_));
++  __ Ldr(scratch1.W(), FieldMemOperand(region, FixedArrayBase::kLengthOffset));
++  __ Cmp(index.W(), scratch1.W());
++  __ B(hs, &slow);
++  __ LoadFixedArrayElement(scratch1, region, index);
++  JumpIfRegionTypedArray(masm, scratch1, &slow);
++  __ Move(result, scratch1);
++  __ B(&done);
++  __ Bind(&slow);
++  __ LoadRoot(result, RootIndex::kTheHoleValue);
++  __ Bind(&done);
++}
++
++void StoreRegionField::SetValueLocationConstraints() {
++  UseRegister(ObjectInput());
++  UseRegister(ValueInput());
++  DefineAsRegister(this);
++  RequireSpecificTemporary(WriteBarrierDescriptor::ObjectRegister());
++  RequireSpecificTemporary(WriteBarrierDescriptor::SlotAddressRegister());
++  set_temporaries_needed(3);
++}
++
++void StoreRegionField::GenerateCode(MaglevAssembler* masm,
++                                    const ProcessingState& state) {
++  Register object = ToRegister(ObjectInput());
++  Register value = ToRegister(ValueInput());
++  Register result = ToRegister(this->result());
++  MaglevAssembler::TemporaryRegisterScope temps(masm);
++  Register region = temps.Acquire();
++  Register scratch1 = temps.Acquire();
++  Register scratch2 = temps.Acquire();
++  Label slow, done;
++  __ LoadTaggedSignedField(region, object,
++                           offsetof(JSRegionObject, region_id_));
++  UntagRegionSmi(masm, scratch1, region);
++  EmitRegionAccessCheck(masm, scratch1, true, &slow, scratch2);
++  EmitRegionStorableCheck(masm, region, value, &slow, scratch1);
++  __ LoadTaggedField(scratch1, object, offsetof(JSRegionObject, values_));
++  __ Mov(scratch2.W(), index());
++  __ StoreFixedArrayElementWithWriteBarrier(scratch1, scratch2, value,
++                                            register_snapshot());
++  __ LoadRoot(result, RootIndex::kTrueValue);
++  __ B(&done);
++  __ Bind(&slow);
++  __ LoadRoot(result, RootIndex::kFalseValue);
++  __ Bind(&done);
++}
++
++void StoreRegionElement::SetValueLocationConstraints() {
++  UseRegister(ObjectInput());
++  UseRegister(KeyInput());
++  UseRegister(ValueInput());
++  DefineAsRegister(this);
++  RequireSpecificTemporary(WriteBarrierDescriptor::ObjectRegister());
++  RequireSpecificTemporary(WriteBarrierDescriptor::SlotAddressRegister());
++  set_temporaries_needed(3);
++}
++
++void StoreRegionElement::GenerateCode(MaglevAssembler* masm,
++                                      const ProcessingState& state) {
++  Register object = ToRegister(ObjectInput());
++  Register key = ToRegister(KeyInput());
++  Register value = ToRegister(ValueInput());
++  Register result = ToRegister(this->result());
++  MaglevAssembler::TemporaryRegisterScope temps(masm);
++  Register index = temps.Acquire();
++  Register region = temps.Acquire();
++  Register scratch1 = temps.Acquire();
++  Label slow, done, no_append;
++  __ JumpIfNotSmi(key, &slow);
++  UntagRegionSmi(masm, index, key);
++  __ Tbnz(index.W(), 31, &slow);
++  __ LoadTaggedSignedField(region, object,
++                           offsetof(JSRegionObject, region_id_));
++  {
++    MaglevAssembler::TemporaryRegisterScope inner(masm);
++    Register untagged = inner.AcquireScratch();
++    UntagRegionSmi(masm, untagged, region);
++    EmitRegionAccessCheck(masm, untagged, true, &slow, scratch1);
++  }
++  EmitRegionStorableCheck(masm, region, value, &slow, scratch1);
++  __ LoadTaggedField(scratch1, object, offsetof(JSRegionObject, keys_));
++  __ JumpIfNotRoot(scratch1, RootIndex::kUndefinedValue, &slow);
++  // In bounds, or one past the end while values() has room, as push() does.
++  __ LoadTaggedSignedField(scratch1, object,
++                           offsetof(JSRegionObject, array_length_));
++  UntagRegionSmi(masm, scratch1, scratch1);
++  __ Cmp(index.W(), scratch1.W());
++  __ B(hi, &slow);
++  __ LoadTaggedField(region, object, offsetof(JSRegionObject, values_));
++  {
++    MaglevAssembler::TemporaryRegisterScope inner(masm);
++    Register capacity = inner.AcquireScratch();
++    __ Ldr(capacity.W(),
++           FieldMemOperand(region, FixedArrayBase::kLengthOffset));
++    __ Cmp(index.W(), capacity.W());
++  }
++  __ B(hs, &slow);
++  // The new length goes in first: the write barrier below may clobber
++  // registers that are dead after this node, such as `object`.
++  __ Cmp(index.W(), scratch1.W());
++  __ B(ne, &no_append);
++  __ Add(scratch1.W(), index.W(), 1);
++  __ Lsl(scratch1.W(), scratch1.W(), kSmiTagSize);
++  __ StoreTaggedSignedField(object, offsetof(JSRegionObject, array_length_),
++                            scratch1);
++  __ Bind(&no_append);
++  __ StoreFixedArrayElementWithWriteBarrier(region, index, value,
++                                            register_snapshot());
++  __ LoadRoot(result, RootIndex::kTrueValue);
++  __ B(&done);
++  __ Bind(&slow);
++  __ LoadRoot(result, RootIndex::kFalseValue);
++  __ Bind(&done);
++}
++
+ }  // namespace maglev
+ }  // namespace internal
+ }  // namespace v8
+diff --git a/src/maglev/maglev-graph-builder.cc b/src/maglev/maglev-graph-builder.cc
+index 25e2bcda..94658a92 100644
+--- a/src/maglev/maglev-graph-builder.cc
++++ b/src/maglev/maglev-graph-builder.cc
+@@ -2,6 +2,7 @@
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+ 
++#include "src/ic/handler-configuration.h"
+ #include "src/maglev/maglev-graph-builder.h"
+ 
+ #include <algorithm>
+@@ -4719,6 +4720,122 @@ MaybeReduceResult MaglevGraphBuilder::TryBuildPropertyAccess(
+   UNREACHABLE();
+ }
+ 
++namespace {
++
++bool HasOnlyRegionObjectMaps(base::Vector<const compiler::MapRef> maps) {
++  if (maps.empty()) return false;
++  for (compiler::MapRef map : maps) {
++    if (map.instance_type() != JS_REGION_OBJECT_TYPE) return false;
++  }
++  return true;
++}
++
++}  // namespace
++
++template <typename GenericAccessFunc>
++MaybeReduceResult MaglevGraphBuilder::TryBuildRegionAccess(
++    ValueNode* object, ValueNode* key, std::optional<int> field_index,
++    base::Vector<const compiler::MapRef> maps, bool is_store,
++    GenericAccessFunc&& build_generic_access) {
++#if V8_TARGET_ARCH_ARM64 && V8_COMPRESS_POINTERS
++  if (!v8_flags.inline_region_access) return {};
++  RETURN_IF_ABORT(BuildCheckHeapObject(object));
++  RETURN_IF_ABORT(BuildCheckMaps(object, maps));
++  ValueNode* fast;
++  if (field_index.has_value()) {
++    if (is_store) {
++      GET_VALUE_OR_ABORT(fast, AddNewNode<StoreRegionField>(
++                                   {object, GetAccumulator()}, *field_index));
++    } else {
++      GET_VALUE_OR_ABORT(fast,
++                         AddNewNode<LoadRegionField>({object}, *field_index));
++    }
++  } else if (is_store) {
++    GET_VALUE_OR_ABORT(fast, AddNewNode<StoreRegionElement>(
++                                 {object, key, GetAccumulator()}));
++  } else {
++    GET_VALUE_OR_ABORT(fast, AddNewNode<LoadRegionElement>({object, key}));
++  }
++  // A load returns the hole and a store false when the generic access must
++  // do the work.
++  MaglevSubGraphBuilder sub_graph(this, is_store ? 0 : 1);
++  MaglevSubGraphBuilder::Label generic(&sub_graph, 1);
++  std::optional<MaglevSubGraphBuilder::Variable> result;
++  std::optional<MaglevSubGraphBuilder::Label> done;
++  if (is_store) {
++    done.emplace(&sub_graph, 2);
++    RETURN_IF_ABORT(sub_graph.GotoIfFalse<BranchIfRootConstant>(
++        &generic, {fast}, RootIndex::kTrueValue));
++  } else {
++    result.emplace(0);
++    done.emplace(&sub_graph, 2,
++                 std::initializer_list<MaglevSubGraphBuilder::Variable*>{
++                     &*result});
++    RETURN_IF_ABORT(sub_graph.GotoIfTrue<BranchIfRootConstant>(
++        &generic, {fast}, RootIndex::kTheHoleValue));
++    sub_graph.set(*result, fast);
++  }
++  sub_graph.Goto(&*done);
++  sub_graph.Bind(&generic);
++  ReduceResult generic_result = build_generic_access();
++  RETURN_IF_ABORT(generic_result);
++  if (!is_store) sub_graph.set(*result, generic_result.value());
++  sub_graph.Goto(&*done);
++  sub_graph.Bind(&*done);
++  if (is_store) return ReduceResult::Done();
++  return sub_graph.get(*result);
++#else
++  return {};
++#endif  // V8_TARGET_ARCH_ARM64 && V8_COMPRESS_POINTERS
++}
++
++template <typename GenericAccessFunc>
++MaybeReduceResult MaglevGraphBuilder::TryBuildRegionNamedAccess(
++    ValueNode* receiver, ValueNode* lookup_start_object,
++    compiler::NamedAccessFeedback const& feedback,
++    compiler::AccessMode access_mode,
++    GenericAccessFunc&& build_generic_access) {
++  if (receiver != lookup_start_object ||
++      (access_mode != compiler::AccessMode::kLoad &&
++       access_mode != compiler::AccessMode::kStore) ||
++      !HasOnlyRegionObjectMaps(base::VectorOf(feedback.maps()))) {
++    return {};
++  }
++  // The position in values() comes from the inline cache handlers; a region
++  // map stands for one set of keys.
++  std::optional<int> index;
++  for (const compiler::OptionalObjectRef& handler : feedback.handlers()) {
++    if (!handler.has_value() || !handler->IsSmi()) return {};
++    int raw = handler->AsSmi();
++    int map_index;
++    if (access_mode == compiler::AccessMode::kLoad) {
++      if (LoadHandler::KindBits::decode(raw) !=
++          LoadHandler::Kind::kRegionField) {
++        return {};
++      }
++      map_index = LoadHandler::RegionValueIndexBits::decode(raw);
++      if (map_index == static_cast<int>(LoadHandler::kRegionElementIndex)) {
++        return {};
++      }
++    } else {
++      if (StoreHandler::KindBits::decode(raw) !=
++          StoreHandler::Kind::kRegionField) {
++        return {};
++      }
++      map_index = StoreHandler::RegionValueIndexBits::decode(raw);
++      if (map_index == static_cast<int>(StoreHandler::kRegionElementIndex)) {
++        return {};
++      }
++    }
++    if (index.has_value() && *index != map_index) return {};
++    index = map_index;
++  }
++  return TryBuildRegionAccess(receiver, nullptr, index,
++                              base::VectorOf(feedback.maps()),
++                              access_mode == compiler::AccessMode::kStore,
++                              build_generic_access);
++}
++
+ template <typename GenericAccessFunc>
+ MaybeReduceResult MaglevGraphBuilder::TryBuildNamedAccess(
+     ValueNode* receiver, ValueNode* lookup_start_object,
+@@ -4726,6 +4843,9 @@ MaybeReduceResult MaglevGraphBuilder::TryBuildNamedAccess(
+     compiler::FeedbackSource const& feedback_source,
+     compiler::AccessMode access_mode,
+     GenericAccessFunc&& build_generic_access) {
++  RETURN_IF_DONE(TryBuildRegionNamedAccess(receiver, lookup_start_object,
++                                           feedback, access_mode,
++                                           build_generic_access));
+   compiler::ZoneRefSet<Map> inferred_maps;
+ 
+   bool has_deprecated_map_without_migration_target = false;
+@@ -5661,6 +5781,21 @@ MaybeReduceResult MaglevGraphBuilder::TryBuildElementAccess(
+     return {};
+   }
+ 
++  if (keyed_mode.access_mode() == compiler::AccessMode::kLoad ||
++      keyed_mode.access_mode() == compiler::AccessMode::kStore) {
++    ZoneVector<compiler::MapRef> maps(zone());
++    for (const compiler::ElementAccessFeedback::TransitionGroup& group :
++         feedback.transition_groups()) {
++      for (compiler::MapRef map : group) maps.push_back(map);
++    }
++    if (HasOnlyRegionObjectMaps(base::VectorOf(maps))) {
++      RETURN_IF_DONE(TryBuildRegionAccess(
++          object, index_object, std::nullopt, base::VectorOf(maps),
++          keyed_mode.access_mode() == compiler::AccessMode::kStore,
++          build_generic_access));
++    }
++  }
++
+   // Map checks for these must be inserted below.
+   MapInference inference(this, object);
+   auto possible_maps = inference.TryGetPossibleMaps();
+diff --git a/src/maglev/maglev-graph-builder.h b/src/maglev/maglev-graph-builder.h
+index 4a9c072b..a23c2e9e 100644
+--- a/src/maglev/maglev-graph-builder.h
++++ b/src/maglev/maglev-graph-builder.h
+@@ -1413,6 +1413,19 @@ class MaglevGraphBuilder {
+       compiler::FeedbackSource const& feedback_source,
+       compiler::AccessMode access_mode,
+       GenericAccessFunc&& build_generic_access);
++  // Objects of ownership regions: an inline fast path, with the generic
++  // access as the fallback (see LoadRegionField in maglev-ir.h).
++  template <typename GenericAccessFunc>
++  MaybeReduceResult TryBuildRegionNamedAccess(
++      ValueNode* receiver, ValueNode* lookup_start_object,
++      compiler::NamedAccessFeedback const& feedback,
++      compiler::AccessMode access_mode,
++      GenericAccessFunc&& build_generic_access);
++  template <typename GenericAccessFunc>
++  MaybeReduceResult TryBuildRegionAccess(
++      ValueNode* object, ValueNode* key, std::optional<int> field_index,
++      base::Vector<const compiler::MapRef> maps, bool is_store,
++      GenericAccessFunc&& build_generic_access);
+   template <typename GenericAccessFunc>
+   MaybeReduceResult TryBuildHomomorphicNamedAccess(
+       ValueNode* receiver, ValueNode* lookup_start_object,
+diff --git a/src/maglev/maglev-graph-optimizer.cc b/src/maglev/maglev-graph-optimizer.cc
+index 04ac39d1..97e9e939 100644
+--- a/src/maglev/maglev-graph-optimizer.cc
++++ b/src/maglev/maglev-graph-optimizer.cc
+@@ -1331,6 +1331,26 @@ ProcessResult MaglevGraphOptimizer::VisitStoreMap(
+   return ProcessResult::kContinue;
+ }
+ 
++ProcessResult MaglevGraphOptimizer::VisitLoadRegionField(
++    LoadRegionField* node, const ProcessingState& state) {
++  return ProcessResult::kContinue;
++}
++
++ProcessResult MaglevGraphOptimizer::VisitLoadRegionElement(
++    LoadRegionElement* node, const ProcessingState& state) {
++  return ProcessResult::kContinue;
++}
++
++ProcessResult MaglevGraphOptimizer::VisitStoreRegionField(
++    StoreRegionField* node, const ProcessingState& state) {
++  return ProcessResult::kContinue;
++}
++
++ProcessResult MaglevGraphOptimizer::VisitStoreRegionElement(
++    StoreRegionElement* node, const ProcessingState& state) {
++  return ProcessResult::kContinue;
++}
++
+ ProcessResult MaglevGraphOptimizer::VisitStoreFixedArrayElementWithWriteBarrier(
+     StoreFixedArrayElementWithWriteBarrier* node,
+     const ProcessingState& state) {
+diff --git a/src/maglev/maglev-ir.cc b/src/maglev/maglev-ir.cc
+index b3cb538b..b4b657a6 100644
+--- a/src/maglev/maglev-ir.cc
++++ b/src/maglev/maglev-ir.cc
+@@ -9272,6 +9272,36 @@ void LoadInt32::PrintParams(std::ostream& os) const {
+   os << "(0x" << std::hex << offset() << std::dec << ")";
+ }
+ 
++void LoadRegionField::PrintParams(std::ostream& os) const {
++  os << "(" << index() << ")";
++}
++
++void StoreRegionField::PrintParams(std::ostream& os) const {
++  os << "(" << index() << ")";
++}
++
++#if !V8_TARGET_ARCH_ARM64
++// The graph builder creates region nodes on arm64 only.
++void LoadRegionField::SetValueLocationConstraints() { UNREACHABLE(); }
++void LoadRegionField::GenerateCode(MaglevAssembler*, const ProcessingState&) {
++  UNREACHABLE();
++}
++void LoadRegionElement::SetValueLocationConstraints() { UNREACHABLE(); }
++void LoadRegionElement::GenerateCode(MaglevAssembler*,
++                                     const ProcessingState&) {
++  UNREACHABLE();
++}
++void StoreRegionField::SetValueLocationConstraints() { UNREACHABLE(); }
++void StoreRegionField::GenerateCode(MaglevAssembler*, const ProcessingState&) {
++  UNREACHABLE();
++}
++void StoreRegionElement::SetValueLocationConstraints() { UNREACHABLE(); }
++void StoreRegionElement::GenerateCode(MaglevAssembler*,
++                                      const ProcessingState&) {
++  UNREACHABLE();
++}
++#endif  // !V8_TARGET_ARCH_ARM64
++
+ void LoadFixedArrayElement::PrintParams(std::ostream& os) const {
+   // TODO(victorgomes): Print compression status only after the result is
+   // allocated, since that's when we do decompression marking.
+diff --git a/src/maglev/maglev-ir.h b/src/maglev/maglev-ir.h
+index 8a687144..df61fb09 100644
+--- a/src/maglev/maglev-ir.h
++++ b/src/maglev/maglev-ir.h
+@@ -322,6 +322,10 @@ class ExceptionHandlerInfo;
+   V(LoadInt32)                                \
+   V(LoadTaggedFieldByFieldIndex)              \
+   V(LoadFixedArrayElement)                    \
++  V(LoadRegionField)                          \
++  V(LoadRegionElement)                        \
++  V(StoreRegionField)                         \
++  V(StoreRegionElement)                       \
+   V(LoadFixedDoubleArrayElement)              \
+   V(LoadHoleyFixedDoubleArrayElement)         \
+   V(LoadInt32DataViewElement)                 \
+@@ -8718,6 +8722,85 @@ class LoadFixedArrayElement
+   using LoadTypeField = NextBitField<LoadType, kLoadTypeBitSize>;
+ };
+ 
++// Objects of ownership regions (src/objects/js-region.h), as in Turbofan's
++// SimplifiedOperatorBuilder::LoadRegionField: loads and stores of values()
++// [index] of a region object and of region array elements, which check the
++// region, the index and the value. A load returns the hole and a store false
++// when the generic access must do the work. Code is generated on arm64; other
++// targets keep the generic access.
++class LoadRegionField : public FixedInputValueNodeT<1, LoadRegionField> {
++ public:
++  explicit LoadRegionField(uint64_t bitfield, int index)
++      : Base(bitfield), index_(index) {}
++
++  static constexpr OpProperties kProperties = OpProperties::CanRead();
++  DECLARE_INPUTS(Object)
++  DECLARE_INPUT_TYPES(Tagged)
++
++  int index() const { return index_; }
++
++  void SetValueLocationConstraints();
++  void GenerateCode(MaglevAssembler*, const ProcessingState&);
++  void PrintParams(std::ostream&) const;
++
++  auto options() const { return std::tuple{index_}; }
++
++ private:
++  const int index_;
++};
++
++class LoadRegionElement : public FixedInputValueNodeT<2, LoadRegionElement> {
++ public:
++  explicit LoadRegionElement(uint64_t bitfield) : Base(bitfield) {}
++
++  static constexpr OpProperties kProperties = OpProperties::CanRead();
++  DECLARE_INPUTS(Object, Key)
++  DECLARE_INPUT_TYPES(Tagged, Tagged)
++
++  void SetValueLocationConstraints();
++  void GenerateCode(MaglevAssembler*, const ProcessingState&);
++  void PrintParams(std::ostream&) const {}
++};
++
++class StoreRegionField : public FixedInputValueNodeT<2, StoreRegionField> {
++ public:
++  explicit StoreRegionField(uint64_t bitfield, int index)
++      : Base(bitfield), index_(index) {}
++
++  static constexpr OpProperties kProperties =
++      OpProperties::CanWrite() | OpProperties::DeferredCall();
++  DECLARE_INPUTS(Object, Value)
++  DECLARE_INPUT_TYPES(Tagged, Tagged)
++
++  int index() const { return index_; }
++  int MaxCallStackArgs() const { return 0; }
++
++  void SetValueLocationConstraints();
++  void GenerateCode(MaglevAssembler*, const ProcessingState&);
++  void PrintParams(std::ostream&) const;
++
++  auto options() const { return std::tuple{index_}; }
++
++ private:
++  const int index_;
++};
++
++class StoreRegionElement : public FixedInputValueNodeT<3, StoreRegionElement> {
++ public:
++  explicit StoreRegionElement(uint64_t bitfield) : Base(bitfield) {}
++
++  static constexpr OpProperties kProperties =
++      OpProperties::CanWrite() | OpProperties::DeferredCall();
++  DECLARE_INPUTS(Object, Key, Value)
++  DECLARE_INPUT_TYPES(Tagged, Tagged, Tagged)
++
++  int MaxCallStackArgs() const { return 0; }
++
++  void SetValueLocationConstraints();
++  void GenerateCode(MaglevAssembler*, const ProcessingState&);
++  void PrintParams(std::ostream&) const {}
++};
++
+ class EnsureWritableFastElements
+     : public FixedInputValueNodeT<2, EnsureWritableFastElements> {
+  public:
 diff --git a/src/objects/all-objects.h b/src/objects/all-objects.h
 index 5a0a666c..473044be 100644
 --- a/src/objects/all-objects.h

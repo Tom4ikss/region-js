@@ -119,3 +119,24 @@ const attempt = (fn) => {
   const bump = optimize((l) => { for (let i = 0; i < l.length; i++) l[i].price += 1; return l[0].price; }, list);
   print('hot loops:', total(list), bump(list), total(list));
 }
+
+// One site for plain and region objects: the region path and the usual
+// specialization for the other maps, with exceptions from either.
+{
+  const r = new Region();
+  const plain = { x: 1, list: [1, 2, 3] };
+  const shared = r.run(() => ({ x: 10, list: [10, 20, 30] }));
+  const read = optimize((o) => {
+    try { return o.x + o.list[2]; } catch (e) { return 'caught: ' + e.message; }
+  }, plain);
+  read(shared);
+  %OptimizeFunctionOnNextCall(read);
+  const write = optimize((o, v) => { o.x = v; o.list[0] = v; return o.x + o.list[0]; }, plain, 2);
+  write(shared, 3);
+  %OptimizeFunctionOnNextCall(write);
+  print('mixed sites:', read(plain), read(shared), write(plain, 4), write(shared, 5));
+  r.freeze();
+  print('mixed, frozen:', read(shared), attempt(() => write(shared, 6)), write(plain, 7));
+  print('mixed, other object:', read({ x: 'new', list: ['a', 'b', 'c'] }),
+        attempt(() => read(null)));
+}
