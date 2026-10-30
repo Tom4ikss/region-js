@@ -100,6 +100,8 @@ expectError('without new', () => Channel());
   const ch = new Channel(1);
   const reader = spawn(async () => {
     const { value } = await ch.recv();
+    // Not captured by the task, so not borrowed for it: borrow to read.
+    using borrow = Region.of(value).borrow();
     return value.name + ' ' + value.limits[1];
   });
   await ch.send(config);

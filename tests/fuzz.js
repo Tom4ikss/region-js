@@ -51,11 +51,14 @@ const workerSource = `
         attempt(() => touch(d.tree, false));
       }
     } else if (cmd === 'read') {
-      // Frozen region: reads succeed, writes are denied. No borrow on purpose:
-      // the owner may thaw in the middle of this loop.
+      // Frozen region: reads need a borrow and succeed, writes are denied.
+      // The owner may thaw meanwhile; then borrowing fails and so do reads.
       while (performance.now() < deadline) {
+        let borrow = null;
+        try { borrow = Region.of(d).borrow(); } catch {}
         attempt(() => touch(d.tree, false) + d.list[3]);
         attempt(() => { d.writes = -1; });
+        borrow?.release();
       }
     }
     postMessage({ ok, denied, other });
@@ -101,7 +104,15 @@ for (let round = 0; round < rounds; round++) {
     for (const w of workers) w.postMessage({ cmd: 'read', ms: 2 });
     const spin = performance.now() + 1;
     while (performance.now() < spin) {}
-    region.thaw();
+    // Readers hold borrows: thaw() waits until none is left.
+    for (;;) {
+      try {
+        region.thaw();
+        break;
+      } catch (e) {
+        if (!e.message.startsWith('Region is still borrowed')) throw e;
+      }
+    }
     current.writes += 0;
     for (const w of workers) {
       const result = w.getMessage();

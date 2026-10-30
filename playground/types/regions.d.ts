@@ -82,8 +82,10 @@ declare class Region implements Disposable {
   /** Gives write access back to the owner. Throws while the region is borrowed. */
   thaw(): void;
   /** Keeps a frozen region from being thawed until the borrow is released.
-   * Typed arrays of a frozen region can only be read under a borrow (or by
-   * the thread that froze it); their views are detached when it ends.
+   * A frozen region can only be read under a borrow (or by the thread that
+   * froze it): plain fields and typed arrays alike. A borrow also keeps the
+   * region from being thawed, so a reader never sees a thaw mid-read.
+   * Typed array views are detached when the borrow ends.
    * A spawn() task borrows the frozen regions it gets by itself, and a borrow
    * taken in a task ends with the task at the latest. */
   borrow(): RegionBorrow;

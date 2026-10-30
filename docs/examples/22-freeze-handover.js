@@ -21,7 +21,7 @@ const worker = new Worker(
   { type: 'string' },
 );
 
-// Без transfer list воркер может читать, но разморозить не может.
+// Без transfer list воркер может читать (под билетом), но разморозить не может.
 worker.postMessage({ config });
 print('воркер без права:', worker.getMessage());
 

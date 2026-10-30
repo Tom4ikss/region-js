@@ -361,7 +361,7 @@ Region.of для обычного объекта: Region.of() expects an object 
 <p>Тысяча кругов «туда и обратно», и в конце в руках тот же самый объект: <code>current === state</code>. Один круг — два переезда и две пересылки сообщения — занимает около 10–11 микросекунд, от запуска к запуску по-разному.</p>
 
 <h2 id="freeze">7. Заморозка и рассылка</h2>
-<p><code>region.freeze()</code> делает регион доступным только для чтения, причём всем потокам. Замороженный регион отправляют без списка transfer: каждый получатель видит те же объекты. <code>region.frozen</code> показывает, заморожен ли регион. <code>region.thaw()</code> возвращает владельцу право писать.</p>
+<p><code>region.freeze()</code> делает регион доступным только для чтения, причём всем потокам, но читают его под билетом <code>borrow()</code> (<a href="#borrow">раздел 8</a>). Замороженный регион отправляют без списка transfer: каждый получатель видит те же объекты. Без билета чтение у получателя бросает <code>OwnershipError</code>, это видно в выводе воркера 0. <code>region.frozen</code> показывает, заморожен ли регион. <code>region.thaw()</code> возвращает владельцу право писать.</p>
 
 <figure class="example"><div class="ex-head"><span class="file"><a href="examples/08-freeze-broadcast.js">examples/08-freeze-broadcast.js</a></span><button class="copy" type="button">Копировать</button></div><pre class="code"><code><span class="tok-comment">// Заморозка: читать могут все, писать никто. Рассылка одного объекта трём воркерам.</span>
 <span class="tok-keyword">const</span> region = <span class="tok-keyword">new</span> <span class="tok-api">Region</span>();
@@ -381,9 +381,14 @@ region.<span class="tok-api">freeze</span>();
     <span class="tok-keyword">new</span> <span class="tok-api">Worker</span>(
       <span class="tok-string">`
       onmessage = ({ data: { config } }) =&gt; {
+        let unborrowed;
+        try { unborrowed = config.api; } catch (e) { unborrowed = e.message; }
+        // Читать замороженный регион можно только под билетом.
+        using borrow = Region.of(config).borrow();
         let write;
         try { config.retries = 0; write = 'записал'; } catch (e) { write = 'запись запрещена'; }
-        postMessage('воркер ${</span>i<span class="tok-string">}: ' + config.api + ', флаг ' + config.flags[${</span>i<span class="tok-string">}] + ', ' + write);
+        postMessage('воркер ${</span>i<span class="tok-string">}: ' + config.api + ', флаг ' + config.flags[${</span>i<span class="tok-string">}] + ', ' + write +
+                    (${</span>i<span class="tok-string">} === 0 ? '\\n  без билета: ' + unborrowed : ''));
       };
       `</span>,
       { type: <span class="tok-string">'string'</span> },
@@ -401,6 +406,7 @@ config.retries = <span class="tok-number">5</span>;
 <span class="tok-keyword">for</span> (<span class="tok-keyword">const</span> w <span class="tok-keyword">of</span> workers) w.<span class="tok-api">terminate</span>();</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8</span></div><pre class="out">frozen: true
 <span class="err">владелец пишет: OwnershipError: region 0 is frozen; thaw it before writing</span>
 воркер 0: https://example.test, флаг a, запись запрещена
+<span class="err">  без билета: OwnershipError: region 0 is frozen; borrow it to read it</span>
 воркер 1: https://example.test, флаг b, запись запрещена
 воркер 2: https://example.test, флаг c, запись запрещена
 главный поток тоже читает: 3
@@ -408,7 +414,7 @@ config.retries = <span class="tok-number">5</span>;
 
 <h3 id="thaw-right">Кто может разморозить</h3>
 <p>Разморозить регион может только тот поток, который его заморозил. Остальные получат ошибку «Region is not frozen by this isolate», даже если читают регион. Есть ли это право у текущего потока, показывает <code>region.frozenHere</code>.</p>
-<p>Право можно передать. Если положить замороженный регион в список transfer, данные никуда не едут (они и так общие), а получатель получает право разморозить. Отправитель его теряет, но читать регион может, как и все.</p>
+<p>Право можно передать. Если положить замороженный регион в список transfer, данные никуда не едут (они и так общие), а получатель получает право разморозить. Отправитель его теряет и дальше читает регион, как все остальные, под билетом.</p>
 
 <figure class="example"><div class="ex-head"><span class="file"><a href="examples/22-freeze-handover.js">examples/22-freeze-handover.js</a></span><button class="copy" type="button">Копировать</button></div><pre class="code"><code><span class="tok-comment">// Разморозить регион может только тот поток, который его заморозил.</span>
 <span class="tok-keyword">const</span> region = <span class="tok-keyword">new</span> <span class="tok-api">Region</span>();
@@ -433,7 +439,7 @@ region.<span class="tok-api">freeze</span>();
   { type: <span class="tok-string">'string'</span> },
 );
 
-<span class="tok-comment">// Без transfer list воркер может читать, но разморозить не может.</span>
+<span class="tok-comment">// Без transfer list воркер может читать (под билетом), но разморозить не может.</span>
 worker.<span class="tok-api">postMessage</span>({ config });
 <span class="tok-fn">print</span>(<span class="tok-string">'воркер без права:'</span>, worker.<span class="tok-api">getMessage</span>());
 
@@ -503,7 +509,8 @@ thaw с читателем: Region is still borrowed by 1 reader(s)
 разморожено, apple = 55
 borrow незамороженного: Region must be frozen to borrow it</pre></figure>
 
-<p>Брать билет можно в любом потоке, в том числе в воркере: <code>Region.of(obj).borrow()</code>. Читать обычные поля замороженного региона можно и без билета, а типизированные массивы — нет (<a href="#typed-borrow">раздел 9</a>). Билет нужен как гарантия, что регион не разморозят посреди вашего чтения.</p>
+<p>Брать билет можно в любом потоке, в том числе в воркере: <code>Region.of(obj).borrow()</code>. Без билета замороженный регион читают только тот поток, который его заморозил (или получил право разморозить), и задачи <code>spawn</code>, которые захватили регион или получили его аргументом: им билет выдаётся сам, на всё время задачи (<a href="spawn.html#frozen">подробнее</a>). Остальные получают <code>OwnershipError: region N is frozen; borrow it to read it</code>, и на обычных полях, и на типизированных массивах. Это касается и объекта, который пришёл через <code>postMessage</code> или канал.</p>
+<p>Зато пока билет у вас, <code>thaw()</code> не пройдёт: он бросит «Region is still borrowed by N reader(s)». Поэтому читатель никогда не увидит разморозку посреди чтения и не прочитает устаревшее значение.</p>
 <p><code>region.borrowWhile(fn)</code> берёт билет, вызывает <code>fn</code> и сдаёт билет, когда <code>fn</code> закончилась. Если <code>fn</code> вернула промис, билет сдаётся, когда промис выполнится или отклонится. <code>borrowWhile</code> возвращает то, что вернула <code>fn</code> (для асинхронной функции — промис с её результатом). Внутри задач <code>spawn</code> для асинхронной работы нужен именно он, потому что обычный билет живёт не дольше задачи (<a href="spawn.html#borrow">подробнее на странице про spawn</a>).</p>
 
 <h2 id="typed">9. Типизированные массивы</h2>
@@ -557,7 +564,7 @@ start = performance.<span class="tok-fn">now</span>();
 <h3 id="typed-detach">Когда view отсоединяются</h3>
 <p>Пока регион у вас, view над его памятью работают как обычно. Когда регион уезжает в другой поток или замораживается, все view владельца отсоединяются: длина становится 0, элементы читаются как <code>undefined</code>. Так же ведёт себя <code>ArrayBuffer</code> после transfer. Ошибки <code>OwnershipError</code> здесь нет, потому что проверки владельца на каждом элементе нет. После возврата региона старые view так и остаются пустыми: прочитайте поле заново и получите новый.</p>
 <p>Читатели замороженного региона получают view только для чтения. Запись в него вне strict mode молча не проходит, в strict mode и у методов вроде <code>fill</code> и <code>set</code> бросает <code>TypeError</code>.</p>
-<p id="typed-borrow">С view замороженного региона есть ещё одно правило. Обычное поле проверяется при каждом чтении, а view читает память напрямую. Если бы view жил дольше права читать, поток видел бы регион и после разморозки, когда в него уже пишет новый владелец. Поэтому view замороженного региона получают только два потока: тот, кто его заморозил, и тот, кто держит билет <code>borrow()</code>. Остальным чтение такого поля бросает <code>OwnershipError</code>, обычные поля при этом читаются как раньше. Когда поток сдаёт последний билет, его view отсоединяются. View того, кто заморозил, отсоединяются при <code>thaw()</code> или когда он передаёт право разморозки. Внутри <code>spawn</code> билет на замороженные регионы задача берёт сама, на всё время работы (<a href="spawn.html#frozen">подробнее</a>).</p>
+<p id="typed-borrow">View замороженного региона получают те же потоки, что могут читать его поля: тот, кто его заморозил, и тот, кто держит билет <code>borrow()</code>. Но у view есть своё правило. Обычное поле проверяется при каждом чтении, а view читает память напрямую. Если бы view жил дольше права читать, поток видел бы регион и после разморозки, когда в него уже пишет новый владелец. Поэтому, когда поток сдаёт последний билет, его view отсоединяются. View того, кто заморозил, отсоединяются при <code>thaw()</code> или когда он передаёт право разморозки. Внутри <code>spawn</code> билет на замороженные регионы задача берёт сама, на всё время работы (<a href="spawn.html#frozen">подробнее</a>).</p>
 
 <figure class="example"><div class="ex-head"><span class="file"><a href="examples/21-typed-views.js">examples/21-typed-views.js</a></span><button class="copy" type="button">Копировать</button></div><pre class="code"><code><span class="tok-comment">// View отсоединяются, когда регион переезжает или замораживается.</span>
 <span class="tok-keyword">const</span> region = <span class="tok-keyword">new</span> <span class="tok-api">Region</span>();
@@ -772,10 +779,10 @@ view после free: 0
 <tr><td><code>worker.postMessage(msg, [region])</code></td><td>Переезд: получатель становится владельцем, отправитель теряет доступ. Вместо <code>region</code> можно указать любой его объект.</td></tr>
 <tr><td><code>worker.postMessage(msg)</code></td><td>Для объектов замороженного региона — рассылка без копии.</td></tr>
 <tr><td><code>worker.postMessage(msg, [frozenRegion])</code></td><td>Для замороженного региона — передать право разморозить.</td></tr>
-<tr><td><code>region.freeze()</code>, <code>region.thaw()</code></td><td>Заморозить (читают все, не пишет никто) и разморозить (только тот, кто заморозил или получил право, и только без читателей).</td></tr>
+<tr><td><code>region.freeze()</code>, <code>region.thaw()</code></td><td>Заморозить (читают все под билетом, не пишет никто) и разморозить (только тот, кто заморозил или получил право, и только без читателей).</td></tr>
 <tr><td><code>region.frozen</code>, <code>region.readers</code></td><td>Заморожен ли регион и сколько билетов сейчас выдано.</td></tr>
 <tr><td><code>region.frozenHere</code></td><td>Есть ли у текущего потока право разморозить регион.</td></tr>
-<tr><td><code>region.borrow()</code></td><td>Билет читателя. У билета есть <code>release()</code>, и его можно объявить через <code>using</code>.</td></tr>
+<tr><td><code>region.borrow()</code></td><td>Билет читателя: без него замороженный регион читает только тот, кто его заморозил, и задачи <code>spawn</code>, которым он достался. У билета есть <code>release()</code>, и его можно объявить через <code>using</code>.</td></tr>
 <tr><td><code>region.borrowWhile(fn)</code></td><td>Держит билет, пока выполняется <code>fn</code> или пока не выполнится её промис. Возвращает результат <code>fn</code>.</td></tr>
 <tr><td><code>using _ = region.enter()</code></td><td>Сделать регион текущим до конца блока.</td></tr>
 <tr><td><code>Region.object(obj)</code>, <code>Region.array(...items)</code></td><td>Объект или массив в текущем регионе.</td></tr>
@@ -801,6 +808,7 @@ view после free: 0
 <tr><td><code>OwnershipError: region N was freed</code></td><td>Обращение к освобождённому региону.</td></tr>
 <tr><td><code>OwnershipError: region N is being moved between isolates</code></td><td>Регион отправлен, но ещё не получен.</td></tr>
 <tr><td><code>OwnershipError: region N is frozen; thaw it before writing</code></td><td>Запись в замороженный регион, в том числе владельцем.</td></tr>
+<tr><td><code>OwnershipError: region N is frozen; borrow it to read it</code></td><td>Чтение замороженного региона без билета потоком, который его не замораживал: поля, типизированные массивы, <code>Object.keys</code> и прочее.</td></tr>
 <tr><td><code>OwnershipError: a region object cannot reference objects outside its region; copy them in with Region.object() or Region.array()</code></td><td>Запись в поле обычного объекта или объекта из другого региона.</td></tr>
 <tr><td><code>Cannot add property X, region objects have a fixed shape</code></td><td>Новое свойство у объекта региона.</td></tr>
 <tr><td><code>Region.object() needs a current region: use region.enter() or region.object()</code></td><td><code>Region.object()</code> вне <code>enter()</code> и <code>run()</code>, в том числе в задаче <code>spawn</code>. У <code>Region.array()</code> текст такой же, со своим именем.</td></tr>

@@ -137,7 +137,7 @@ index 7677d9c3..6de13280 100644
        case LookupIterator::TYPED_ARRAY_INDEX_NOT_FOUND:
        case LookupIterator::DATA:
 diff --git a/src/codegen/external-reference.cc b/src/codegen/external-reference.cc
-index 9ae5654b..d4f4be72 100644
+index 9ae5654b..ea4fb700 100644
 --- a/src/codegen/external-reference.cc
 +++ b/src/codegen/external-reference.cc
 @@ -36,6 +36,7 @@
@@ -148,7 +148,19 @@ index 9ae5654b..d4f4be72 100644
  #include "src/objects/module.h"
  #include "src/objects/object-type.h"
  #include "src/objects/objects-inl.h"
-@@ -813,6 +814,10 @@ ExternalReference ExternalReference::address_of_builtin_subclassing_flag() {
+@@ -535,6 +536,11 @@ ExternalReference ExternalReference::force_slow_path(Isolate* isolate) {
+   return ExternalReference(isolate->force_slow_path_address());
+ }
+ 
++ExternalReference ExternalReference::region_read_table_address(
++    Isolate* isolate) {
++  return ExternalReference(isolate->region_read_table_address());
++}
++
+ FUNCTION_REFERENCE(new_deoptimizer_function, Deoptimizer::New)
+ 
+ FUNCTION_REFERENCE(compute_output_frames_function,
+@@ -813,6 +819,10 @@ ExternalReference ExternalReference::address_of_builtin_subclassing_flag() {
    return ExternalReference(&v8_flags.builtin_subclassing);
  }
  
@@ -160,10 +172,18 @@ index 9ae5654b..d4f4be72 100644
    return ExternalReference(&v8_flags.js_pr_3883);
  }
 diff --git a/src/codegen/external-reference.h b/src/codegen/external-reference.h
-index 8226ac48..5a21d9d3 100644
+index 8226ac48..784b9c69 100644
 --- a/src/codegen/external-reference.h
 +++ b/src/codegen/external-reference.h
-@@ -81,6 +81,7 @@ enum class IsolateFieldId : uint8_t;
+@@ -32,6 +32,7 @@ enum class IsolateFieldId : uint8_t;
+     "Address of the InterpreterEntryTrampoline instruction start")             \
+   V(interpreter_dispatch_table_address, "Interpreter::dispatch_table_address") \
+   V(force_slow_path, "Isolate::force_slow_path_address()")                     \
++  V(region_read_table_address, "Isolate::region_read_table_address()")         \
+   V(isolate_root, "Isolate::isolate_root()")                                   \
+   V(address_of_jslimit, "StackGuard::address_of_jslimit()")                    \
+   V(address_of_no_heap_write_interrupt_request,                                \
+@@ -81,6 +82,7 @@ enum class IsolateFieldId : uint8_t;
    V(abort_with_sandbox_violation, "abort_with_sandbox_violation")              \
    V(address_of_log_or_trace_osr, "v8_flags.log_or_trace_osr")                  \
    V(address_of_builtin_subclassing_flag, "v8_flags.builtin_subclassing")       \
@@ -172,7 +192,7 @@ index 8226ac48..5a21d9d3 100644
    V(address_of_double_neg_constant, "double_negate_constant")                  \
    V(address_of_enable_experimental_regexp_engine,                              \
 diff --git a/src/common/message-template.h b/src/common/message-template.h
-index ce7c8efa..6c7129b9 100644
+index ce7c8efa..bbb4c042 100644
 --- a/src/common/message-template.h
 +++ b/src/common/message-template.h
 @@ -739,6 +739,26 @@ namespace internal {
@@ -192,7 +212,7 @@ index ce7c8efa..6c7129b9 100644
 +    "#{} and #[] hold primitives and objects of their region; write nested "   \
 +    "objects as #{} and arrays as #[]")                                        \
 +  T(RegionBorrowRequired,                                                      \
-+    "OwnershipError: region % is frozen; borrow it to read its typed arrays")  \
++    "OwnershipError: region % is frozen; borrow it to read it")                \
 +  T(RegionCrossReference,                                                      \
 +    "OwnershipError: a region object cannot reference objects outside its "    \
 +    "region; copy them in with Region.object() or Region.array()")             \
@@ -4193,6 +4213,32 @@ index e98604b7..7021922f 100644
    TRACE_ISOLATE(deinit);
  
  #ifdef V8_ENABLE_REGEXP_DIAGNOSTICS
+diff --git a/src/execution/isolate.h b/src/execution/isolate.h
+index 793be1a7..8b7b0983 100644
+--- a/src/execution/isolate.h
++++ b/src/execution/isolate.h
+@@ -1796,6 +1796,13 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
+   bool force_slow_path() const { return force_slow_path_; }
+   bool* force_slow_path_address() { return &force_slow_path_; }
+ 
++  // Per region id, whether this isolate may read a frozen region: it froze
++  // it or borrows it. Null until the first freeze or borrow. Read by inline
++  // caches, maintained by RegionRegistry.
++  uint8_t* region_read_table() const { return region_read_table_; }
++  void set_region_read_table(uint8_t* table) { region_read_table_ = table; }
++  uint8_t** region_read_table_address() { return &region_read_table_; }
++
+   bool jitless() const { return jitless_; }
+ 
+   void SetStackSize(size_t v);
+@@ -2823,6 +2830,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
+   std::unique_ptr<PersistentHandlesList> persistent_handles_list_;
+ 
+   bool force_slow_path_ = false;
++  uint8_t* region_read_table_ = nullptr;
+ 
+   // Certain objects may be allocated in RO space if suitable for the snapshot.
+   bool enable_ro_allocation_for_snapshot_ = false;
 diff --git a/src/flags/flag-definitions.h b/src/flags/flag-definitions.h
 index f47b7006..cb8a3233 100644
 --- a/src/flags/flag-definitions.h
@@ -4322,7 +4368,7 @@ index edb398ee..10574ed4 100644
    {
      // Allows handle derefs for all threads/isolates from this thread.
 diff --git a/src/ic/accessor-assembler.cc b/src/ic/accessor-assembler.cc
-index c4fa533d..4e86e283 100644
+index c4fa533d..ae966bd3 100644
 --- a/src/ic/accessor-assembler.cc
 +++ b/src/ic/accessor-assembler.cc
 @@ -24,6 +24,7 @@
@@ -4421,7 +4467,7 @@ index c4fa533d..4e86e283 100644
      exit_point->ReturnCallBuiltin(Builtin::kHasProperty, p->context(),
                                    p->receiver(), p->name());
    }
-@@ -1551,6 +1612,81 @@ void AccessorAssembler::HandleStoreICSmiHandlerJSSharedStructFieldCase(
+@@ -1551,6 +1612,89 @@ void AccessorAssembler::HandleStoreICSmiHandlerJSSharedStructFieldCase(
    Return(value);
  }
  
@@ -4444,12 +4490,20 @@ index c4fa533d..4e86e283 100644
 +                 ExternalConstant(ExternalReference::isolate_address())));
 +  if (for_write) {
 +    GotoIfNot(is_owner, denied);
-+  } else {
-+    GotoIfNot(Word32Or(is_owner,
-+                       WordEqual(owner, UintPtrConstant(
-+                                            RegionRegistry::kFrozen))),
-+              denied);
++    return;
 +  }
++  // A frozen region is readable by the isolate that froze it and by those
++  // that borrow it: they are marked in this isolate's read table.
++  Label allowed(this);
++  GotoIf(is_owner, &allowed);
++  GotoIfNot(WordEqual(owner, UintPtrConstant(RegionRegistry::kFrozen)), denied);
++  TNode<RawPtrT> table = Load<RawPtrT>(
++      ExternalConstant(ExternalReference::region_read_table_address(isolate())));
++  GotoIf(WordEqual(table, IntPtrConstant(0)), denied);
++  GotoIf(Word32Equal(Load<Uint8T>(table, SmiUntag(region)), Int32Constant(0)),
++         denied);
++  Goto(&allowed);
++  BIND(&allowed);
 +}
 +
 +void AccessorAssembler::HandleStoreICRegionFieldCase(
@@ -4503,7 +4557,7 @@ index c4fa533d..4e86e283 100644
  void AccessorAssembler::HandleStoreICHandlerCase(
      const StoreICParameters* p, TNode<MaybeObject> handler, Label* miss,
      ICMode ic_mode, ElementSupport support_elements) {
-@@ -1629,9 +1765,12 @@ void AccessorAssembler::HandleStoreICHandlerCase(
+@@ -1629,9 +1773,12 @@ void AccessorAssembler::HandleStoreICHandlerCase(
      }
      BIND(&if_fast_smi);
      {
@@ -4517,7 +4571,7 @@ index c4fa533d..4e86e283 100644
        Branch(Word32Equal(handler_kind, STORE_KIND(kSharedStructField)),
               &shared_struct_field, &data);
  
-@@ -1642,6 +1781,14 @@ void AccessorAssembler::HandleStoreICHandlerCase(
+@@ -1642,6 +1789,14 @@ void AccessorAssembler::HandleStoreICHandlerCase(
        HandleStoreICSmiHandlerJSSharedStructFieldCase(p->context(), handler_word,
                                                       CAST(holder), p->value());
  
@@ -5213,10 +5267,10 @@ index 00000000..844041ef
 +#endif  // V8_OBJECTS_JS_REGION_INL_H_
 diff --git a/src/objects/js-region.cc b/src/objects/js-region.cc
 new file mode 100644
-index 00000000..46849b25
+index 00000000..ad3b496d
 --- /dev/null
 +++ b/src/objects/js-region.cc
-@@ -0,0 +1,1524 @@
+@@ -0,0 +1,1588 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -5462,9 +5516,54 @@ index 00000000..46849b25
 +  return owners_[region].load(std::memory_order_acquire) == OwnerKey(isolate);
 +}
 +
++// A frozen region needs a borrow, or to have been frozen by this isolate:
++// a reader without one could see a thaw in the middle of a read.
 +bool RegionRegistry::CanRead(int region, Isolate* isolate) {
 +  uintptr_t owner = owners_[region].load(std::memory_order_acquire);
-+  return owner == OwnerKey(isolate) || owner == kFrozen;
++  if (owner == OwnerKey(isolate)) return true;
++  if (owner != kFrozen) return false;
++  uint8_t* table = isolate->region_read_table();
++  return table && table[region];
++}
++
++namespace {
++
++// Every read table, so that a released region id can be cleared in all.
++base::Mutex* ReadTablesMutex() {
++  static base::LeakyObject<base::Mutex> mutex;
++  return mutex.get();
++}
++std::vector<uint8_t*>* ReadTables() {
++  static base::LeakyObject<std::vector<uint8_t*>> tables;
++  return tables.get();
++}
++
++}  // namespace
++
++// static
++void RegionRegistry::SetReadable(int region, Isolate* isolate, bool readable) {
++  uint8_t* table = isolate->region_read_table();
++  if (!table) {
++    if (!readable) return;
++    table = static_cast<uint8_t*>(base::Calloc(kMaxRegions, 1));
++    CHECK_NOT_NULL(table);
++    isolate->set_region_read_table(table);
++    base::MutexGuard guard(ReadTablesMutex());
++    ReadTables()->push_back(table);
++  }
++  table[region] = readable ? 1 : 0;
++}
++
++// static
++void RegionRegistry::ForgetReadTable(Isolate* isolate) {
++  uint8_t* table = isolate->region_read_table();
++  if (!table) return;
++  {
++    base::MutexGuard guard(ReadTablesMutex());
++    std::erase(*ReadTables(), table);
++  }
++  isolate->set_region_read_table(nullptr);
++  base::Free(table);
 +}
 +
 +bool RegionRegistry::IsFrozen(int region) {
@@ -5495,6 +5594,7 @@ index 00000000..46849b25
 +  }
 +  owner_ids_[region].store(kFreedOwner, std::memory_order_relaxed);
 +  bytes_[region].store(0, std::memory_order_relaxed);
++  SetReadable(region, isolate, false);
 +  return FreeResult::kFreed;
 +}
 +
@@ -5561,10 +5661,13 @@ index 00000000..46849b25
 +  // Borrows only succeed once the owners entry says kFrozen, so the counter
 +  // can be reset before publishing the new state.
 +  readers_[region].store(0, std::memory_order_relaxed);
++  // The isolate that freezes keeps reading without a borrow.
++  SetReadable(region, isolate, true);
 +  uintptr_t expected = OwnerKey(isolate);
 +  if (!owners_[region].compare_exchange_strong(expected, kFrozen,
 +                                               std::memory_order_acq_rel)) {
 +    readers_[region].store(kNotFrozen, std::memory_order_relaxed);
++    SetReadable(region, isolate, false);
 +    return false;
 +  }
 +  return true;
@@ -5583,6 +5686,7 @@ index 00000000..46849b25
 +    return ThawResult::kBorrowed;
 +  }
 +  owners_[region].store(OwnerKey(isolate), std::memory_order_release);
++  SetReadable(region, isolate, false);
 +  return ThawResult::kThawed;
 +}
 +
@@ -5626,8 +5730,14 @@ index 00000000..46849b25
 +  base::MutexGuard guard(RegionsMutex());
 +  for (int region = 0; region < count; region++) {
 +    if (!in_use_[region].load(std::memory_order_relaxed) || live[region] ||
-+        handles_[region].load(std::memory_order_relaxed) > 0) {
++        handles_[region].load(std::memory_order_relaxed) > 0 ||
++        readers_[region].load(std::memory_order_relaxed) > 0) {
 +      continue;
++    }
++    // All isolates are stopped: no read table is in use.
++    {
++      base::MutexGuard tables_guard(ReadTablesMutex());
++      for (uint8_t* table : *ReadTables()) table[region] = 0;
 +    }
 +    in_use_[region].store(false, std::memory_order_relaxed);
 +    generations_[region].fetch_add(1, std::memory_order_release);
@@ -5652,6 +5762,7 @@ index 00000000..46849b25
 +    return false;
 +  }
 +  owner_ids_[region].store(kInTransit, std::memory_order_relaxed);
++  if (!IsBorrowedBy(region, isolate)) SetReadable(region, isolate, false);
 +  return true;
 +}
 +
@@ -5663,6 +5774,7 @@ index 00000000..46849b25
 +    return false;
 +  }
 +  owner_ids_[region].store(isolate->id(), std::memory_order_relaxed);
++  SetReadable(region, isolate, true);
 +  return true;
 +}
 +
@@ -5673,6 +5785,7 @@ index 00000000..46849b25
 +    if (readers_[region].compare_exchange_weak(readers, readers + 1,
 +                                               std::memory_order_acq_rel)) {
 +      RegionViews::ChangeBorrows(isolate, region, 1);
++      SetReadable(region, isolate, true);
 +      return true;
 +    }
 +  }
@@ -5683,6 +5796,7 @@ index 00000000..46849b25
 +  // Views go first: once the counter drops, the region may be thawed.
 +  if (RegionViews::ChangeBorrows(isolate, region, -1) == 0) {
 +    JSRegionObject::DetachFrozenViewsIfUnused(isolate, region);
++    if (!IsFrozenBy(region, isolate)) SetReadable(region, isolate, false);
 +  }
 +  int previous = readers_[region].fetch_sub(1, std::memory_order_acq_rel);
 +  CHECK_GT(previous, 0);
@@ -5710,6 +5824,9 @@ index 00000000..46849b25
 +        *factory->NewTypeError(MessageTemplate::kRegionInTransit, id));
 +  } else if (access == Access::kWrite && RegionRegistry::IsFrozen(region)) {
 +    isolate->Throw(*factory->NewTypeError(MessageTemplate::kRegionFrozen, id));
++  } else if (RegionRegistry::IsFrozen(region)) {
++    isolate->Throw(
++        *factory->NewTypeError(MessageTemplate::kRegionBorrowRequired, id));
 +  } else {
 +    isolate->Throw(*factory->NewTypeError(
 +        MessageTemplate::kRegionNotOwner, id,
@@ -6451,6 +6568,7 @@ index 00000000..46849b25
 +    GlobalHandles::Destroy(location);
 +  }
 +  ForgetRegionLiterals(isolate);
++  RegionRegistry::ForgetReadTable(isolate);
 +}
 +
 +namespace {
@@ -6743,10 +6861,10 @@ index 00000000..46849b25
 +}  // namespace v8
 diff --git a/src/objects/js-region.h b/src/objects/js-region.h
 new file mode 100644
-index 00000000..93b44e7d
+index 00000000..33fe3c7c
 --- /dev/null
 +++ b/src/objects/js-region.h
-@@ -0,0 +1,256 @@
+@@ -0,0 +1,259 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -6845,6 +6963,9 @@ index 00000000..93b44e7d
 +  static bool Borrow(int region, Isolate* isolate);
 +  static void Unborrow(int region, Isolate* isolate);
 +  static bool IsBorrowedBy(int region, Isolate* isolate);
++  // Marks whether `isolate` may read frozen `region`, in its read table.
++  static void SetReadable(int region, Isolate* isolate, bool readable);
++  static void ForgetReadTable(Isolate* isolate);
 +
 +  // Table indexed by region id, read by generated code. Holds the Isolate* of
 +  // the owner, 0 while the region is in transit, or kFrozen.

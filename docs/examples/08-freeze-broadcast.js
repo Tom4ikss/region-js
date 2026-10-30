@@ -16,9 +16,14 @@ const workers = [0, 1, 2].map(
     new Worker(
       `
       onmessage = ({ data: { config } }) => {
+        let unborrowed;
+        try { unborrowed = config.api; } catch (e) { unborrowed = e.message; }
+        // Читать замороженный регион можно только под билетом.
+        using borrow = Region.of(config).borrow();
         let write;
         try { config.retries = 0; write = 'записал'; } catch (e) { write = 'запись запрещена'; }
-        postMessage('воркер ${i}: ' + config.api + ', флаг ' + config.flags[${i}] + ', ' + write);
+        postMessage('воркер ${i}: ' + config.api + ', флаг ' + config.flags[${i}] + ', ' + write +
+                    (${i} === 0 ? '\\n  без билета: ' + unborrowed : ''));
       };
       `,
       { type: 'string' },

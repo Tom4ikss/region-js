@@ -45,7 +45,7 @@ const sums = await Promise.all(parts.map((k) =>
 const data = await loadCatalog();
 const region = new Region();
 const catalog = region.run(() => data);   // одна копия, в регион
-region.freeze();                          // читать могут все потоки сразу
+region.freeze();                          // читать могут все задачи сразу
 const sums = await Promise.all(parts.map((k) =>
   spawn(() => sumPart(catalog, k))));     // копий нет
 </js-good>
@@ -291,7 +291,7 @@ const results = await Promise.all(parts.map((i) =>
 <p>В плохом варианте <code>Promise.all</code> вернул номера частей, пока задачи только начинались: эти миллисекунды ушли на сами вызовы <code>spawn</code> и запуск воркеров пула. Задачи закончились намного позже, и узнать об этом удалось только через <code>spawn.idle()</code>. Эту ошибку подсвечивает правило ESLint <a href="tooling.html#no-floating-spawn"><code>no-floating-spawn</code></a>: оно отдельно говорит, что колбэк возвращает не ту ручку.</p>
 
 <h2 id="borrow-while"><span class="practice-num">11</span>Билет в асинхронной задаче — через <code>borrowWhile</code></h2>
-<p>Билет <code>region.borrow()</code>, взятый в задаче <code>spawn</code>, сдаётся сам, когда задача закончилась. Для синхронной работы это то, что нужно. Но если задача отложила чтение на потом (таймер, <code>await</code> без возврата промиса), к этому моменту билета уже нет, регион могли разморозить, и чтение бросит <code>OwnershipError</code>. <code>region.borrowWhile(fn)</code> держит билет, пока не выполнится промис из <code>fn</code>. Главное — вернуть этот промис из задачи или дождаться его, иначе задача закончится раньше. Замера здесь нет: плохой вариант просто не работает. Пример с настоящим выводом — на <a href="spawn.html#borrow">странице про spawn</a>.</p>
+<p>Билет <code>region.borrow()</code>, взятый в задаче <code>spawn</code>, сдаётся сам, когда задача закончилась. Для синхронной работы это то, что нужно. Но если задача отложила чтение на потом (таймер, <code>await</code> без возврата промиса), к этому моменту билета уже нет, и чтение бросит <code>OwnershipError</code>: без билета замороженный регион читать нельзя, а его к тому же могли разморозить. <code>region.borrowWhile(fn)</code> держит билет, пока не выполнится промис из <code>fn</code>. Главное — вернуть этот промис из задачи или дождаться его, иначе задача закончится раньше. Замера здесь нет: плохой вариант просто не работает. Пример с настоящим выводом — на <a href="spawn.html#borrow">странице про spawn</a>.</p>
 <div class="versus">
 <js-bad>
 await spawn(() => {

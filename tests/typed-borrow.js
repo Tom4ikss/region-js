@@ -18,9 +18,9 @@ const expectError = (name, fn) => {
     let view;
     onmessage = ({ data }) => {
       if (data.cmd === 'plain') {
-        let out;
-        try { view = data.s.data; out = 'NO ERROR'; } catch (e) { out = e.message; }
-        postMessage('field: ' + data.s.name + '; typed array without borrow: ' + out);
+        const attempt = (fn) => { try { return 'NO ERROR ' + fn(); } catch (e) { return e.message; } };
+        postMessage('field without borrow: ' + attempt(() => data.s.name) +
+                    '; typed array without borrow: ' + attempt(() => (view = data.s.data).length));
       } else if (data.cmd === 'borrow') {
         const borrow = Region.of(data.s).borrow();
         view = data.s.data;

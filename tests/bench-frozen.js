@@ -14,7 +14,13 @@ region.freeze();
 const workerSource = `
   const sum = (node) => node.value + (node.left ? sum(node.left) : 0) + (node.right ? sum(node.right) : 0);
   onmessage = ({ data }) => {
-    if (data.tree) { globalThis.tree = data.tree; postMessage(0); return; }
+    if (data.tree) {
+      // Reading a frozen region needs a borrow; keep it for the whole run.
+      globalThis.borrow = Region.of(data.tree).borrow();
+      globalThis.tree = data.tree;
+      postMessage(0);
+      return;
+    }
     let total = 0;
     for (let i = 0; i < data.passes; i++) total += sum(globalThis.tree);
     postMessage(total);

@@ -1,6 +1,7 @@
 frozen: true
 владелец пишет: OwnershipError: region 0 is frozen; thaw it before writing
 воркер 0: https://example.test, флаг a, запись запрещена
+  без билета: OwnershipError: region 0 is frozen; borrow it to read it
 воркер 1: https://example.test, флаг b, запись запрещена
 воркер 2: https://example.test, флаг c, запись запрещена
 главный поток тоже читает: 3
