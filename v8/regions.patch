@@ -124,6 +124,45 @@ index 5b3113a3..50d810c2 100644
  #include 'src/objects/js-struct.h'
  #include 'src/objects/js-weak-refs.h'
  #include 'src/objects/objects.h'
+diff --git a/src/builtins/builtins-array-gen.cc b/src/builtins/builtins-array-gen.cc
+index d1be4eba..c76c1677 100644
+--- a/src/builtins/builtins-array-gen.cc
++++ b/src/builtins/builtins-array-gen.cc
+@@ -23,6 +23,7 @@
+ #include "src/objects/allocation-site-inl.h"
+ #include "src/objects/arguments-inl.h"
+ #include "src/objects/elements-kind.h"
++#include "src/objects/js-region.h"
+ #include "src/objects/objects.h"
+ #include "src/objects/property-cell.h"
+ 
+@@ -545,6 +546,26 @@ TF_BUILTIN(ArrayPrototypePush, CodeStubAssembler) {
+ 
+   BIND(&runtime);
+   {
++    // An array of a region takes one element without the runtime while its
++    // values() has room for it.
++    Label generic(this, Label::kDeferred);
++    GotoIf(TaggedIsSmi(receiver), &generic);
++    GotoIfNot(IntPtrEqual(args.GetLengthWithoutReceiver(), IntPtrConstant(1)),
++              &generic);
++    TNode<HeapObject> region_array = CAST(receiver);
++    GotoIfNot(HasInstanceType(region_array, JS_REGION_OBJECT_TYPE), &generic);
++    GotoIfNot(IsUndefined(LoadObjectField(region_array,
++                                          offsetof(JSRegionObject, keys_))),
++              &generic);
++    GotoIfRegionAccessDenied(region_array, true, &generic);
++    TNode<Object> value = args.AtIndex(0);
++    GotoIfNotStorableInRegion(region_array, value, &generic);
++    TNode<Smi> length = LoadObjectField<Smi>(
++        region_array, offsetof(JSRegionObject, array_length_));
++    args.PopAndReturn(StoreRegionArrayElement(region_array, SmiUntag(length),
++                                              value, &generic));
++
++    BIND(&generic);
+     // We are not using Parameter(Descriptor::kJSTarget) and loading the value
+     // from the current frame here in order to reduce register pressure on the
+     // fast path.
 diff --git a/src/builtins/builtins-object.cc b/src/builtins/builtins-object.cc
 index 7677d9c3..6de13280 100644
 --- a/src/builtins/builtins-object.cc
@@ -136,6 +175,151 @@ index 7677d9c3..6de13280 100644
          continue;  // Continue to the prototype, if present.
        case LookupIterator::TYPED_ARRAY_INDEX_NOT_FOUND:
        case LookupIterator::DATA:
+diff --git a/src/codegen/code-stub-assembler.cc b/src/codegen/code-stub-assembler.cc
+index 976c1b3e..7407a57c 100644
+--- a/src/codegen/code-stub-assembler.cc
++++ b/src/codegen/code-stub-assembler.cc
+@@ -40,6 +40,7 @@
+ #include "src/objects/instance-type.h"
+ #include "src/objects/js-generator.h"
+ #include "src/objects/js-interceptor-map.h"
++#include "src/objects/js-region.h"
+ #include "src/objects/map.h"
+ #include "src/objects/objects.h"
+ #include "src/objects/oddball.h"
+@@ -21983,6 +21984,103 @@ void CodeStubAssembler::SharedValueBarrier(
+   BIND(&done);
+ }
+ 
++void CodeStubAssembler::GotoIfRegionAccessDenied(TNode<HeapObject> object,
++                                                 bool for_write,
++                                                 Label* denied) {
++  // A plain load is enough: the owner synchronized when it claimed the region
++  // on this thread, and an isolate never sees a stale copy of its own address
++  // after releasing. A reader of a frozen region synchronized when it took a
++  // borrow, and the borrow keeps the region frozen.
++  TNode<Smi> region =
++      LoadObjectField<Smi>(object, offsetof(JSRegionObject, region_id_));
++  TNode<UintPtrT> owner = Load<UintPtrT>(
++      ExternalConstant(ExternalReference::region_registry_owners()),
++      TimesSystemPointerSize(SmiUntag(region)));
++  TNode<BoolT> is_owner = WordEqual(
++      owner, ReinterpretCast<UintPtrT>(
++                 ExternalConstant(ExternalReference::isolate_address())));
++  if (for_write) {
++    GotoIfNot(is_owner, denied);
++    return;
++  }
++  // A frozen region is readable by the isolate that froze it and by those
++  // that borrow it: they are marked in this isolate's read table.
++  Label allowed(this);
++  GotoIf(is_owner, &allowed);
++  GotoIfNot(WordEqual(owner, UintPtrConstant(RegionRegistry::kFrozen)), denied);
++  TNode<RawPtrT> table = Load<RawPtrT>(
++      ExternalConstant(ExternalReference::region_read_table_address(isolate())));
++  GotoIf(WordEqual(table, IntPtrConstant(0)), denied);
++  GotoIf(Word32Equal(Load<Uint8T>(table, SmiUntag(region)), Int32Constant(0)),
++         denied);
++  Goto(&allowed);
++  BIND(&allowed);
++}
++
++void CodeStubAssembler::GotoIfNotStorableInRegion(TNode<HeapObject> holder,
++                                                  TNode<Object> value,
++                                                  Label* slow) {
++  Label store(this), check_region(this);
++  GotoIf(TaggedIsSmi(value), &store);
++  TNode<HeapObject> heap_value = CAST(value);
++#if CONTIGUOUS_COMPRESSED_READ_ONLY_SPACE_BOOL
++  GotoIf(Uint32LessThan(TruncateIntPtrToInt32(BitcastTaggedToWord(heap_value)),
++                        Int32Constant(kContiguousReadOnlyReservationSize)),
++         &store);
++  TNode<IntPtrT> page_flags = LoadMemoryChunkFlags(heap_value);
++#else
++  TNode<IntPtrT> page_flags = LoadMemoryChunkFlags(heap_value);
++  GotoIf(WordNotEqual(
++             WordAnd(page_flags, IntPtrConstant(MemoryChunk::READ_ONLY_HEAP)),
++             IntPtrConstant(0)),
++         &store);
++#endif
++  TNode<Uint16T> instance_type = LoadInstanceType(heap_value);
++  GotoIf(InstanceTypeEqual(instance_type, JS_REGION_OBJECT_TYPE),
++         &check_region);
++  GotoIf(IsJSReceiverInstanceType(instance_type), slow);
++  Branch(WordNotEqual(
++             WordAnd(page_flags,
++                     IntPtrConstant(MemoryChunk::IN_WRITABLE_SHARED_SPACE)),
++             IntPtrConstant(0)),
++         &store, slow);
++
++  BIND(&check_region);
++  Branch(TaggedEqual(
++             LoadObjectField(heap_value, offsetof(JSRegionObject, region_id_)),
++             LoadObjectField(holder, offsetof(JSRegionObject, region_id_))),
++         &store, slow);
++
++  BIND(&store);
++}
++
++TNode<Smi> CodeStubAssembler::StoreRegionArrayElement(TNode<HeapObject> array,
++                                                      TNode<IntPtrT> index,
++                                                      TNode<Object> value,
++                                                      Label* slow) {
++  // Room past the length holds undefined, so appending is a store and a new
++  // length. Growing values() allocates in shared space: left to the runtime.
++  GotoIf(IntPtrLessThan(index, IntPtrConstant(0)), slow);
++  TNode<FixedArray> values =
++      LoadObjectField<FixedArray>(array, offsetof(JSRegionObject, values_));
++  GotoIfNot(IntPtrLessThan(index, LoadFixedArrayBaseLength(values)), slow);
++  TNode<Smi> length =
++      LoadObjectField<Smi>(array, offsetof(JSRegionObject, array_length_));
++  TNode<IntPtrT> untagged_length = SmiUntag(length);
++  TVARIABLE(Smi, var_length, length);
++  Label done(this);
++  GotoIf(IntPtrLessThan(index, untagged_length), &done);
++  GotoIfNot(IntPtrEqual(index, untagged_length), slow);
++  var_length = SmiTag(IntPtrAdd(index, IntPtrConstant(1)));
++  Goto(&done);
++
++  BIND(&done);
++  StoreFixedArrayElement(values, index, value);
++  StoreObjectFieldNoWriteBarrier(array, offsetof(JSRegionObject, array_length_),
++                                 var_length.value());
++  return var_length.value();
++}
++
+ TNode<ArrayList> CodeStubAssembler::AllocateArrayList(TNode<Uint32T> capacity) {
+   TVARIABLE(ArrayList, result);
+   Label empty(this), nonempty(this), done(this);
+diff --git a/src/codegen/code-stub-assembler.h b/src/codegen/code-stub-assembler.h
+index f214a151..31fab0f9 100644
+--- a/src/codegen/code-stub-assembler.h
++++ b/src/codegen/code-stub-assembler.h
+@@ -2805,6 +2805,24 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
+   void SharedValueBarrier(TNode<Context> context,
+                           TVariable<Object>* var_shared_value);
+ 
++  // Jumps to |denied| unless the current isolate may read (owner, or a
++  // borrower of a frozen region) or write (owner) the region of |object|, a
++  // JSRegionObject.
++  void GotoIfRegionAccessDenied(TNode<HeapObject> object, bool for_write,
++                                Label* denied);
++  // Jumps to |slow| unless |value| can be stored in the region of |holder| as
++  // it is: Smis, read-only objects, primitives in shared space and objects of
++  // the same region. The runtime shares or rejects everything else.
++  void GotoIfNotStorableInRegion(TNode<HeapObject> holder, TNode<Object> value,
++                                 Label* slow);
++  // Stores |value| at |index| of the region array |array|, growing the array
++  // by one when |index| is its length and values() has room. Jumps to |slow|
++  // for any other index. The caller checked ownership and |value|. Returns
++  // the new length.
++  TNode<Smi> StoreRegionArrayElement(TNode<HeapObject> array,
++                                     TNode<IntPtrT> index, TNode<Object> value,
++                                     Label* slow);
++
+   TNode<WordT> TimesSystemPointerSize(TNode<WordT> value);
+   TNode<IntPtrT> TimesSystemPointerSize(TNode<IntPtrT> value) {
+     return Signed(TimesSystemPointerSize(implicit_cast<TNode<WordT>>(value)));
 diff --git a/src/codegen/external-reference.cc b/src/codegen/external-reference.cc
 index 9ae5654b..ea4fb700 100644
 --- a/src/codegen/external-reference.cc
@@ -4368,7 +4552,7 @@ index edb398ee..10574ed4 100644
    {
      // Allows handle derefs for all threads/isolates from this thread.
 diff --git a/src/ic/accessor-assembler.cc b/src/ic/accessor-assembler.cc
-index c4fa533d..ae966bd3 100644
+index c4fa533d..cf7e4107 100644
 --- a/src/ic/accessor-assembler.cc
 +++ b/src/ic/accessor-assembler.cc
 @@ -24,6 +24,7 @@
@@ -4467,97 +4651,80 @@ index c4fa533d..ae966bd3 100644
      exit_point->ReturnCallBuiltin(Builtin::kHasProperty, p->context(),
                                    p->receiver(), p->name());
    }
-@@ -1551,6 +1612,89 @@ void AccessorAssembler::HandleStoreICSmiHandlerJSSharedStructFieldCase(
+@@ -1456,7 +1517,8 @@ void AccessorAssembler::EmitAccessCheck(
+   CSA_DCHECK(this, IsNativeContext(expected_native_context));
+ 
+   TNode<NativeContext> native_context = LoadNativeContext(context);
+-  GotoIf(TaggedEqual(expected_native_context, native_context), can_access);
++  Label same_context(this);
++  GotoIf(TaggedEqual(expected_native_context, native_context), &same_context);
+ 
+   // If the |lookup_start_object| is primitive then we have to take a slow
+   // path because primitive maps are context-independent and thus the data
+@@ -1464,8 +1526,11 @@ void AccessorAssembler::EmitAccessCheck(
+   // (namely for the |expected_native_context|) while the data handler can
+   // be used in another native context via megamorphic stub cache.
+   // TODO(ishell): consider jumping to |slow| case instead of |miss|.
++  // The same goes for region objects, whose maps are shared.
+   GotoIf(TaggedIsSmi(lookup_start_object), miss);
+   GotoIf(JSAnyIsPrimitive(CAST(lookup_start_object)), miss);
++  GotoIf(HasInstanceType(CAST(lookup_start_object), JS_REGION_OBJECT_TYPE),
++         miss);
+ 
+   if (DEBUG_BOOL) {
+     // Check that the |lookup_start_object| is bound to some native context.
+@@ -1488,6 +1553,14 @@ void AccessorAssembler::EmitAccessCheck(
+   TNode<Object> current_token =
+       LoadContextElementNoCell(native_context, Context::SECURITY_TOKEN_INDEX);
+   Branch(TaggedEqual(expected_token, current_token), can_access, miss);
++
++  // A region object reads its prototype only while the region may be read.
++  BIND(&same_context);
++  GotoIf(TaggedIsSmi(lookup_start_object), can_access);
++  GotoIfNot(HasInstanceType(CAST(lookup_start_object), JS_REGION_OBJECT_TYPE),
++            can_access);
++  GotoIfRegionAccessDenied(CAST(lookup_start_object), false, miss);
++  Goto(can_access);
+ }
+ 
+ void AccessorAssembler::JumpIfDataProperty(TNode<Uint32T> details,
+@@ -1551,6 +1624,35 @@ void AccessorAssembler::HandleStoreICSmiHandlerJSSharedStructFieldCase(
    Return(value);
  }
  
-+void AccessorAssembler::GotoIfRegionAccessDenied(TNode<HeapObject> object,
-+                                                 bool for_write,
-+                                                 Label* denied) {
-+  // A plain load is enough: the owner synchronized when it claimed the region
-+  // on this thread, and an isolate never sees a stale copy of its own address
-+  // after releasing. Readers of a frozen region synchronize in Borrow() or
-+  // when they receive the objects in a message; a reader without either may
-+  // see a thaw late, but region objects have a fixed shape, so it can only
-+  // read a stale value, never an invalid one.
-+  TNode<Smi> region =
-+      LoadObjectField<Smi>(object, offsetof(JSRegionObject, region_id_));
-+  TNode<UintPtrT> owner = Load<UintPtrT>(
-+      ExternalConstant(ExternalReference::region_registry_owners()),
-+      TimesSystemPointerSize(SmiUntag(region)));
-+  TNode<BoolT> is_owner = WordEqual(
-+      owner, ReinterpretCast<UintPtrT>(
-+                 ExternalConstant(ExternalReference::isolate_address())));
-+  if (for_write) {
-+    GotoIfNot(is_owner, denied);
-+    return;
-+  }
-+  // A frozen region is readable by the isolate that froze it and by those
-+  // that borrow it: they are marked in this isolate's read table.
-+  Label allowed(this);
-+  GotoIf(is_owner, &allowed);
-+  GotoIfNot(WordEqual(owner, UintPtrConstant(RegionRegistry::kFrozen)), denied);
-+  TNode<RawPtrT> table = Load<RawPtrT>(
-+      ExternalConstant(ExternalReference::region_read_table_address(isolate())));
-+  GotoIf(WordEqual(table, IntPtrConstant(0)), denied);
-+  GotoIf(Word32Equal(Load<Uint8T>(table, SmiUntag(region)), Int32Constant(0)),
-+         denied);
-+  Goto(&allowed);
-+  BIND(&allowed);
-+}
-+
 +void AccessorAssembler::HandleStoreICRegionFieldCase(
-+    TNode<Word32T> handler_word, TNode<HeapObject> holder, TNode<Object> value,
-+    Label* slow) {
++    const StoreICParameters* p, TNode<Word32T> handler_word,
++    TNode<HeapObject> holder, Label* slow) {
++  TNode<Object> value = p->value();
 +  GotoIfRegionAccessDenied(holder, true, slow);
++  GotoIfNotStorableInRegion(holder, value, slow);
 +
-+  // Values that can be stored without help from the runtime: Smis, read-only
-+  // objects, primitives already in shared space and objects of the same
-+  // region. Everything else is shared or rejected by the runtime.
-+  Label store(this), check_region(this);
-+  GotoIf(TaggedIsSmi(value), &store);
-+  TNode<HeapObject> heap_value = CAST(value);
-+#if CONTIGUOUS_COMPRESSED_READ_ONLY_SPACE_BOOL
-+  GotoIf(Uint32LessThan(TruncateIntPtrToInt32(BitcastTaggedToWord(heap_value)),
-+                        Int32Constant(kContiguousReadOnlyReservationSize)),
-+         &store);
-+  TNode<IntPtrT> page_flags = LoadMemoryChunkFlags(heap_value);
-+#else
-+  TNode<IntPtrT> page_flags = LoadMemoryChunkFlags(heap_value);
-+  GotoIf(WordNotEqual(
-+             WordAnd(page_flags, IntPtrConstant(MemoryChunk::READ_ONLY_HEAP)),
-+             IntPtrConstant(0)),
-+         &store);
-+#endif
-+  TNode<Uint16T> instance_type = LoadInstanceType(heap_value);
-+  GotoIf(InstanceTypeEqual(instance_type, JS_REGION_OBJECT_TYPE),
-+         &check_region);
-+  GotoIf(IsJSReceiverInstanceType(instance_type), slow);
-+  Branch(WordNotEqual(
-+             WordAnd(page_flags,
-+                     IntPtrConstant(MemoryChunk::IN_WRITABLE_SHARED_SPACE)),
-+             IntPtrConstant(0)),
-+         &store, slow);
-+
-+  BIND(&check_region);
-+  Branch(TaggedEqual(
-+             LoadObjectField(heap_value, offsetof(JSRegionObject, region_id_)),
-+             LoadObjectField(holder, offsetof(JSRegionObject, region_id_))),
-+         &store, slow);
-+
-+  BIND(&store);
-+  TNode<FixedArray> values =
-+      LoadObjectField<FixedArray>(holder, offsetof(JSRegionObject, values_));
 +  TNode<Uint32T> index =
 +      DecodeWord32<StoreHandler::RegionValueIndexBits>(handler_word);
++  Label element(this);
++  GotoIf(Word32Equal(index, Int32Constant(StoreHandler::kRegionElementIndex)),
++         &element);
++  TNode<FixedArray> values =
++      LoadObjectField<FixedArray>(holder, offsetof(JSRegionObject, values_));
 +  StoreFixedArrayElement(values, Signed(ChangeUint32ToWord(index)), value);
 +  Return(value);
++
++  BIND(&element);
++  {
++    // Only arrays map element keys to positions in values().
++    GotoIfNot(IsUndefined(LoadObjectField(holder,
++                                          offsetof(JSRegionObject, keys_))),
++              slow);
++    TNode<IntPtrT> element_index = TryToIntptr(p->name(), slow);
++    StoreRegionArrayElement(holder, element_index, value, slow);
++    Return(value);
++  }
 +}
 +
  void AccessorAssembler::HandleStoreICHandlerCase(
      const StoreICParameters* p, TNode<MaybeObject> handler, Label* miss,
      ICMode ic_mode, ElementSupport support_elements) {
-@@ -1629,9 +1773,12 @@ void AccessorAssembler::HandleStoreICHandlerCase(
+@@ -1629,9 +1731,12 @@ void AccessorAssembler::HandleStoreICHandlerCase(
      }
      BIND(&if_fast_smi);
      {
@@ -4571,7 +4738,7 @@ index c4fa533d..ae966bd3 100644
        Branch(Word32Equal(handler_kind, STORE_KIND(kSharedStructField)),
               &shared_struct_field, &data);
  
-@@ -1642,6 +1789,14 @@ void AccessorAssembler::HandleStoreICHandlerCase(
+@@ -1642,6 +1747,13 @@ void AccessorAssembler::HandleStoreICHandlerCase(
        HandleStoreICSmiHandlerJSSharedStructFieldCase(p->context(), handler_word,
                                                       CAST(holder), p->value());
  
@@ -4579,33 +4746,28 @@ index c4fa533d..ae966bd3 100644
 +      if (p->IsAnyDefineOwn()) {
 +        Goto(&if_slow);
 +      } else {
-+        HandleStoreICRegionFieldCase(handler_word, CAST(holder), p->value(),
-+                                     &if_slow);
++        HandleStoreICRegionFieldCase(p, handler_word, CAST(holder), &if_slow);
 +      }
 +
        BIND(&data);
        // Handle non-transitioning field stores.
        HandleStoreICSmiHandlerCase(handler_word, CAST(holder), p->value(),
 diff --git a/src/ic/accessor-assembler.h b/src/ic/accessor-assembler.h
-index 480f110d..e1793bcc 100644
+index 480f110d..3cede0b5 100644
 --- a/src/ic/accessor-assembler.h
 +++ b/src/ic/accessor-assembler.h
-@@ -649,6 +649,13 @@ class V8_EXPORT_PRIVATE AccessorAssembler : public CodeStubAssembler {
+@@ -649,6 +649,9 @@ class V8_EXPORT_PRIVATE AccessorAssembler : public CodeStubAssembler {
    void HandleStoreICSmiHandlerJSSharedStructFieldCase(
        TNode<Context> context, TNode<Word32T> handler_word,
        TNode<JSObject> holder, TNode<Object> value);
-+  // Jumps to |denied| unless the current isolate may read (owner or frozen
-+  // region) or write (owner) the region of |object|, a JSRegionObject.
-+  void GotoIfRegionAccessDenied(TNode<HeapObject> object, bool for_write,
-+                                Label* denied);
-+  void HandleStoreICRegionFieldCase(TNode<Word32T> handler_word,
-+                                    TNode<HeapObject> holder,
-+                                    TNode<Object> value, Label* slow);
++  void HandleStoreICRegionFieldCase(const StoreICParameters* p,
++                                    TNode<Word32T> handler_word,
++                                    TNode<HeapObject> holder, Label* slow);
    void HandleStoreFieldAndReturn(TNode<Word32T> handler_word,
                                   TNode<JSObject> holder, TNode<Object> value,
                                   std::optional<TNode<Float64T>> double_value,
 diff --git a/src/ic/handler-configuration-inl.h b/src/ic/handler-configuration-inl.h
-index 8087dc5f..084ac882 100644
+index 8087dc5f..5b60f9f2 100644
 --- a/src/ic/handler-configuration-inl.h
 +++ b/src/ic/handler-configuration-inl.h
 @@ -137,6 +137,16 @@ Handle<Smi> LoadHandler::LoadModuleExport(Isolate* isolate, int index) {
@@ -4625,7 +4787,7 @@ index 8087dc5f..084ac882 100644
  Handle<Smi> LoadHandler::LoadNonExistent(Isolate* isolate) {
    int config = KindBits::encode(Kind::kNonExistent);
    return handle(Smi::FromInt(config), isolate);
-@@ -259,6 +269,12 @@ Handle<Smi> StoreHandler::StoreSlow(Isolate* isolate,
+@@ -259,6 +269,16 @@ Handle<Smi> StoreHandler::StoreSlow(Isolate* isolate,
    return handle(StoreSlow(store_mode), isolate);
  }
  
@@ -4633,6 +4795,10 @@ index 8087dc5f..084ac882 100644
 +  int config = KindBits::encode(Kind::kRegionField) |
 +               RegionValueIndexBits::encode(index);
 +  return handle(Smi::FromInt(config), isolate);
++}
++
++Handle<Smi> StoreHandler::StoreRegionElement(Isolate* isolate) {
++  return StoreRegionField(isolate, kRegionElementIndex);
 +}
 +
  Handle<Smi> StoreHandler::StoreGeneric(Isolate* isolate) {
@@ -4665,7 +4831,7 @@ index 855b04c4..703a14ae 100644
        os << "kGlobalProxy";
        break;
 diff --git a/src/ic/handler-configuration.h b/src/ic/handler-configuration.h
-index 6e85b8f0..c322741a 100644
+index 6e85b8f0..3d8d53cc 100644
 --- a/src/ic/handler-configuration.h
 +++ b/src/ic/handler-configuration.h
 @@ -49,8 +49,9 @@ V8_OBJECT class LoadHandler final : public DataHandler {
@@ -4717,7 +4883,7 @@ index 6e85b8f0..c322741a 100644
      kGlobalProxy,
      kNormal,
      kInterceptor,
-@@ -299,6 +317,12 @@ V8_OBJECT class StoreHandler final : public DataHandler {
+@@ -299,6 +317,15 @@ V8_OBJECT class StoreHandler final : public DataHandler {
    using NonMaskingInterceptorBits =
        LookupOnLookupStartObjectBits::Next<bool, 1>;
  
@@ -4726,23 +4892,27 @@ index 6e85b8f0..c322741a 100644
 +  //
 +  using RegionValueIndexBits = LookupOnLookupStartObjectBits::Next<unsigned, 20>;
 +  static_assert(RegionValueIndexBits::kLastUsedBit < kSmiValueSize);
++  // Index value that stores an element of a region array; the key is the
++  // index.
++  static constexpr unsigned kRegionElementIndex = RegionValueIndexBits::kMax;
 +
    // Applicable to kField, kAccessor and kNativeDataProperty.
  
    // Index of a value entry in the descriptor array.
-@@ -406,6 +430,10 @@ V8_OBJECT class StoreHandler final : public DataHandler {
+@@ -406,6 +433,11 @@ V8_OBJECT class StoreHandler final : public DataHandler {
    static inline Handle<Smi> StoreGeneric(Isolate* isolate);
    static inline Tagged<Smi> StoreGeneric();
  
 +  // Creates a Smi-handler for storing into an existing field of a region
 +  // object at `index` in values().
 +  static inline Handle<Smi> StoreRegionField(Isolate* isolate, unsigned index);
++  static inline Handle<Smi> StoreRegionElement(Isolate* isolate);
 +
    // Creates a Smi-handler for storing a property on a proxy.
    static inline Handle<Smi> StoreProxy(Isolate* isolate);
    static inline Tagged<Smi> StoreProxy();
 diff --git a/src/ic/ic.cc b/src/ic/ic.cc
-index 68ff2da2..0bc4bd07 100644
+index 68ff2da2..20923359 100644
 --- a/src/ic/ic.cc
 +++ b/src/ic/ic.cc
 @@ -37,6 +37,7 @@
@@ -4761,15 +4931,65 @@ index 68ff2da2..0bc4bd07 100644
          return;
        case LookupIterator::WASM_OBJECT:
          continue;  // Continue to the prototype, if present.
-@@ -1062,7 +1064,20 @@ void IC::SetCache(DirectHandle<Name> name, const MaybeObjectHandle& handler) {
+@@ -1060,9 +1062,70 @@ void IC::SetCache(DirectHandle<Name> name, const MaybeObjectHandle& handler) {
+   }
+ }
  
++MaybeObjectHandle LoadIC::ComputeRegionPrototypeHandler(
++    LookupIterator* lookup) {
++  // A region object has a shared map without a prototype: what it does not
++  // have comes from Array.prototype or Object.prototype of the current native
++  // context. A constant there, usually a method, is cached the way it is for
++  // a local object with that prototype, guarded by the validity cell of its
++  // prototype chain. The handler asks for an access check, which for a region
++  // object checks the native context and the right to read the region.
++  MaybeObjectHandle slow(LoadHandler::LoadSlow(isolate()));
++  DirectHandle<Map> local_map;
++  if (IsAnyHas() ||
++      !JSRegionObject::PrototypeMapForIC(lookup).ToHandle(&local_map)) {
++    return slow;
++  }
++  DirectHandle<JSObject> prototype(Cast<JSObject>(local_map->prototype()),
++                                   isolate());
++  LookupIterator it(isolate(), lookup->GetReceiver(), lookup->GetName(),
++                    prototype);
++  if (it.state() != LookupIterator::DATA || it.is_dictionary_holder() ||
++      it.constness() != PropertyConstness::kConst) {
++    return slow;
++  }
++  DirectHandle<Object> value = it.GetDataValue();
++  if (IsString(*value) && !IsInternalizedString(*value)) return slow;
++  DirectHandle<UnionOf<Smi, Cell>> validity_cell =
++      Map::GetOrCreatePrototypeChainValidityCell(local_map, isolate());
++  if (*validity_cell == Map::kNoValidityCellSentinel) return slow;
++  Tagged<HeapObject> native_context;
++  if (!Cast<Cell>(*validity_cell)
++           ->maybe_value()
++           .GetHeapObjectIfWeak(&native_context) ||
++      native_context != isolate()->raw_native_context()) {
++    return slow;
++  }
++  int config = LoadHandler::KindBits::encode(
++                   LoadHandler::Kind::kConstantFromPrototype) |
++               LoadHandler::DoAccessCheckOnLookupStartObjectBits::encode(true);
++  Handle<LoadHandler> handler = isolate()->factory()->NewLoadHandler(1);
++  handler->set_smi_handler(Smi::FromInt(config));
++  handler->set_validity_cell(*validity_cell);
++  MaybeObjectHandle data1 = IsSmi(*value)
++                               ? MaybeObjectHandle(*value, isolate())
++                               : MaybeObjectHandle::Weak(*value, isolate());
++  handler->set_data1(*data1);
++  return MaybeObjectHandle(handler);
++}
++
  void LoadIC::UpdateCaches(LookupIterator* lookup) {
    MaybeObjectHandle handler;
 -  if (lookup->state() == LookupIterator::ACCESS_CHECK) {
 +  if (lookup->state() == LookupIterator::REGION_OBJECT) {
 +    int index = JSRegionObject::LookupIndexForIC(lookup);
-+    if (index == JSRegionObject::kNotFound ||
-+        index >= static_cast<int>(LoadHandler::kRegionElementIndex)) {
++    if (index == JSRegionObject::kNotFound) {
++      handler = ComputeRegionPrototypeHandler(lookup);
++    } else if (index >= static_cast<int>(LoadHandler::kRegionElementIndex)) {
 +      handler = MaybeObjectHandle(LoadHandler::LoadSlow(isolate()));
 +    } else {
 +      unsigned handler_index =
@@ -4783,7 +5003,7 @@ index 68ff2da2..0bc4bd07 100644
      handler = MaybeObjectHandle(LoadHandler::LoadSlow(isolate()));
    } else if (!lookup->IsFound()) {
      if (lookup->IsAnyPrivateName()) {
-@@ -1520,6 +1535,7 @@ MaybeObjectHandle LoadIC::ComputeHandler(LookupIterator* lookup) {
+@@ -1520,6 +1583,7 @@ MaybeObjectHandle LoadIC::ComputeHandler(LookupIterator* lookup) {
  
      case LookupIterator::MODULE_NAMESPACE:
      case LookupIterator::WASM_OBJECT:
@@ -4791,7 +5011,7 @@ index 68ff2da2..0bc4bd07 100644
      case LookupIterator::ACCESS_CHECK:
      case LookupIterator::NOT_FOUND:
      case LookupIterator::TRANSITION:
-@@ -1771,6 +1787,10 @@ Handle<Object> KeyedLoadIC::LoadElementHandler(
+@@ -1771,6 +1835,10 @@ Handle<Object> KeyedLoadIC::LoadElementHandler(
    if (instance_type == JS_PROXY_TYPE) {
      return LoadHandler::LoadProxy(isolate());
    }
@@ -4802,7 +5022,7 @@ index 68ff2da2..0bc4bd07 100644
    if (receiver_map->is_access_check_needed()) {
      TRACE_HANDLER_STATS(isolate(), KeyedLoadIC_SlowStub);
      return LoadHandler::LoadSlow(isolate());
-@@ -2056,6 +2076,8 @@ bool StoreIC::LookupForWrite(LookupIterator* it, DirectHandle<Object> value,
+@@ -2056,6 +2124,8 @@ bool StoreIC::LookupForWrite(LookupIterator* it, DirectHandle<Object> value,
          return true;
        case LookupIterator::MODULE_NAMESPACE:
          return false;
@@ -4811,7 +5031,7 @@ index 68ff2da2..0bc4bd07 100644
        case LookupIterator::INTERCEPTOR: {
          DirectHandle<JSObject> holder = it->GetHolder<JSObject>();
          Tagged<InterceptorInfo> info = holder->GetNamedInterceptor();
-@@ -2229,6 +2251,10 @@ Maybe<bool> DefineOwnDataProperty(LookupIterator* it,
+@@ -2229,6 +2299,10 @@ Maybe<bool> DefineOwnDataProperty(LookupIterator* it,
      case LookupIterator::WASM_OBJECT:
        RETURN_FAILURE(it->isolate(), kThrowOnError,
                       NewTypeError(MessageTemplate::kWasmObjectsAreOpaque));
@@ -4822,7 +5042,7 @@ index 68ff2da2..0bc4bd07 100644
      // When lazy feedback is disabled, the original state could be different
      // while the object is already prepared for TRANSITION.
      case LookupIterator::TRANSITION: {
-@@ -2236,6 +2262,7 @@ Maybe<bool> DefineOwnDataProperty(LookupIterator* it,
+@@ -2236,6 +2310,7 @@ Maybe<bool> DefineOwnDataProperty(LookupIterator* it,
          case LookupIterator::MODULE_NAMESPACE:
          case LookupIterator::JSPROXY:
          case LookupIterator::WASM_OBJECT:
@@ -4830,15 +5050,14 @@ index 68ff2da2..0bc4bd07 100644
          case LookupIterator::TRANSITION:
          case LookupIterator::DATA:
          case LookupIterator::INTERCEPTOR:
-@@ -2729,6 +2756,17 @@ MaybeObjectHandle StoreIC::ComputeHandler(LookupIterator* lookup) {
+@@ -2729,6 +2804,16 @@ MaybeObjectHandle StoreIC::ComputeHandler(LookupIterator* lookup) {
      case LookupIterator::MODULE_NAMESPACE:
      case LookupIterator::TYPED_ARRAY_INDEX_NOT_FOUND:
      case LookupIterator::ACCESS_CHECK:
 +    case LookupIterator::REGION_OBJECT: {
 +      int index = JSRegionObject::LookupIndexForIC(lookup);
 +      if (IsAnyDefineOwn() || index < 0 ||
-+          index > static_cast<int>(
-+                      StoreHandler::RegionValueIndexBits::kMax)) {
++          index >= static_cast<int>(StoreHandler::kRegionElementIndex)) {
 +        return MaybeObjectHandle(StoreHandler::StoreSlow(isolate()));
 +      }
 +      return MaybeObjectHandle(
@@ -4848,7 +5067,33 @@ index 68ff2da2..0bc4bd07 100644
      case LookupIterator::NOT_FOUND:
      case LookupIterator::WASM_OBJECT:
      case LookupIterator::STRING_LOOKUP_START_OBJECT:
-@@ -4446,6 +4484,7 @@ bool MaybeCanCloneObjectForObjectAssign(DirectHandle<JSReceiver> source,
+@@ -2880,6 +2965,10 @@ void KeyedStoreIC::UpdateStoreElement(Handle<Map> receiver_map,
+ Handle<Object> KeyedStoreIC::StoreElementHandler(
+     DirectHandle<Map> receiver_map, KeyedAccessStoreMode store_mode,
+     MaybeDirectHandle<UnionOf<Smi, Cell>> prev_validity_cell) {
++  if (receiver_map->instance_type() == JS_REGION_OBJECT_TYPE &&
++      !IsDefineKeyedOwnIC() && !IsStoreInArrayLiteralIC()) {
++    return StoreHandler::StoreRegionElement(isolate());
++  }
+   if (!IsJSObjectMap(*receiver_map) || receiver_map->is_access_check_needed() ||
+       receiver_map->has_indexed_interceptor() ||
+       receiver_map->IsMapInArrayPrototypeChain(isolate())) {
+@@ -2975,9 +3064,11 @@ void KeyedStoreIC::StoreElementPolymorphicHandlers(
+     DirectHandle<Object> handler;
+     DirectHandle<Map> transition;
+ 
+-    if (receiver_map->instance_type() < FIRST_JS_RECEIVER_TYPE ||
+-        receiver_map->ShouldCheckForReadOnlyElementsInPrototypeChain(
+-            isolate())) {
++    if (receiver_map->instance_type() == JS_REGION_OBJECT_TYPE) {
++      handler = StoreElementHandler(receiver_map, store_mode);
++    } else if (receiver_map->instance_type() < FIRST_JS_RECEIVER_TYPE ||
++               receiver_map->ShouldCheckForReadOnlyElementsInPrototypeChain(
++                   isolate())) {
+       // TODO(mvstanton): Consider embedding store_mode in the state of the slow
+       // keyed store ic for uniformity.
+       TRACE_HANDLER_STATS(isolate(), KeyedStoreIC_SlowStub);
+@@ -4446,6 +4537,7 @@ bool MaybeCanCloneObjectForObjectAssign(DirectHandle<JSReceiver> source,
        case LookupIterator::ACCESS_CHECK:
        case LookupIterator::JSPROXY:
        case LookupIterator::WASM_OBJECT:
@@ -4856,6 +5101,18 @@ index 68ff2da2..0bc4bd07 100644
        case LookupIterator::TYPED_ARRAY_INDEX_NOT_FOUND:
        case LookupIterator::ACCESSOR:
          return false;
+diff --git a/src/ic/ic.h b/src/ic/ic.h
+index c4045bb9..0620388f 100644
+--- a/src/ic/ic.h
++++ b/src/ic/ic.h
+@@ -228,6 +228,7 @@ class LoadIC : public IC {
+ 
+  private:
+   MaybeObjectHandle ComputeHandler(LookupIterator* lookup);
++  MaybeObjectHandle ComputeRegionPrototypeHandler(LookupIterator* lookup);
+ 
+   friend class IC;
+   friend class NamedLoadHandlerCompiler;
 diff --git a/src/json/json-stringifier.cc b/src/json/json-stringifier.cc
 index cb1a6166..0a54d999 100644
 --- a/src/json/json-stringifier.cc
@@ -5267,10 +5524,10 @@ index 00000000..844041ef
 +#endif  // V8_OBJECTS_JS_REGION_INL_H_
 diff --git a/src/objects/js-region.cc b/src/objects/js-region.cc
 new file mode 100644
-index 00000000..ad3b496d
+index 00000000..00baa47a
 --- /dev/null
 +++ b/src/objects/js-region.cc
-@@ -0,0 +1,1588 @@
+@@ -0,0 +1,1603 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -6695,6 +6952,21 @@ index 00000000..ad3b496d
 +}
 +
 +// static
++MaybeDirectHandle<Map> JSRegionObject::PrototypeMapForIC(LookupIterator* it) {
++  Isolate* isolate = it->isolate();
++  DirectHandle<JSRegionObject> object = it->GetHolder<JSRegionObject>();
++  if (it->IsElement() || IsJSRegionTypedArray(*object) ||
++      !CanAccess(isolate, object->region_id(), Access::kRead) ||
++      IsArrayLength(isolate, *object, it) || FindIndex(object, it) >= 0) {
++    return {};
++  }
++  Tagged<JSFunction> constructor = object->is_array()
++                                       ? *isolate->array_function()
++                                       : *isolate->object_function();
++  return direct_handle(constructor->initial_map(), isolate);
++}
++
++// static
 +MaybeHandle<Object> JSRegionObject::GetProperty(LookupIterator* it) {
 +  Isolate* isolate = it->isolate();
 +  DirectHandle<JSRegionObject> object = it->GetHolder<JSRegionObject>();
@@ -6861,10 +7133,10 @@ index 00000000..ad3b496d
 +}  // namespace v8
 diff --git a/src/objects/js-region.h b/src/objects/js-region.h
 new file mode 100644
-index 00000000..33fe3c7c
+index 00000000..c7384222
 --- /dev/null
 +++ b/src/objects/js-region.h
-@@ -0,0 +1,259 @@
+@@ -0,0 +1,264 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -7044,6 +7316,11 @@ index 00000000..33fe3c7c
 +  static constexpr int kNotFound = -1;
 +  static constexpr int kArrayLengthIndex = -2;
 +  static int LookupIndexForIC(LookupIterator* it);
++  // For inline caches: a local map with the prototype that a named property
++  // the object does not have is looked up in (Array.prototype or
++  // Object.prototype of the current native context), or null when the access
++  // must stay on the slow path. Never throws.
++  static MaybeDirectHandle<Map> PrototypeMapForIC(LookupIterator* it);
 +
 +  // Throws and returns false unless the current isolate may read `object`.
 +  static bool CheckReadAccess(Isolate* isolate,

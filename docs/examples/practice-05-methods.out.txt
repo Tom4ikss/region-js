@@ -1,5 +1,5 @@
-регион, filter/map/reduce:          224.75 ms
-регион, цикл for:                     7.55 ms
-копия циклом, filter/map/reduce:     26.49 ms
-копия циклом, цикл for:               8.60 ms
+регион, filter/map/reduce:          216.31 ms
+регион, цикл for:                     7.88 ms
+копия циклом, filter/map/reduce:     25.88 ms
+копия циклом, цикл for:               8.65 ms
 результаты совпадают: true
