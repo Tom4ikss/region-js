@@ -261,14 +261,15 @@ index 7677d9c3..fc762f96 100644
  }  // namespace v8
 diff --git a/src/builtins/builtins-region-gen.cc b/src/builtins/builtins-region-gen.cc
 new file mode 100644
-index 00000000..7b7512db
+index 00000000..87cf49ee
 --- /dev/null
 +++ b/src/builtins/builtins-region-gen.cc
-@@ -0,0 +1,268 @@
+@@ -0,0 +1,352 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
 +
++#include "src/builtins/builtins-string-gen.h"
 +#include "src/builtins/builtins-utils-gen.h"
 +#include "src/builtins/builtins.h"
 +#include "src/codegen/code-stub-assembler-inl.h"
@@ -287,15 +288,22 @@ index 00000000..7b7512db
 +// linear allocation area of this thread. Everything else, including the
 +// first literal of every shape, goes to the C++ builtins, which also fill the
 +// cache.
-+class RegionLiteralAssembler : public CodeStubAssembler {
++class RegionLiteralAssembler : public StringBuiltinsAssembler {
 + public:
 +  explicit RegionLiteralAssembler(compiler::CodeAssemblerState* state)
-+      : CodeStubAssembler(state) {}
++      : StringBuiltinsAssembler(state) {}
 +
 +  TNode<HeapObject> TryCreate(TNode<Context> context, CodeStubArguments* args,
 +                              bool is_object, Label* slow);
 +
 + private:
++  // A copy in shared space of a local number or short sequential string, the
++  // values literals hold most often, without the runtime. Adds the bytes of
++  // a string copy to {var_bytes}. Jumps to {runtime} for anything else.
++  TNode<HeapObject> TryShareValue(TNode<HeapObject> value,
++                                  TVariable<IntPtrT>* var_bytes,
++                                  Label* runtime);
++
 +  // Stores of a shared or read-only value into a shared object need no
 +  // remembered set, only the marking barrier, and that only while marking.
 +  TNode<BoolT> IsMarking() {
@@ -465,18 +473,28 @@ index 00000000..7b7512db
 +  StoreSharedField(object, offsetof(JSRegionObject, keys_), var_keys.value());
 +  StoreSharedField(object, offsetof(JSRegionObject, values_), values);
 +
-+  // The values: as they are when they can be, otherwise shared, copied or
-+  // rejected by the runtime, which throws the same errors as the C++ path.
++  // The values: as they are when they can be, local numbers and short
++  // strings copied here, and everything else shared, copied or rejected by
++  // the runtime, which throws the same errors as the C++ path.
++  TVARIABLE(IntPtrT, var_bytes,
++            IntPtrAdd(IntPtrConstant(JSRegionObject::kHeaderSize), values_size));
 +  BuildFastLoop<IntPtrT>(
-+      IntPtrConstant(0), length,
++      VariableList({&var_bytes}, zone()), IntPtrConstant(0), length,
 +      [&](TNode<IntPtrT> i) {
 +        TNode<Object> value = value_at(i);
-+        Label share(this, Label::kDeferred), next(this);
++        Label share(this, Label::kDeferred), runtime(this, Label::kDeferred),
++            next(this, {&var_bytes});
 +        GotoIfNotStorableInRegion(region, value, &share);
 +        StoreSharedElement(values, i, value);
 +        Goto(&next);
 +
 +        BIND(&share);
++        GotoIf(TaggedIsSmi(value), &runtime);
++        StoreSharedElement(values, i,
++                           TryShareValue(CAST(value), &var_bytes, &runtime));
++        Goto(&next);
++
++        BIND(&runtime);
 +        StoreFixedArrayElement(
 +            values, i,
 +            CallRuntime(Runtime::kShareRegionLiteralValue, context, region,
@@ -488,8 +506,7 @@ index 00000000..7b7512db
 +      1, kNoLoopUnrolling, IndexAdvanceMode::kPost);
 +
 +  // The region counts its bytes, as for objects the runtime creates.
-+  TNode<UintPtrT> bytes = Unsigned(
-+      IntPtrAdd(IntPtrConstant(JSRegionObject::kHeaderSize), values_size));
++  TNode<UintPtrT> bytes = Unsigned(var_bytes.value());
 +  TNode<RawPtrT> bytes_table = ReinterpretCast<RawPtrT>(
 +      ExternalConstant(ExternalReference::region_registry_bytes()));
 +  TNode<UintPtrT> offset = Unsigned(WordShl(region_id, 3));
@@ -499,6 +516,73 @@ index 00000000..7b7512db
 +    AtomicAdd64<AtomicInt64>(bytes_table, offset, bytes, UintPtrConstant(0));
 +  }
 +  return object;
++}
++
++TNode<HeapObject> RegionLiteralAssembler::TryShareValue(
++    TNode<HeapObject> value, TVariable<IntPtrT>* var_bytes, Label* runtime) {
++  TVARIABLE(HeapObject, var_copy);
++  Label number(this), one_byte(this), two_byte(this),
++      done(this, {&var_copy, var_bytes});
++  TNode<Map> map = LoadMap(value);
++  GotoIf(IsHeapNumberMap(map), &number);
++  TNode<Uint16T> instance_type = LoadMapInstanceType(map);
++  GotoIf(Word32Equal(instance_type, Int32Constant(SEQ_ONE_BYTE_STRING_TYPE)),
++         &one_byte);
++  Branch(Word32Equal(instance_type, Int32Constant(SEQ_TWO_BYTE_STRING_TYPE)),
++         &two_byte, runtime);
++
++  BIND(&number);
++  {
++    static_assert(!USE_ALLOCATION_ALIGNMENT_HEAP_NUMBER_BOOL);
++    TNode<HeapObject> copy =
++        AllocateInSharedSpace(IntPtrConstant(sizeof(HeapNumber)));
++    StoreMapNoWriteBarrier(copy, RootIndex::kHeapNumberMap);
++    StoreObjectFieldNoWriteBarrier(copy, offsetof(HeapNumber, value_),
++                                   LoadHeapNumberValue(value));
++    var_copy = copy;
++    Goto(&done);
++  }
++
++  // Longer strings are rarer, and the runtime copies them as well.
++  static constexpr int kMaxCopiedLength = 256;
++  auto copy_string = [&](String::Encoding encoding, int data_start,
++                         RootIndex shared_map) {
++    TNode<String> string = CAST(value);
++    TNode<IntPtrT> length = LoadStringLengthAsWord(string);
++    GotoIf(IntPtrGreaterThan(length, IntPtrConstant(kMaxCopiedLength)),
++           runtime);
++    TNode<IntPtrT> chars = encoding == String::ONE_BYTE_ENCODING
++                               ? length
++                               : IntPtrAdd(length, length);
++    TNode<IntPtrT> size = WordAnd(
++        IntPtrAdd(IntPtrConstant(data_start + kObjectAlignmentMask), chars),
++        IntPtrConstant(~kObjectAlignmentMask));
++    TNode<HeapObject> copy = AllocateInSharedSpace(size);
++    // Clear the padding after the characters.
++    StoreNoWriteBarrier(
++        MachineRepresentation::kTaggedSigned, copy,
++        IntPtrSub(size, IntPtrConstant(kObjectAlignment + kHeapObjectTag)),
++        SmiConstant(0));
++    InitializeSharedSeqString(copy, shared_map,
++                              Unsigned(TruncateIntPtrToInt32(length)));
++    CopyStringCharacters(string, CAST(copy), IntPtrConstant(0),
++                         IntPtrConstant(0), length, encoding, encoding);
++    *var_bytes = IntPtrAdd(var_bytes->value(), size);
++    var_copy = copy;
++    Goto(&done);
++  };
++
++  BIND(&one_byte);
++  copy_string(String::ONE_BYTE_ENCODING,
++              OFFSET_OF_DATA_START(SeqOneByteString),
++              RootIndex::kSharedSeqOneByteStringMap);
++  BIND(&two_byte);
++  copy_string(String::TWO_BYTE_ENCODING,
++              OFFSET_OF_DATA_START(SeqTwoByteString),
++              RootIndex::kSharedSeqTwoByteStringMap);
++
++  BIND(&done);
++  return var_copy.value();
 +}
 +
 +TF_BUILTIN(RegionObjectLiteral, RegionLiteralAssembler) {
@@ -548,7 +632,7 @@ index 36439464..29842b91 100644
      case Builtin::kInterpreterEntryTrampolineForProfiling:
      // Tiering builtins are set directly into the dispatch table and never
 diff --git a/src/codegen/code-stub-assembler.cc b/src/codegen/code-stub-assembler.cc
-index 976c1b3e..a273e0d2 100644
+index 976c1b3e..70fca1dc 100644
 --- a/src/codegen/code-stub-assembler.cc
 +++ b/src/codegen/code-stub-assembler.cc
 @@ -40,6 +40,7 @@
@@ -559,7 +643,7 @@ index 976c1b3e..a273e0d2 100644
  #include "src/objects/map.h"
  #include "src/objects/objects.h"
  #include "src/objects/oddball.h"
-@@ -21983,6 +21984,140 @@ void CodeStubAssembler::SharedValueBarrier(
+@@ -21983,6 +21984,151 @@ void CodeStubAssembler::SharedValueBarrier(
    BIND(&done);
  }
  
@@ -639,6 +723,17 @@ index 976c1b3e..a273e0d2 100644
 +  BIND(&store);
 +}
 +
++void CodeStubAssembler::InitializeSharedSeqString(TNode<HeapObject> string,
++                                                  RootIndex map,
++                                                  TNode<Uint32T> length) {
++  DCHECK(map == RootIndex::kSharedSeqOneByteStringMap ||
++         map == RootIndex::kSharedSeqTwoByteStringMap);
++  StoreMapNoWriteBarrier(string, map);
++  StoreObjectFieldNoWriteBarrier(string, offsetof(SeqString, length_), length);
++  StoreObjectFieldNoWriteBarrier(string, offsetof(SeqString, raw_hash_field_),
++                                 Int32Constant(String::kEmptyHashField));
++}
++
 +TNode<HeapObject> CodeStubAssembler::AllocateInSharedSpace(
 +    TNode<IntPtrT> size_in_bytes) {
 +  TNode<ExternalReference> top_address = ExternalConstant(
@@ -701,10 +796,10 @@ index 976c1b3e..a273e0d2 100644
    TVARIABLE(ArrayList, result);
    Label empty(this), nonempty(this), done(this);
 diff --git a/src/codegen/code-stub-assembler.h b/src/codegen/code-stub-assembler.h
-index f214a151..63204112 100644
+index f214a151..a8d6b4e5 100644
 --- a/src/codegen/code-stub-assembler.h
 +++ b/src/codegen/code-stub-assembler.h
-@@ -2805,6 +2805,31 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
+@@ -2805,6 +2805,35 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
    void SharedValueBarrier(TNode<Context> context,
                            TVariable<Object>* var_shared_value);
  
@@ -725,6 +820,10 @@ index f214a151..63204112 100644
 +  // the object before anything else can allocate, and stores into it with
 +  // write barriers.
 +  TNode<HeapObject> AllocateInSharedSpace(TNode<IntPtrT> size_in_bytes);
++  // Writes the map, length and an empty hash of a sequential string just
++  // allocated in shared space.
++  void InitializeSharedSeqString(TNode<HeapObject> string, RootIndex map,
++                                 TNode<Uint32T> length);
 +  // Stores |value| at |index| of the region array |array|, growing the array
 +  // by one when |index| is its length and values() has room. Jumps to |slow|
 +  // for any other index. The caller checked ownership and |value|. Returns

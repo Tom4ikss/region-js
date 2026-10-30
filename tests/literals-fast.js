@@ -125,3 +125,36 @@ const region = new Region();
   })));
   print('tasks:', counts.join(','));
 }
+
+// Values copied in generated code: numbers and short sequential strings,
+// one-byte and two-byte. Longer strings and cons strings go to the runtime.
+// Contents and the bytes counted for the region match either way.
+{
+  const r = new Region();
+  using _ = r.enter();
+  const make = (n, s) => #{ n, s };
+  for (let i = 0; i < 1000; i++) make(i + 0.5, 'warm ' + i);
+  const cases = [
+    [0.5, 'a' + String(1)],
+    [-0, 'товар ' + String(2)],
+    [NaN, 'x'.repeat(300) + String(3)],
+    [2 ** 53, ['left', String(4), 'right'].join('-').padEnd(20, '.')],
+    [1e-300, 'cons ' + 'string that is long enough ' + String(5)],
+  ];
+  const results = cases.map(([n, s]) => {
+    const before = r.byteSize;
+    const o = make(n, s);
+    return [Object.is(o.n, n), o.s === s, o.s.length === s.length, r.byteSize - before];
+  });
+  print('copied values:', results.map((x) => x.slice(0, 3).join('/')).join(' '));
+  // The same values through the C++ path: a fresh shape is never cached.
+  const slow = cases.map(([n, s]) => {
+    const before = r.byteSize;
+    new Function('n', 's', 'return #{ fresh' + Math.random().toString(36).slice(2) + ': n, s };')(n, s);
+    return r.byteSize - before;
+  });
+  print('bytes like the C++ path:', results.map((x) => x[3]).join(',') === slow.join(','));
+  const keyed = make(1, 'ключ ' + String(7));
+  const lookup = { ['ключ 7']: 'found' };
+  print('copied string as a key:', lookup[keyed.s], keyed.s === 'ключ 7');
+}
