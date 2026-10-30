@@ -193,3 +193,40 @@ spawn.poolSize = 4;
   }
   print('using JoinSet:', results.sort().join(', '));
 }
+
+// Aborting a task aborts the tasks it spawned, and theirs. They spin until
+// aborted, and a task ends only after its children: this ends only if the
+// abort reaches the grandchild.
+{
+  const started = new Channel(2);
+  const task = spawn(async (started) => {
+    const child = spawn(async (started) => {
+      const grandchild = spawn((started) => {
+        started.sendSync(true);
+        while (!spawn.aborted());
+        return 'grandchild stopped';
+      }, started);
+      let rounds = 0;
+      while (!spawn.aborted()) {
+        rounds++;
+        if (rounds % 1000 === 0) await null;
+      }
+      return await grandchild;
+    }, started);
+    started.sendSync(true);
+    try {
+      await child;
+    } catch (e) {
+      // A task spawned after the abort is aborted at once.
+      const late = spawn(() => {
+        while (!spawn.aborted());
+      });
+      await late.catch((e) => e);
+      return 'child: ' + e.message;
+    }
+  }, started);
+  await started.recv();
+  await started.recv();
+  task.abort();
+  print('nested:', await outcome(task));
+}

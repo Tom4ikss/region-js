@@ -3634,10 +3634,10 @@ index 00000000..9446d334
 +#endif  // V8_D8_D8_CHANNEL_H_
 diff --git a/src/d8/d8-port.cc b/src/d8/d8-port.cc
 new file mode 100644
-index 00000000..044c45cf
+index 00000000..3d5794c0
 --- /dev/null
 +++ b/src/d8/d8-port.cc
-@@ -0,0 +1,1061 @@
+@@ -0,0 +1,1111 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -3763,6 +3763,9 @@ index 00000000..044c45cf
 +  std::shared_ptr<PortState> state;
 +  Global<Function> function;
 +  Global<Context> context;
++  // Server only: called with (id, name, message) when a task it runs is
++  // aborted.
++  Global<Function> on_abort;
 +};
 +
 +struct IsolatePorts {
@@ -4162,7 +4165,8 @@ index 00000000..044c45cf
 +Handler MakeHandler(Isolate* isolate, std::shared_ptr<PortState> state,
 +                    Local<Function> function) {
 +  Handler handler{std::move(state), Global<Function>(isolate, function),
-+                  Global<Context>(isolate, isolate->GetCurrentContext())};
++                  Global<Context>(isolate, isolate->GetCurrentContext()),
++                  Global<Function>()};
 +  return handler;
 +}
 +
@@ -4187,7 +4191,8 @@ index 00000000..044c45cf
 +  info.GetReturnValue().Set(object);
 +}
 +
-+// port.serve(handler): this isolate runs the tasks sent to the port.
++// port.serve(handler[, onAbort]): this isolate runs the tasks sent to the
++// port; onAbort(id, name, message) hears that a running task was aborted.
 +void PortServe(const FunctionCallbackInfo<Value>& info) {
 +  Isolate* isolate = info.GetIsolate();
 +  std::shared_ptr<PortState> state = ThisState(info);
@@ -4214,8 +4219,11 @@ index 00000000..044c45cf
 +      runner = server.runner;
 +    }
 +  }
-+  DataOf(isolate).serving.insert_or_assign(
-+      state.get(), MakeHandler(isolate, state, info[0].As<Function>()));
++  Handler handler = MakeHandler(isolate, state, info[0].As<Function>());
++  if (info[1]->IsFunction()) {
++    handler.on_abort.Reset(isolate, info[1].As<Function>());
++  }
++  DataOf(isolate).serving.insert_or_assign(state.get(), std::move(handler));
 +  if (runner) runner->PostTask(std::make_unique<DrainTask>(isolate, state, true));
 +}
 +
@@ -4357,9 +4365,48 @@ index 00000000..044c45cf
 +  info.GetReturnValue().Set(state->server_gone.load(std::memory_order_acquire));
 +}
 +
++// Tells the server's code that a task it runs was aborted.
++class AbortNoticeTask : public Task {
++ public:
++  AbortNoticeTask(Isolate* isolate, std::shared_ptr<PortState> state,
++                  double id, std::string name, std::string message)
++      : isolate_(isolate),
++        state_(std::move(state)),
++        id_(id),
++        name_(std::move(name)),
++        message_(std::move(message)) {}
++
++  void Run() override {
++    if (isolate_->IsExecutionTerminating()) return;
++    IsolatePorts& data = DataOf(isolate_);
++    auto it = data.serving.find(state_.get());
++    if (it == data.serving.end() || it->second.on_abort.IsEmpty()) return;
++    HandleScope scope(isolate_);
++    Local<Context> context = it->second.context.Get(isolate_);
++    Local<Function> function = it->second.on_abort.Get(isolate_);
++    Context::Scope context_scope(context);
++    TryCatch try_catch(isolate_);
++    try_catch.SetVerbose(true);
++    Local<Value> args[] = {
++        Number::New(isolate_, id_),
++        String::NewFromUtf8(isolate_, name_.c_str()).ToLocalChecked(),
++        String::NewFromUtf8(isolate_, message_.c_str()).ToLocalChecked()};
++    USE(function->Call(context, Undefined(isolate_), 3, args));
++    MicrotasksScope::PerformCheckpoint(isolate_);
++  }
++
++ private:
++  Isolate* const isolate_;
++  const std::shared_ptr<PortState> state_;
++  const double id_;
++  const std::string name_;
++  const std::string message_;
++};
++
 +void AbortPortTask(const std::shared_ptr<PortState>& state, double id,
 +                   const std::string& name, const std::string& message) {
 +  Isolate* server = nullptr;
++  std::shared_ptr<TaskRunner> server_runner;
 +  std::shared_ptr<TaskRunner> runner;
 +  Isolate* client = nullptr;
 +  bool answered = false;
@@ -4389,6 +4436,7 @@ index 00000000..044c45cf
 +        if (candidate.in_flight.contains(id)) {
 +          state->aborted.insert_or_assign(id, std::pair{name, message});
 +          server = candidate.isolate;
++          server_runner = candidate.runner;
 +          break;
 +        }
 +      }
@@ -4400,6 +4448,8 @@ index 00000000..044c45cf
 +  }
 +  if (server) {
 +    Channels::AbortTask(server, id, name.c_str(), message.c_str());
++    server_runner->PostTask(
++        std::make_unique<AbortNoticeTask>(server, state, id, name, message));
 +  }
 +}
 +
@@ -4796,7 +4846,7 @@ index 00000000..bd767012
 +
 +#endif  // V8_D8_D8_PORT_H_
 diff --git a/src/d8/d8.cc b/src/d8/d8.cc
-index 49121fe1..21fb8a73 100644
+index 49121fe1..44947efd 100644
 --- a/src/d8/d8.cc
 +++ b/src/d8/d8.cc
 @@ -14,6 +14,7 @@
@@ -6064,7 +6114,7 @@ index 49121fe1..21fb8a73 100644
  Local<ObjectTemplate> Shell::CreateAsyncHookTemplate(Isolate* isolate) {
    Local<ObjectTemplate> async_hooks_templ = ObjectTemplate::New(isolate);
    async_hooks_templ->Set(isolate, "createHook",
-@@ -5376,9 +6542,755 @@ MaybeLocal<Context> Shell::CreateEvaluationContext(Isolate* isolate) {
+@@ -5376,9 +6542,785 @@ MaybeLocal<Context> Shell::CreateEvaluationContext(Isolate* isolate) {
    }
  #endif  // V8_ENABLE_HARDWARE_WATCHPOINT_SUPPORT
  
@@ -6228,7 +6278,8 @@ index 49121fe1..21fb8a73 100644
 +onmessage = ({ data }) => {
 +  __port = data;
 +  onmessage = () => {};
-+  __port.serve(__onTask);
++  // Aborting a task aborts the tasks it spawned.
++  __port.serve(__onTask, (id) => spawn.__abortChildren(id));
 +};
 +
 +// The task id is kept as continuation data while the task runs, so that its
@@ -6297,6 +6348,11 @@ index 49121fe1..21fb8a73 100644
 +  // is reported like any unhandled rejection unless it is joined or awaited.
 +  const settle = (task, reply) => {
 +    task.settled = true;
++    if (task.parent !== undefined) {
++      const siblings = children.get(task.parent);
++      siblings.delete(task);
++      if (siblings.size === 0) children.delete(task.parent);
++    }
 +    if (!reply) {
 +      task.error = new Error('spawn() worker exited without a result');
 +    } else if (reply.length === 2) {
@@ -6381,6 +6437,7 @@ index 49121fe1..21fb8a73 100644
 +      const task = {
 +        id, settled: false, ok: false, joined: false, value: undefined,
 +        error: undefined, outcome: null, resolve: null, reject: null,
++        parent: undefined,
 +      };
 +      this.#tasks.set(id, task);
 +      return task;
@@ -6433,6 +6490,9 @@ index 49121fe1..21fb8a73 100644
 +  delete Region.__port;
 +  let pool = null;
 +  let nextTaskId = 0;
++  // On a pool worker: unfinished tasks spawned by its tasks, by the id of the
++  // task that spawned them.
++  const children = new Map();
 +  // Tasks of this thread whose reply has not arrived yet.
 +  let inFlight = 0;
 +  let idleWaiters = [];
@@ -6645,8 +6705,28 @@ index 49121fe1..21fb8a73 100644
 +    pool ??= new Pool();
 +    const task =
 +        pool.send(id, key, factory.code, message, transfer ?? undefined);
++    const parent = Region.__task();
++    if (parent !== undefined) {
++      task.parent = parent;
++      let siblings = children.get(parent);
++      if (!siblings) children.set(parent, siblings = new Set());
++      siblings.add(task);
++      if (spawn.aborted()) pool.abort(task, 'AbortError', abortedWithParent);
++    }
 +    return new SpawnHandle(pool, task);
 +  };
++  const abortedWithParent =
++      'spawn() task was aborted with the task that spawned it';
++  // Called on a pool worker when its task `parent` is aborted.
++  Object.defineProperty(spawn, '__abortChildren', {
++    value: (parent) => {
++      const siblings = children.get(parent);
++      if (!siblings) return;
++      for (const task of siblings) {
++        pool.abort(task, 'AbortError', abortedWithParent);
++      }
++    },
++  });
 +  spawn.poolSize = 4;
 +  // Tasks spawned by this thread that have not finished yet.
 +  spawn.pending = () => inFlight;
@@ -6820,7 +6900,7 @@ index 49121fe1..21fb8a73 100644
  namespace {
  int LineFromOffset(Local<debug::Script> script, int offset) {
    debug::Location location = script->GetSourceLocation(offset);
-@@ -6538,6 +8450,7 @@ void SourceGroup::JoinThread(const i::ParkedScope& parked) {
+@@ -6538,6 +8480,7 @@ void SourceGroup::JoinThread(const i::ParkedScope& parked) {
  void SerializationDataQueue::Enqueue(std::unique_ptr<SerializationData> data) {
    base::MutexGuard lock_guard(&mutex_);
    data_.push_back(std::move(data));
@@ -6828,7 +6908,7 @@ index 49121fe1..21fb8a73 100644
  }
  
  bool SerializationDataQueue::Dequeue(
-@@ -6547,6 +8460,7 @@ bool SerializationDataQueue::Dequeue(
+@@ -6547,6 +8490,7 @@ bool SerializationDataQueue::Dequeue(
    if (data_.empty()) return false;
    *out_data = std::move(data_[0]);
    data_.erase(data_.begin());
@@ -6836,7 +6916,7 @@ index 49121fe1..21fb8a73 100644
    return true;
  }
  
-@@ -6558,6 +8472,7 @@ bool SerializationDataQueue::IsEmpty() {
+@@ -6558,6 +8502,7 @@ bool SerializationDataQueue::IsEmpty() {
  void SerializationDataQueue::Clear() {
    base::MutexGuard lock_guard(&mutex_);
    data_.clear();
@@ -6844,7 +6924,7 @@ index 49121fe1..21fb8a73 100644
  }
  
  Worker::Worker(Isolate* parent_isolate, const char* script)
-@@ -6668,6 +8583,12 @@ std::unique_ptr<SerializationData> Worker::GetMessage(Isolate* requester) {
+@@ -6668,6 +8613,12 @@ std::unique_ptr<SerializationData> Worker::GetMessage(Isolate* requester) {
        out_queue_.Dequeue(&result);
        break;
      }
@@ -6857,7 +6937,7 @@ index 49121fe1..21fb8a73 100644
      out_semaphore_.ParkedWait(
          reinterpret_cast<i::Isolate*>(requester)->main_thread_local_isolate());
    }
-@@ -6705,6 +8626,8 @@ void Worker::Terminate() {
+@@ -6705,6 +8656,8 @@ void Worker::Terminate() {
    // returning to the event queue. Since we checked the state before, and we are
    // holding the {worker_mutex_}, it's safe to access the isolate.
    isolate_->TerminateExecution();
@@ -6866,7 +6946,7 @@ index 49121fe1..21fb8a73 100644
  }
  
  void Worker::EnterTerminatedState() {
-@@ -6791,6 +8714,7 @@ Worker* Worker::GetCurrentWorker() { return current_worker_; }
+@@ -6791,6 +8744,7 @@ Worker* Worker::GetCurrentWorker() { return current_worker_; }
  void Worker::ExecuteInThread() {
    Isolate::CreateParams create_params = GetDefaultIsolateCreateParams();
    isolate_ = Isolate::New(create_params);
@@ -6874,7 +6954,7 @@ index 49121fe1..21fb8a73 100644
  
    // TODO(mdanylo): can we omit dump disable here?
  #ifdef V8_DUMPLING
-@@ -6926,6 +8850,7 @@ void Worker::ExecuteInThread() {
+@@ -6926,6 +8880,7 @@ void Worker::ExecuteInThread() {
      platform::NotifyIsolateShutdown(g_default_platform, isolate_);
    }
  
@@ -6882,7 +6962,7 @@ index 49121fe1..21fb8a73 100644
    isolate_->Dispose();
    isolate_ = nullptr;
  
-@@ -7310,6 +9235,9 @@ bool Shell::SetOptions(int argc, char* argv[]) {
+@@ -7310,6 +9265,9 @@ bool Shell::SetOptions(int argc, char* argv[]) {
                                    argv, &i)) {
        // Value is expressed in MB.
        options.max_serializer_memory = atoi(flag_value) * i::MB;
@@ -6892,7 +6972,7 @@ index 49121fe1..21fb8a73 100644
      } else if (FlagMatches("--bundle", &argv[i])) {
        options.bundle = true;
  #ifdef V8_FUZZILLI
-@@ -7921,6 +9849,27 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7921,6 +9879,27 @@ class Serializer : public ValueSerializer::Delegate {
      return true;
    }
  
@@ -6920,7 +7000,7 @@ index 49121fe1..21fb8a73 100644
   private:
    Maybe<bool> PrepareTransfer(Local<Context> context, Local<Value> transfer) {
      if (transfer->IsArray()) {
-@@ -7929,6 +9878,22 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7929,6 +9908,22 @@ class Serializer : public ValueSerializer::Delegate {
        for (uint32_t i = 0; i < length; ++i) {
          Local<Value> element;
          if (transfer_array->Get(context, i).ToLocal(&element)) {
@@ -6943,7 +7023,7 @@ index 49121fe1..21fb8a73 100644
            if (!element->IsArrayBuffer()) {
              ThrowError(isolate_,
                         "Transfer array elements must be an ArrayBuffer");
-@@ -7961,7 +9926,52 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7961,7 +9956,52 @@ class Serializer : public ValueSerializer::Delegate {
      }
    }
  
@@ -6996,7 +7076,7 @@ index 49121fe1..21fb8a73 100644
      for (const auto& global_array_buffer : array_buffers_) {
        Local<ArrayBuffer> array_buffer =
            Local<ArrayBuffer>::New(isolate_, global_array_buffer);
-@@ -7987,6 +9997,7 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7987,6 +10027,7 @@ class Serializer : public ValueSerializer::Delegate {
    ValueSerializer serializer_;
    std::unique_ptr<SerializationData> data_;
    std::vector<Global<ArrayBuffer>> array_buffers_;
@@ -7004,7 +7084,7 @@ index 49121fe1..21fb8a73 100644
    std::vector<Global<SharedArrayBuffer>> shared_array_buffers_;
    std::vector<Global<WasmModuleObject>> wasm_modules_;
    std::vector<std::shared_ptr<v8::BackingStore>> backing_stores_;
-@@ -8013,6 +10024,21 @@ class Deserializer : public ValueDeserializer::Delegate {
+@@ -8013,6 +10054,21 @@ class Deserializer : public ValueDeserializer::Delegate {
        return MaybeLocal<Value>();
      }
  
@@ -7026,7 +7106,7 @@ index 49121fe1..21fb8a73 100644
      uint32_t index = 0;
      for (const auto& backing_store : data_->backing_stores()) {
        Local<ArrayBuffer> array_buffer =
-@@ -8049,6 +10075,21 @@ class Deserializer : public ValueDeserializer::Delegate {
+@@ -8049,6 +10105,21 @@ class Deserializer : public ValueDeserializer::Delegate {
      return nullptr;
    }
  
@@ -7048,7 +7128,7 @@ index 49121fe1..21fb8a73 100644
   private:
    Isolate* isolate_;
    ValueDeserializer deserializer_;
-@@ -8309,9 +10350,13 @@ int Shell::Main(int argc, char* argv[]) {
+@@ -8309,9 +10380,13 @@ int Shell::Main(int argc, char* argv[]) {
    // The platform is owned by wrapper platform despite the `std::move` below.
    START_IGNORE_LIFETIME_SAFETY_WARNINGS()
    g_default_platform = g_platform.get();
@@ -7062,7 +7142,7 @@ index 49121fe1..21fb8a73 100644
    }
    if (options.stress_delay_tasks) {
      int64_t random_seed = i::v8_flags.fuzzer_random_seed;
-@@ -8438,6 +10483,7 @@ int Shell::Main(int argc, char* argv[]) {
+@@ -8438,6 +10513,7 @@ int Shell::Main(int argc, char* argv[]) {
    }
  
    Isolate* isolate = Isolate::New(create_params);

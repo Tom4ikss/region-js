@@ -144,7 +144,8 @@ interface SpawnHandle<T> extends PromiseLike<T> {
   join(): T;
   /** The task fails with an `AbortError`. A task that has not started never
    * runs; a running one has its channel and lock waits fail, and code that
-   * waits on nothing can check `spawn.aborted()`. No effect once finished. */
+   * waits on nothing can check `spawn.aborted()`. The tasks it spawned are
+   * aborted too. No effect once finished. */
   abort(): void;
   /** Aborts the task with a `TimeoutError` if it has not finished in `ms`. */
   timeout(ms: number): this;
