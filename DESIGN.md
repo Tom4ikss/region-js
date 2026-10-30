@@ -76,6 +76,12 @@
   запись по индексу (StoreRegionElement handler) и `push` одного элемента (ArrayPrototypePush)
   пишут в запас без рантайма; методы прототипа кэшируются как константы с validity cell
   локального `Array.prototype`/`Object.prototype` и проверкой доступа к региону в EmitAccessCheck;
+- литералы `#{}`/`#[]`: CallJSRuntime к TFJ-билтинам `RegionObjectLiteral`/`RegionArrayLiteral` из native
+  context; кэш форм в native context (хэш ключей → [map, keys, локальные ключи]), текущий регион в поле
+  изолята, выделение объекта и значений одним куском из shared LAB главного потока (LAB вынесен в
+  `Isolate::shared_allocation_info()`, top/limit — external references), барьер только при маркировке;
+  первый литерал формы и необычные случаи — CPP-билтины `Region*LiteralSlow`, значения, которые надо
+  копировать, — `Runtime::kShareRegionLiteralValue`;
   IC читает длину и проверяет границы по `array_length`. Эвакуатор копирует fast-mode объекты
   по дескрипторам map (кэш «map → форма региона») и плотные массивы напрямую.
 - **Литералы `#{}` / `#[]`** (`--harmony-region-literals`). Сканер выдаёт токены `#{` и `#[`,

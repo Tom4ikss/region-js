@@ -1,5 +1,5 @@
 diff --git a/BUILD.gn b/BUILD.gn
-index 01685963..844b5811 100644
+index 01685963..f962dd56 100644
 --- a/BUILD.gn
 +++ b/BUILD.gn
 @@ -2430,6 +2430,7 @@ torque_files = [
@@ -10,7 +10,15 @@ index 01685963..844b5811 100644
    "src/objects/js-struct.tq",
    "src/objects/js-weak-refs.tq",
    "src/objects/literal-objects.tq",
-@@ -4927,6 +4928,8 @@ v8_header_set("v8_internal_headers") {
+@@ -3835,6 +3836,7 @@ v8_cluster_source_set("v8_initializers") {
+     "src/builtins/builtins-proxy-gen.cc",
+     "src/builtins/builtins-proxy-gen.h",
+     "src/builtins/builtins-regexp-gen.cc",
++    "src/builtins/builtins-region-gen.cc",
+     "src/builtins/builtins-regexp-gen.h",
+     "src/builtins/builtins-shadow-realm-gen.cc",
+     "src/builtins/builtins-sharedarraybuffer-gen.cc",
+@@ -4927,6 +4929,8 @@ v8_header_set("v8_internal_headers") {
      "src/objects/js-segments.h",
      "src/objects/js-shadow-realm-inl.h",
      "src/objects/js-shadow-realm.h",
@@ -19,7 +27,7 @@ index 01685963..844b5811 100644
      "src/objects/js-struct.h",
      "src/objects/js-temporal-helpers.h",
      "src/objects/js-weak-refs-inl.h",
-@@ -6740,6 +6743,7 @@ v8_cluster_source_set("v8_base_without_compiler") {
+@@ -6740,6 +6744,7 @@ v8_cluster_source_set("v8_base_without_compiler") {
      "src/objects/js-segment-iterator.cc",
      "src/objects/js-segmenter.cc",
      "src/objects/js-segments.cc",
@@ -27,7 +35,7 @@ index 01685963..844b5811 100644
      "src/objects/js-struct.cc",
      "src/objects/js-temporal-helpers.cc",
      "src/objects/js-weak-refs.cc",
-@@ -9110,11 +9114,15 @@ v8_executable("d8") {
+@@ -9110,11 +9115,15 @@ v8_executable("d8") {
    sources = [
      "src/d8/async-hooks-wrapper.cc",
      "src/d8/async-hooks-wrapper.h",
@@ -125,7 +133,7 @@ index 5b3113a3..50d810c2 100644
  #include 'src/objects/js-weak-refs.h'
  #include 'src/objects/objects.h'
 diff --git a/src/builtins/builtins-array-gen.cc b/src/builtins/builtins-array-gen.cc
-index d1be4eba..c76c1677 100644
+index d1be4eba..b5a8c051 100644
 --- a/src/builtins/builtins-array-gen.cc
 +++ b/src/builtins/builtins-array-gen.cc
 @@ -23,6 +23,7 @@
@@ -136,7 +144,7 @@ index d1be4eba..c76c1677 100644
  #include "src/objects/objects.h"
  #include "src/objects/property-cell.h"
  
-@@ -545,6 +546,26 @@ TF_BUILTIN(ArrayPrototypePush, CodeStubAssembler) {
+@@ -545,6 +546,28 @@ TF_BUILTIN(ArrayPrototypePush, CodeStubAssembler) {
  
    BIND(&runtime);
    {
@@ -153,7 +161,9 @@ index d1be4eba..c76c1677 100644
 +              &generic);
 +    GotoIfRegionAccessDenied(region_array, true, &generic);
 +    TNode<Object> value = args.AtIndex(0);
-+    GotoIfNotStorableInRegion(region_array, value, &generic);
++    GotoIfNotStorableInRegion(
++        LoadObjectField<Smi>(region_array, offsetof(JSRegionObject, region_id_)),
++        value, &generic);
 +    TNode<Smi> length = LoadObjectField<Smi>(
 +        region_array, offsetof(JSRegionObject, array_length_));
 +    args.PopAndReturn(StoreRegionArrayElement(region_array, SmiUntag(length),
@@ -163,11 +173,49 @@ index d1be4eba..c76c1677 100644
      // We are not using Parameter(Descriptor::kJSTarget) and loading the value
      // from the current frame here in order to reduce register pressure on the
      // fast path.
+diff --git a/src/builtins/builtins-definitions.h b/src/builtins/builtins-definitions.h
+index 34cc7706..72d9d441 100644
+--- a/src/builtins/builtins-definitions.h
++++ b/src/builtins/builtins-definitions.h
+@@ -641,6 +641,11 @@ constexpr int kGearboxGenericBuiltinIdOffset = -2;
+   TFJ(ArrayPrototypePush, kDontAdaptArgumentsSentinel)                         \
+   CPP(ArrayShift, kDontAdaptArgumentsSentinel)                                 \
+   CPP(ArrayUnshift, kDontAdaptArgumentsSentinel)                               \
++  /* #{} and #[]: objects of ownership regions */                              \
++  TFJ(RegionObjectLiteral, kDontAdaptArgumentsSentinel)                        \
++  CPP(RegionObjectLiteralSlow, kDontAdaptArgumentsSentinel)                    \
++  TFJ(RegionArrayLiteral, kDontAdaptArgumentsSentinel)                         \
++  CPP(RegionArrayLiteralSlow, kDontAdaptArgumentsSentinel)                     \
+   /* Support for Array.from and other array-copying idioms */                  \
+   TFS(CloneFastJSArray, NeedsContext{true}, kSource)                           \
+   TFS(CloneFastJSArrayFillingHoles, NeedsContext{true}, kSource)               \
+diff --git a/src/builtins/builtins-internal-gen.cc b/src/builtins/builtins-internal-gen.cc
+index 330b40b1..e0e03d43 100644
+--- a/src/builtins/builtins-internal-gen.cc
++++ b/src/builtins/builtins-internal-gen.cc
+@@ -324,6 +324,9 @@ class WriteBarrierCodeStubAssembler : public CodeStubAssembler {
+         ExternalReference::shared_barrier_from_code_function());
+     TNode<IntPtrT> object = BitcastTaggedToWord(
+         UncheckedParameter<Object>(WriteBarrierDescriptor::kObject));
++    // Only local objects record pointers into shared space; for a shared
++    // object the function would return right away.
++    GotoIf(IsPageFlagSet(object, MemoryChunk::kInSharedHeap), next);
+     CallCFunctionWithCallerSavedRegisters(
+         function, MachineTypeOf<Int32T>::value, fp_mode,
+         std::make_pair(MachineTypeOf<IntPtrT>::value, object),
 diff --git a/src/builtins/builtins-object.cc b/src/builtins/builtins-object.cc
-index 7677d9c3..6de13280 100644
+index 7677d9c3..fc762f96 100644
 --- a/src/builtins/builtins-object.cc
 +++ b/src/builtins/builtins-object.cc
-@@ -154,6 +154,7 @@ Tagged<Object> ObjectLookupAccessor(Isolate* isolate,
+@@ -6,6 +6,7 @@
+ #include "src/builtins/builtins.h"
+ #include "src/common/message-template.h"
+ #include "src/execution/isolate.h"
++#include "src/objects/js-region.h"
+ #include "src/objects/keys.h"
+ #include "src/objects/lookup.h"
+ #include "src/objects/objects-inl.h"
+@@ -154,6 +155,7 @@ Tagged<Object> ObjectLookupAccessor(Isolate* isolate,
        }
        case LookupIterator::STRING_LOOKUP_START_OBJECT:
        case LookupIterator::WASM_OBJECT:
@@ -175,8 +223,332 @@ index 7677d9c3..6de13280 100644
          continue;  // Continue to the prototype, if present.
        case LookupIterator::TYPED_ARRAY_INDEX_NOT_FOUND:
        case LookupIterator::DATA:
+@@ -382,5 +384,35 @@ BUILTIN(ObjectSeal) {
+   return *object;
+ }
+ 
++// #{ key: value, ... } with keys and values interleaved, and #[ value, ... ]:
++// what the literal builtins in generated code leave to C++. Each also adds
++// the shape to the cache, so that the next literal of the shape is fast.
++BUILTIN(RegionObjectLiteralSlow) {
++  HandleScope scope(isolate);
++  DCHECK_EQ(1, args.length() % 2);  // The receiver and pairs.
++  DirectHandleVector<String> keys(isolate);
++  DirectHandleVector<Object> values(isolate);
++  for (int i = 1; i < args.length(); i += 2) {
++    keys.push_back(args.at<String>(i));
++    values.push_back(args.at(i + 1));
++  }
++  DirectHandle<JSRegionObject> literal;
++  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
++      isolate, literal, JSRegionObject::NewLiteral(isolate, &keys, values));
++  JSRegionObject::CacheLiteralShape(isolate, &keys, literal);
++  return *literal;
++}
++
++BUILTIN(RegionArrayLiteralSlow) {
++  HandleScope scope(isolate);
++  DirectHandleVector<Object> values(isolate);
++  for (int i = 1; i < args.length(); i++) values.push_back(args.at(i));
++  DirectHandle<JSRegionObject> literal;
++  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
++      isolate, literal, JSRegionObject::NewLiteral(isolate, nullptr, values));
++  JSRegionObject::CacheLiteralShape(isolate, nullptr, literal);
++  return *literal;
++}
++
+ }  // namespace internal
+ }  // namespace v8
+diff --git a/src/builtins/builtins-region-gen.cc b/src/builtins/builtins-region-gen.cc
+new file mode 100644
+index 00000000..7b7512db
+--- /dev/null
++++ b/src/builtins/builtins-region-gen.cc
+@@ -0,0 +1,268 @@
++// Copyright 2026 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "src/builtins/builtins-utils-gen.h"
++#include "src/builtins/builtins.h"
++#include "src/codegen/code-stub-assembler-inl.h"
++#include "src/objects/js-region.h"
++
++namespace v8 {
++namespace internal {
++
++#include "src/codegen/define-code-stub-assembler-macros.inc"
++
++// #{ key: value, ... } and #[ value, ... ] call these builtins through the
++// native context, with the keys and values of #{} interleaved. They create
++// the object in the current region without the runtime: the shape comes from
++// the cache of the native context, the values must be storable as they are,
++// and the object and its values are one allocation in the shared space
++// linear allocation area of this thread. Everything else, including the
++// first literal of every shape, goes to the C++ builtins, which also fill the
++// cache.
++class RegionLiteralAssembler : public CodeStubAssembler {
++ public:
++  explicit RegionLiteralAssembler(compiler::CodeAssemblerState* state)
++      : CodeStubAssembler(state) {}
++
++  TNode<HeapObject> TryCreate(TNode<Context> context, CodeStubArguments* args,
++                              bool is_object, Label* slow);
++
++ private:
++  // Stores of a shared or read-only value into a shared object need no
++  // remembered set, only the marking barrier, and that only while marking.
++  TNode<BoolT> IsMarking() {
++    return Word32NotEqual(
++        Load<Uint8T>(ExternalConstant(
++            ExternalReference::heap_is_marking_flag_address(isolate()))),
++        Int32Constant(0));
++  }
++  void StoreSharedField(TNode<HeapObject> object, int offset,
++                        TNode<Object> value) {
++    Label marking(this), not_marking(this), done(this);
++    Branch(IsMarking(), &marking, &not_marking);
++    BIND(&marking);
++    StoreObjectField(object, offset, value);
++    Goto(&done);
++    BIND(&not_marking);
++    UnsafeStoreObjectFieldNoWriteBarrier(object, offset, value);
++    Goto(&done);
++    BIND(&done);
++  }
++  void StoreSharedElement(TNode<FixedArray> array, TNode<IntPtrT> index,
++                          TNode<Object> value) {
++    Label marking(this), not_marking(this), done(this);
++    Branch(IsMarking(), &marking, &not_marking);
++    BIND(&marking);
++    StoreFixedArrayElement(array, index, value);
++    Goto(&done);
++    BIND(&not_marking);
++    StoreFixedArrayElement(array, index, value, UNSAFE_SKIP_WRITE_BARRIER);
++    Goto(&done);
++    BIND(&done);
++  }
++};
++
++TNode<HeapObject> RegionLiteralAssembler::TryCreate(TNode<Context> context,
++                                                    CodeStubArguments* args,
++                                                    bool is_object,
++                                                    Label* slow) {
++  TNode<IntPtrT> argc = args->GetLengthWithoutReceiver();
++  TNode<IntPtrT> length = is_object ? WordSar(argc, 1) : argc;
++  GotoIf(IntPtrGreaterThan(length,
++                           IntPtrConstant(JSRegionObject::kMaxFastLiteralLength)),
++         slow);
++  auto value_at = [&](TNode<IntPtrT> i) {
++    return args->AtIndex(is_object ? IntPtrAdd(IntPtrAdd(i, i), IntPtrConstant(1))
++                                   : i);
++  };
++
++  // The current region, owned by this isolate.
++  TNode<IntPtrT> region_id = Load<IntPtrT>(
++      ExternalConstant(ExternalReference::current_region_address(isolate())));
++  GotoIf(IntPtrLessThan(region_id, IntPtrConstant(0)), slow);
++  TNode<Smi> region = SmiTag(region_id);
++  GotoIfRegionIdAccessDenied(region, true, slow);
++
++  // The shape.
++  TNode<Object> maybe_cache = LoadContextElementNoCell(
++      LoadNativeContext(context), Context::REGION_LITERAL_CACHE_INDEX);
++  GotoIf(TaggedIsSmi(maybe_cache), slow);
++  GotoIfNot(IsFixedArray(CAST(maybe_cache)), slow);
++  TNode<FixedArray> cache = CAST(maybe_cache);
++  TVARIABLE(Object, var_map);
++  TVARIABLE(Object, var_keys, UndefinedConstant());
++  if (is_object) {
++    TVARIABLE(Word32T, var_hash, TruncateIntPtrToInt32(length));
++    BuildFastLoop<IntPtrT>(
++        VariableList({&var_hash}, zone()), IntPtrConstant(0), length,
++        [&](TNode<IntPtrT> i) {
++          TNode<Object> key = args->AtIndex(IntPtrAdd(i, i));
++          GotoIf(TaggedIsSmi(key), slow);
++          GotoIfNot(IsInternalizedStringInstanceType(
++                        LoadInstanceType(CAST(key))),
++                    slow);
++          TNode<Uint32T> key_hash = LoadNameHash(CAST(key), slow);
++          var_hash = Int32Add(Int32Mul(var_hash.value(), Int32Constant(31)),
++                              key_hash);
++        },
++        1, kNoLoopUnrolling, IndexAdvanceMode::kPost);
++    TNode<IntPtrT> index = Signed(ChangeUint32ToWord(
++        Word32And(var_hash.value(),
++                  Int32Constant(JSRegionObject::kLiteralCacheSize - 1))));
++    TNode<Object> maybe_entry = LoadFixedArrayElement(cache, index);
++    GotoIf(TaggedIsSmi(maybe_entry), slow);
++    GotoIfNot(IsFixedArray(CAST(maybe_entry)), slow);
++    TNode<FixedArray> entry = CAST(maybe_entry);
++    GotoIfNot(
++        IntPtrEqual(LoadFixedArrayBaseLength(entry),
++                    IntPtrAdd(length,
++                              IntPtrConstant(
++                                  JSRegionObject::kLiteralCacheEntryFirstKeyIndex))),
++        slow);
++    BuildFastLoop<IntPtrT>(
++        IntPtrConstant(0), length,
++        [&](TNode<IntPtrT> i) {
++          GotoIfNot(
++              TaggedEqual(
++                  LoadFixedArrayElement(
++                      entry,
++                      IntPtrAdd(i, IntPtrConstant(
++                                       JSRegionObject::
++                                           kLiteralCacheEntryFirstKeyIndex))),
++                  args->AtIndex(IntPtrAdd(i, i))),
++              slow);
++        },
++        1, kNoLoopUnrolling, IndexAdvanceMode::kPost);
++    var_map = LoadFixedArrayElement(
++        entry, JSRegionObject::kLiteralCacheEntryMapIndex);
++    var_keys = LoadFixedArrayElement(
++        entry, JSRegionObject::kLiteralCacheEntryKeysIndex);
++  } else {
++    var_map = LoadFixedArrayElement(cache,
++                                    JSRegionObject::kLiteralCacheArrayMapIndex);
++    GotoIf(IsUndefined(var_map.value()), slow);
++  }
++
++  // One allocation: the object, then its values, filled with undefined so
++  // that both stay valid while values that need the runtime are shared.
++  static_assert(offsetof(JSRegionObject, array_length_) + kTaggedSize ==
++                JSRegionObject::kHeaderSize);
++  TNode<IntPtrT> values_size = Select<IntPtrT>(
++      IntPtrEqual(length, IntPtrConstant(0)), [&] { return IntPtrConstant(0); },
++      [&] {
++        return IntPtrAdd(IntPtrConstant(OFFSET_OF_DATA_START(FixedArray)),
++                         TimesTaggedSize(length));
++      });
++  TNode<HeapObject> object = AllocateInSharedSpace(
++      IntPtrAdd(IntPtrConstant(JSRegionObject::kHeaderSize), values_size));
++  TNode<FixedArray> values = Select<FixedArray>(
++      IntPtrEqual(length, IntPtrConstant(0)),
++      [&] { return EmptyFixedArrayConstant(); },
++      [&] {
++        TNode<HeapObject> array = UncheckedCast<HeapObject>(BitcastWordToTagged(
++            IntPtrAdd(BitcastTaggedToWord(object),
++                      IntPtrConstant(JSRegionObject::kHeaderSize))));
++        StoreMapNoWriteBarrier(array, RootIndex::kFixedArrayMap);
++        StoreObjectFieldNoWriteBarrier(array, FixedArrayBase::kLengthOffset,
++                                       Unsigned(TruncateIntPtrToInt32(length)));
++#if TAGGED_SIZE_8_BYTES
++        StoreObjectFieldNoWriteBarrier(array, FixedArrayBase::kPaddingOffset,
++                                       Int32Constant(0));
++#endif
++        FillFixedArrayWithValue(PACKED_ELEMENTS,
++                                UncheckedCast<FixedArray>(array),
++                                IntPtrConstant(0), length,
++                                RootIndex::kUndefinedValue);
++        return UncheckedCast<FixedArray>(array);
++      });
++
++  StoreMapNoWriteBarrier(object, CAST(var_map.value()));
++  StoreObjectFieldRoot(object, offsetof(JSObject, properties_or_hash_),
++                       RootIndex::kEmptyFixedArray);
++  StoreObjectFieldRoot(object, offsetof(JSObject, elements_),
++                       RootIndex::kEmptySlowElementDictionary);
++#ifdef V8_COMPRESS_POINTERS
++  StoreObjectFieldNoWriteBarrier(
++      object, offsetof(JSSpecialObject, cpp_heap_wrappable_),
++      Int32Constant(kNullCppHeapPointerHandle));
++#else
++  StoreObjectFieldNoWriteBarrier(
++      object, offsetof(JSSpecialObject, cpp_heap_wrappable_),
++      IntPtrConstant(kNullAddress));
++#endif
++  StoreObjectFieldNoWriteBarrier(object, offsetof(JSRegionObject, region_id_),
++                                 region);
++  StoreObjectFieldNoWriteBarrier(
++      object, offsetof(JSRegionObject, array_length_), SmiTag(length));
++  StoreSharedField(object, offsetof(JSRegionObject, keys_), var_keys.value());
++  StoreSharedField(object, offsetof(JSRegionObject, values_), values);
++
++  // The values: as they are when they can be, otherwise shared, copied or
++  // rejected by the runtime, which throws the same errors as the C++ path.
++  BuildFastLoop<IntPtrT>(
++      IntPtrConstant(0), length,
++      [&](TNode<IntPtrT> i) {
++        TNode<Object> value = value_at(i);
++        Label share(this, Label::kDeferred), next(this);
++        GotoIfNotStorableInRegion(region, value, &share);
++        StoreSharedElement(values, i, value);
++        Goto(&next);
++
++        BIND(&share);
++        StoreFixedArrayElement(
++            values, i,
++            CallRuntime(Runtime::kShareRegionLiteralValue, context, region,
++                        value));
++        Goto(&next);
++
++        BIND(&next);
++      },
++      1, kNoLoopUnrolling, IndexAdvanceMode::kPost);
++
++  // The region counts its bytes, as for objects the runtime creates.
++  TNode<UintPtrT> bytes = Unsigned(
++      IntPtrAdd(IntPtrConstant(JSRegionObject::kHeaderSize), values_size));
++  TNode<RawPtrT> bytes_table = ReinterpretCast<RawPtrT>(
++      ExternalConstant(ExternalReference::region_registry_bytes()));
++  TNode<UintPtrT> offset = Unsigned(WordShl(region_id, 3));
++  if (Is64()) {
++    AtomicAdd64<AtomicInt64>(bytes_table, offset, bytes, {});
++  } else {
++    AtomicAdd64<AtomicInt64>(bytes_table, offset, bytes, UintPtrConstant(0));
++  }
++  return object;
++}
++
++TF_BUILTIN(RegionObjectLiteral, RegionLiteralAssembler) {
++  auto argc = UncheckedParameter<Int32T>(Descriptor::kJSActualArgumentsCount);
++  auto context = Parameter<Context>(Descriptor::kContext);
++  CodeStubArguments args(this, argc);
++  Label slow(this, Label::kDeferred);
++  args.PopAndReturn(
++      UncheckedCast<JSAny>(TryCreate(context, &args, true, &slow)));
++
++  BIND(&slow);
++  TailCallJSBuiltin(Builtin::kRegionObjectLiteralSlow, context,
++                    LoadTargetFromFrame(), UndefinedConstant(), argc,
++                    InvalidDispatchHandleConstant());
++}
++
++TF_BUILTIN(RegionArrayLiteral, RegionLiteralAssembler) {
++  auto argc = UncheckedParameter<Int32T>(Descriptor::kJSActualArgumentsCount);
++  auto context = Parameter<Context>(Descriptor::kContext);
++  CodeStubArguments args(this, argc);
++  Label slow(this, Label::kDeferred);
++  args.PopAndReturn(
++      UncheckedCast<JSAny>(TryCreate(context, &args, false, &slow)));
++
++  BIND(&slow);
++  TailCallJSBuiltin(Builtin::kRegionArrayLiteralSlow, context,
++                    LoadTargetFromFrame(), UndefinedConstant(), argc,
++                    InvalidDispatchHandleConstant());
++}
++
++#include "src/codegen/undef-code-stub-assembler-macros.inc"
++
++}  // namespace internal
++}  // namespace v8
+diff --git a/src/builtins/builtins.cc b/src/builtins/builtins.cc
+index 36439464..29842b91 100644
+--- a/src/builtins/builtins.cc
++++ b/src/builtins/builtins.cc
+@@ -650,6 +650,9 @@ Builtins::JSBuiltinStateFlags Builtins::GetJSBuiltinState(Builtin builtin) {
+     case Builtin::kArrayPush:
+     case Builtin::kArrayShift:
+     case Builtin::kArrayUnshift:
++    // What the #{} and #[] builtins of ownership regions fall back to.
++    case Builtin::kRegionObjectLiteralSlow:
++    case Builtin::kRegionArrayLiteralSlow:
+     case Builtin::kFunctionPrototypeBind:
+     case Builtin::kInterpreterEntryTrampolineForProfiling:
+     // Tiering builtins are set directly into the dispatch table and never
 diff --git a/src/codegen/code-stub-assembler.cc b/src/codegen/code-stub-assembler.cc
-index 976c1b3e..7407a57c 100644
+index 976c1b3e..a273e0d2 100644
 --- a/src/codegen/code-stub-assembler.cc
 +++ b/src/codegen/code-stub-assembler.cc
 @@ -40,6 +40,7 @@
@@ -187,19 +559,25 @@ index 976c1b3e..7407a57c 100644
  #include "src/objects/map.h"
  #include "src/objects/objects.h"
  #include "src/objects/oddball.h"
-@@ -21983,6 +21984,103 @@ void CodeStubAssembler::SharedValueBarrier(
+@@ -21983,6 +21984,140 @@ void CodeStubAssembler::SharedValueBarrier(
    BIND(&done);
  }
  
 +void CodeStubAssembler::GotoIfRegionAccessDenied(TNode<HeapObject> object,
 +                                                 bool for_write,
 +                                                 Label* denied) {
++  GotoIfRegionIdAccessDenied(
++      LoadObjectField<Smi>(object, offsetof(JSRegionObject, region_id_)),
++      for_write, denied);
++}
++
++void CodeStubAssembler::GotoIfRegionIdAccessDenied(TNode<Smi> region,
++                                                   bool for_write,
++                                                   Label* denied) {
 +  // A plain load is enough: the owner synchronized when it claimed the region
 +  // on this thread, and an isolate never sees a stale copy of its own address
 +  // after releasing. A reader of a frozen region synchronized when it took a
 +  // borrow, and the borrow keeps the region frozen.
-+  TNode<Smi> region =
-+      LoadObjectField<Smi>(object, offsetof(JSRegionObject, region_id_));
 +  TNode<UintPtrT> owner = Load<UintPtrT>(
 +      ExternalConstant(ExternalReference::region_registry_owners()),
 +      TimesSystemPointerSize(SmiUntag(region)));
@@ -224,7 +602,7 @@ index 976c1b3e..7407a57c 100644
 +  BIND(&allowed);
 +}
 +
-+void CodeStubAssembler::GotoIfNotStorableInRegion(TNode<HeapObject> holder,
++void CodeStubAssembler::GotoIfNotStorableInRegion(TNode<Smi> region,
 +                                                  TNode<Object> value,
 +                                                  Label* slow) {
 +  Label store(this), check_region(this);
@@ -255,10 +633,41 @@ index 976c1b3e..7407a57c 100644
 +  BIND(&check_region);
 +  Branch(TaggedEqual(
 +             LoadObjectField(heap_value, offsetof(JSRegionObject, region_id_)),
-+             LoadObjectField(holder, offsetof(JSRegionObject, region_id_))),
++             region),
 +         &store, slow);
 +
 +  BIND(&store);
++}
++
++TNode<HeapObject> CodeStubAssembler::AllocateInSharedSpace(
++    TNode<IntPtrT> size_in_bytes) {
++  TNode<ExternalReference> top_address = ExternalConstant(
++      ExternalReference::shared_space_allocation_top_address(isolate()));
++  TNode<ExternalReference> limit_address = ExternalConstant(
++      ExternalReference::shared_space_allocation_limit_address(isolate()));
++  TNode<IntPtrT> size = AlignToAllocationAlignment(size_in_bytes);
++  TNode<RawPtrT> top = Load<RawPtrT>(top_address);
++  TNode<RawPtrT> limit = Load<RawPtrT>(limit_address);
++  TNode<IntPtrT> new_top = IntPtrAdd(UncheckedCast<IntPtrT>(top), size);
++
++  TVARIABLE(HeapObject, result);
++  Label runtime(this, Label::kDeferred), done(this);
++  // Without an area, top and limit are zero and this goes to the runtime.
++  GotoIf(UintPtrGreaterThanOrEqual(new_top, limit), &runtime);
++  StoreNoWriteBarrier(MachineType::PointerRepresentation(), top_address,
++                      new_top);
++  result = UncheckedCast<HeapObject>(BitcastWordToTagged(
++      IntPtrAdd(UncheckedCast<IntPtrT>(top), IntPtrConstant(kHeapObjectTag))));
++  Goto(&done);
++
++  BIND(&runtime);
++  result = CallRuntime<HeapObject>(Runtime::kAllocateInSharedHeap,
++                                   NoContextConstant(), SmiTag(size_in_bytes),
++                                   SmiConstant(kTaggedAligned));
++  Goto(&done);
++
++  BIND(&done);
++  return result.value();
 +}
 +
 +TNode<Smi> CodeStubAssembler::StoreRegionArrayElement(TNode<HeapObject> array,
@@ -292,10 +701,10 @@ index 976c1b3e..7407a57c 100644
    TVARIABLE(ArrayList, result);
    Label empty(this), nonempty(this), done(this);
 diff --git a/src/codegen/code-stub-assembler.h b/src/codegen/code-stub-assembler.h
-index f214a151..31fab0f9 100644
+index f214a151..63204112 100644
 --- a/src/codegen/code-stub-assembler.h
 +++ b/src/codegen/code-stub-assembler.h
-@@ -2805,6 +2805,24 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
+@@ -2805,6 +2805,31 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
    void SharedValueBarrier(TNode<Context> context,
                            TVariable<Object>* var_shared_value);
  
@@ -304,11 +713,18 @@ index f214a151..31fab0f9 100644
 +  // JSRegionObject.
 +  void GotoIfRegionAccessDenied(TNode<HeapObject> object, bool for_write,
 +                                Label* denied);
-+  // Jumps to |slow| unless |value| can be stored in the region of |holder| as
-+  // it is: Smis, read-only objects, primitives in shared space and objects of
-+  // the same region. The runtime shares or rejects everything else.
-+  void GotoIfNotStorableInRegion(TNode<HeapObject> holder, TNode<Object> value,
++  void GotoIfRegionIdAccessDenied(TNode<Smi> region, bool for_write,
++                                  Label* denied);
++  // Jumps to |slow| unless |value| can be stored in |region| as it is: Smis,
++  // read-only objects, primitives in shared space and objects of the same
++  // region. The runtime shares or rejects everything else.
++  void GotoIfNotStorableInRegion(TNode<Smi> region, TNode<Object> value,
 +                                 Label* slow);
++  // Allocates |size_in_bytes| in the shared space linear allocation area of
++  // this thread, or in the runtime when it is full. The caller initializes
++  // the object before anything else can allocate, and stores into it with
++  // write barriers.
++  TNode<HeapObject> AllocateInSharedSpace(TNode<IntPtrT> size_in_bytes);
 +  // Stores |value| at |index| of the region array |array|, growing the array
 +  // by one when |index| is its length and values() has room. Jumps to |slow|
 +  // for any other index. The caller checked ownership and |value|. Returns
@@ -321,7 +737,7 @@ index f214a151..31fab0f9 100644
    TNode<IntPtrT> TimesSystemPointerSize(TNode<IntPtrT> value) {
      return Signed(TimesSystemPointerSize(implicit_cast<TNode<WordT>>(value)));
 diff --git a/src/codegen/external-reference.cc b/src/codegen/external-reference.cc
-index 9ae5654b..ea4fb700 100644
+index 9ae5654b..38462299 100644
 --- a/src/codegen/external-reference.cc
 +++ b/src/codegen/external-reference.cc
 @@ -36,6 +36,7 @@
@@ -332,7 +748,7 @@ index 9ae5654b..ea4fb700 100644
  #include "src/objects/module.h"
  #include "src/objects/object-type.h"
  #include "src/objects/objects-inl.h"
-@@ -535,6 +536,11 @@ ExternalReference ExternalReference::force_slow_path(Isolate* isolate) {
+@@ -535,6 +536,25 @@ ExternalReference ExternalReference::force_slow_path(Isolate* isolate) {
    return ExternalReference(isolate->force_slow_path_address());
  }
  
@@ -341,10 +757,24 @@ index 9ae5654b..ea4fb700 100644
 +  return ExternalReference(isolate->region_read_table_address());
 +}
 +
++ExternalReference ExternalReference::current_region_address(Isolate* isolate) {
++  return ExternalReference(isolate->current_region_address());
++}
++
++ExternalReference ExternalReference::shared_space_allocation_top_address(
++    Isolate* isolate) {
++  return ExternalReference(isolate->shared_allocation_info()->top_address());
++}
++
++ExternalReference ExternalReference::shared_space_allocation_limit_address(
++    Isolate* isolate) {
++  return ExternalReference(isolate->shared_allocation_info()->limit_address());
++}
++
  FUNCTION_REFERENCE(new_deoptimizer_function, Deoptimizer::New)
  
  FUNCTION_REFERENCE(compute_output_frames_function,
-@@ -813,6 +819,10 @@ ExternalReference ExternalReference::address_of_builtin_subclassing_flag() {
+@@ -813,6 +833,14 @@ ExternalReference ExternalReference::address_of_builtin_subclassing_flag() {
    return ExternalReference(&v8_flags.builtin_subclassing);
  }
  
@@ -352,26 +782,36 @@ index 9ae5654b..ea4fb700 100644
 +  return ExternalReference(RegionRegistry::owners_address());
 +}
 +
++ExternalReference ExternalReference::region_registry_bytes() {
++  return ExternalReference(RegionRegistry::bytes_address());
++}
++
  ExternalReference ExternalReference::address_of_js_pr_3883_flag() {
    return ExternalReference(&v8_flags.js_pr_3883);
  }
 diff --git a/src/codegen/external-reference.h b/src/codegen/external-reference.h
-index 8226ac48..784b9c69 100644
+index 8226ac48..2ee2655b 100644
 --- a/src/codegen/external-reference.h
 +++ b/src/codegen/external-reference.h
-@@ -32,6 +32,7 @@ enum class IsolateFieldId : uint8_t;
+@@ -32,6 +32,12 @@ enum class IsolateFieldId : uint8_t;
      "Address of the InterpreterEntryTrampoline instruction start")             \
    V(interpreter_dispatch_table_address, "Interpreter::dispatch_table_address") \
    V(force_slow_path, "Isolate::force_slow_path_address()")                     \
 +  V(region_read_table_address, "Isolate::region_read_table_address()")         \
++  V(current_region_address, "Isolate::current_region_address()")               \
++  V(shared_space_allocation_top_address,                                       \
++    "Isolate::shared_allocation_info()->top_address()")                        \
++  V(shared_space_allocation_limit_address,                                     \
++    "Isolate::shared_allocation_info()->limit_address()")                      \
    V(isolate_root, "Isolate::isolate_root()")                                   \
    V(address_of_jslimit, "StackGuard::address_of_jslimit()")                    \
    V(address_of_no_heap_write_interrupt_request,                                \
-@@ -81,6 +82,7 @@ enum class IsolateFieldId : uint8_t;
+@@ -81,6 +87,8 @@ enum class IsolateFieldId : uint8_t;
    V(abort_with_sandbox_violation, "abort_with_sandbox_violation")              \
    V(address_of_log_or_trace_osr, "v8_flags.log_or_trace_osr")                  \
    V(address_of_builtin_subclassing_flag, "v8_flags.builtin_subclassing")       \
 +  V(region_registry_owners, "RegionRegistry::owners_")                         \
++  V(region_registry_bytes, "RegionRegistry::bytes_")                           \
    V(address_of_double_abs_constant, "double_absolute_constant")                \
    V(address_of_double_neg_constant, "double_negate_constant")                  \
    V(address_of_enable_experimental_regexp_engine,                              \
@@ -4398,10 +4838,10 @@ index e98604b7..7021922f 100644
  
  #ifdef V8_ENABLE_REGEXP_DIAGNOSTICS
 diff --git a/src/execution/isolate.h b/src/execution/isolate.h
-index 793be1a7..8b7b0983 100644
+index 793be1a7..38cae9e7 100644
 --- a/src/execution/isolate.h
 +++ b/src/execution/isolate.h
-@@ -1796,6 +1796,13 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
+@@ -1796,6 +1796,25 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
    bool force_slow_path() const { return force_slow_path_; }
    bool* force_slow_path_address() { return &force_slow_path_; }
  
@@ -4412,14 +4852,28 @@ index 793be1a7..8b7b0983 100644
 +  void set_region_read_table(uint8_t* table) { region_read_table_ = table; }
 +  uint8_t** region_read_table_address() { return &region_read_table_; }
 +
++  // The region #{} and #[] create objects in, or -1: the top of the stack of
++  // current regions. Read by the literal builtins.
++  intptr_t current_region() const { return current_region_; }
++  void set_current_region(intptr_t region) { current_region_ = region; }
++  intptr_t* current_region_address() { return &current_region_; }
++
++  // The linear allocation area of the main thread in shared space. Lives
++  // here so that generated code can allocate region objects in it.
++  LinearAllocationArea* shared_allocation_info() {
++    return &shared_allocation_info_;
++  }
++
    bool jitless() const { return jitless_; }
  
    void SetStackSize(size_t v);
-@@ -2823,6 +2830,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
+@@ -2823,6 +2842,9 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
    std::unique_ptr<PersistentHandlesList> persistent_handles_list_;
  
    bool force_slow_path_ = false;
 +  uint8_t* region_read_table_ = nullptr;
++  intptr_t current_region_ = -1;
++  LinearAllocationArea shared_allocation_info_;
  
    // Certain objects may be allocated in RO space if suitable for the snapshot.
    bool enable_ro_allocation_for_snapshot_ = false;
@@ -4527,6 +4981,27 @@ index 8f144e35..73c68255 100644
    V(JSGlobalObject, JS_GLOBAL_OBJECT_TYPE) \
    V(JSGlobalProxy, JS_GLOBAL_PROXY_TYPE) \
    V(JSPrimitiveWrapper, JS_PRIMITIVE_WRAPPER_TYPE) \
+diff --git a/src/heap/heap-allocator.cc b/src/heap/heap-allocator.cc
+index cead3955..2dc18143 100644
+--- a/src/heap/heap-allocator.cc
++++ b/src/heap/heap-allocator.cc
+@@ -72,9 +72,13 @@ void HeapAllocator::Setup() {
+                                 MainAllocator::kOldGeneration);
+ 
+   if (heap_->isolate()->has_shared_space()) {
+-    shared_space_allocator_.emplace(local_heap_,
+-                                    heap_->shared_allocation_space(),
+-                                    MainAllocator::kOldGeneration);
++    LinearAllocationArea* const shared_allocation_info =
++        local_heap_->is_main_thread()
++            ? heap_->isolate()->shared_allocation_info()
++            : nullptr;
++    shared_space_allocator_.emplace(
++        local_heap_, heap_->shared_allocation_space(),
++        MainAllocator::kOldGeneration, shared_allocation_info);
+     shared_lo_space_ = heap_->shared_lo_allocation_space();
+ 
+     shared_trusted_space_allocator_.emplace(
 diff --git a/src/heap/heap.cc b/src/heap/heap.cc
 index edb398ee..10574ed4 100644
 --- a/src/heap/heap.cc
@@ -4552,7 +5027,7 @@ index edb398ee..10574ed4 100644
    {
      // Allows handle derefs for all threads/isolates from this thread.
 diff --git a/src/ic/accessor-assembler.cc b/src/ic/accessor-assembler.cc
-index c4fa533d..cf7e4107 100644
+index c4fa533d..a42cba88 100644
 --- a/src/ic/accessor-assembler.cc
 +++ b/src/ic/accessor-assembler.cc
 @@ -24,6 +24,7 @@
@@ -4688,7 +5163,7 @@ index c4fa533d..cf7e4107 100644
  }
  
  void AccessorAssembler::JumpIfDataProperty(TNode<Uint32T> details,
-@@ -1551,6 +1624,35 @@ void AccessorAssembler::HandleStoreICSmiHandlerJSSharedStructFieldCase(
+@@ -1551,6 +1624,37 @@ void AccessorAssembler::HandleStoreICSmiHandlerJSSharedStructFieldCase(
    Return(value);
  }
  
@@ -4697,7 +5172,9 @@ index c4fa533d..cf7e4107 100644
 +    TNode<HeapObject> holder, Label* slow) {
 +  TNode<Object> value = p->value();
 +  GotoIfRegionAccessDenied(holder, true, slow);
-+  GotoIfNotStorableInRegion(holder, value, slow);
++  GotoIfNotStorableInRegion(
++      LoadObjectField<Smi>(holder, offsetof(JSRegionObject, region_id_)), value,
++      slow);
 +
 +  TNode<Uint32T> index =
 +      DecodeWord32<StoreHandler::RegionValueIndexBits>(handler_word);
@@ -4724,7 +5201,7 @@ index c4fa533d..cf7e4107 100644
  void AccessorAssembler::HandleStoreICHandlerCase(
      const StoreICParameters* p, TNode<MaybeObject> handler, Label* miss,
      ICMode ic_mode, ElementSupport support_elements) {
-@@ -1629,9 +1731,12 @@ void AccessorAssembler::HandleStoreICHandlerCase(
+@@ -1629,9 +1733,12 @@ void AccessorAssembler::HandleStoreICHandlerCase(
      }
      BIND(&if_fast_smi);
      {
@@ -4738,7 +5215,7 @@ index c4fa533d..cf7e4107 100644
        Branch(Word32Equal(handler_kind, STORE_KIND(kSharedStructField)),
               &shared_struct_field, &data);
  
-@@ -1642,6 +1747,13 @@ void AccessorAssembler::HandleStoreICHandlerCase(
+@@ -1642,6 +1749,13 @@ void AccessorAssembler::HandleStoreICHandlerCase(
        HandleStoreICSmiHandlerJSSharedStructFieldCase(p->context(), handler_word,
                                                       CAST(holder), p->value());
  
@@ -5113,6 +5590,51 @@ index c4045bb9..0620388f 100644
  
    friend class IC;
    friend class NamedLoadHandlerCompiler;
+diff --git a/src/init/bootstrapper.cc b/src/init/bootstrapper.cc
+index 8c98628e..742c778b 100644
+--- a/src/init/bootstrapper.cc
++++ b/src/init/bootstrapper.cc
+@@ -4035,6 +4035,19 @@ void Genesis::InitializeGlobal(DirectHandle<JSGlobalObject> global_object,
+         Builtin::kArrayBufferConstructor_DoNotInitialize, 1, kDontAdapt);
+     native_context()->set_array_buffer_noinit_fun(*array_buffer_noinit_fun);
+ 
++    // #{} and #[] of ownership regions call these. Not native, so that they
++    // stay out of stack traces: the literal is the frame that throws.
++    DirectHandle<JSFunction> region_object_literal = SimpleCreateFunction(
++        isolate_, factory->InternalizeUtf8String("regionObjectLiteral"),
++        Builtin::kRegionObjectLiteral, 0, kDontAdapt);
++    region_object_literal->shared()->set_native(false);
++    native_context()->set_region_object_literal(*region_object_literal);
++    DirectHandle<JSFunction> region_array_literal = SimpleCreateFunction(
++        isolate_, factory->InternalizeUtf8String("regionArrayLiteral"),
++        Builtin::kRegionArrayLiteral, 0, kDontAdapt);
++    region_array_literal->shared()->set_native(false);
++    native_context()->set_region_array_literal(*region_array_literal);
++
+     DirectHandle<JSObject> array_buffer_prototype(
+         Cast<JSObject>(array_buffer_fun->instance_prototype()), isolate_);
+     SimpleInstallGetter(isolate_, array_buffer_prototype,
+diff --git a/src/interpreter/bytecode-generator.cc b/src/interpreter/bytecode-generator.cc
+index 89ca37fc..f8a69583 100644
+--- a/src/interpreter/bytecode-generator.cc
++++ b/src/interpreter/bytecode-generator.cc
+@@ -7405,6 +7405,16 @@ void BytecodeGenerator::VisitCallRuntime(CallRuntime* expr) {
+   RegisterList args = register_allocator()->NewGrowableRegisterList();
+   VisitArguments(expr->arguments(), &args);
+   Runtime::FunctionId function_id = expr->function()->function_id;
++  // #{} and #[] call builtins, which generated code calls directly and which
++  // create most objects without the runtime.
++  if (function_id == Runtime::kCreateRegionObjectLiteral) {
++    builder()->CallJSRuntime(Context::REGION_OBJECT_LITERAL_INDEX, args);
++    return;
++  }
++  if (function_id == Runtime::kCreateRegionArrayLiteral) {
++    builder()->CallJSRuntime(Context::REGION_ARRAY_LITERAL_INDEX, args);
++    return;
++  }
+   builder()->CallRuntime(function_id, args);
+ }
+ 
 diff --git a/src/json/json-stringifier.cc b/src/json/json-stringifier.cc
 index cb1a6166..0a54d999 100644
 --- a/src/json/json-stringifier.cc
@@ -5267,6 +5789,21 @@ index 5a0a666c..473044be 100644
  #include "src/objects/js-struct.h"
  #ifdef V8_TEMPORAL_SUPPORT
  #include "src/objects/js-temporal-objects.h"
+diff --git a/src/objects/contexts.h b/src/objects/contexts.h
+index 1859939e..746b81d3 100644
+--- a/src/objects/contexts.h
++++ b/src/objects/contexts.h
+@@ -319,6 +319,10 @@ enum ContextLookupFlags {
+   V(REGEXP_RESULT_INDICES_MAP_INDEX, Map, regexp_result_indices_map)           \
+   V(REGEXP_SEARCH_FUNCTION_INDEX, JSFunction, regexp_search_function)          \
+   V(REGEXP_SPLIT_FUNCTION_INDEX, JSFunction, regexp_split_function)            \
++  /* #[] and #{}: the builtins, and the shapes of #{} seen in this context */  \
++  V(REGION_ARRAY_LITERAL_INDEX, JSFunction, region_array_literal)              \
++  V(REGION_LITERAL_CACHE_INDEX, Object, region_literal_cache)                  \
++  V(REGION_OBJECT_LITERAL_INDEX, JSFunction, region_object_literal)            \
+   V(INITIAL_REGEXP_STRING_ITERATOR_PROTOTYPE_MAP_INDEX, Map,                   \
+     initial_regexp_string_iterator_prototype_map)                              \
+   V(SCRIPT_CONTEXT_TABLE_INDEX, ScriptContextTable, script_context_table)      \
 diff --git a/src/objects/instance-type-inl.h b/src/objects/instance-type-inl.h
 index 002cdca9..7456d3ee 100644
 --- a/src/objects/instance-type-inl.h
@@ -5524,16 +6061,17 @@ index 00000000..844041ef
 +#endif  // V8_OBJECTS_JS_REGION_INL_H_
 diff --git a/src/objects/js-region.cc b/src/objects/js-region.cc
 new file mode 100644
-index 00000000..00baa47a
+index 00000000..c87fad57
 --- /dev/null
 +++ b/src/objects/js-region.cc
-@@ -0,0 +1,1603 @@
+@@ -0,0 +1,1673 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
 +
 +#include "src/objects/js-region.h"
 +
++#include <algorithm>
 +#include <unordered_map>
 +#include <vector>
 +
@@ -6183,6 +6721,10 @@ index 00000000..00baa47a
 +  struct Shape {
 +    Address* keys;  // Global handles of this isolate.
 +    Address* map;
++    // The same keys as this isolate's internalized strings, which are unique:
++    // literals and local objects pass these, so the recent shapes are found
++    // by comparing pointers. Null if a key was not internalized.
++    Address* local_keys;
 +  };
 +  struct State {
 +    std::vector<int> current;
@@ -6215,6 +6757,7 @@ index 00000000..00baa47a
 +      for (Shape& shape : shapes) {
 +        GlobalHandles::Destroy(shape.keys);
 +        GlobalHandles::Destroy(shape.map);
++        if (shape.local_keys) GlobalHandles::Destroy(shape.local_keys);
 +      }
 +    }
 +    if (it->second.array_map) GlobalHandles::Destroy(it->second.array_map);
@@ -6233,8 +6776,9 @@ index 00000000..00baa47a
 +    State& state = Of(isolate);
 +    int length = static_cast<int>(keys.size());
 +    for (const Shape& shape : state.recent) {
-+      if (!shape.keys) continue;
-+      Tagged<FixedArray> known = Cast<FixedArray>(Tagged<Object>(*shape.keys));
++      if (!shape.local_keys) continue;
++      Tagged<FixedArray> known =
++          Cast<FixedArray>(Tagged<Object>(*shape.local_keys));
 +      if (static_cast<int>(known->ulength().value()) != length) continue;
 +      bool same = true;
 +      for (int i = 0; i < length && same; i++) same = known->get(i) == *keys[i];
@@ -6266,8 +6810,16 @@ index 00000000..00baa47a
 +    }
 +    DirectHandle<Map> map =
 +        NewRegionMapFor(isolate, JS_REGION_OBJECT_TYPE, JSRegionObject::kHeaderSize);
++    Address* local_keys = nullptr;
++    if (std::all_of(keys.begin(), keys.end(), [](DirectHandle<String> key) {
++          return IsInternalizedString(*key);
++        })) {
++      DirectHandle<FixedArray> local = factory->NewFixedArray(length);
++      for (int i = 0; i < length; i++) local->set(i, *keys[i]);
++      local_keys = isolate->global_handles()->Create(*local).location();
++    }
 +    Shape shape{isolate->global_handles()->Create(*new_keys).location(),
-+                isolate->global_handles()->Create(*map).location()};
++                isolate->global_handles()->Create(*map).location(), local_keys};
 +    // Of() may have been invalidated by nothing else; `candidates` is still
 +    // the vector of this hash.
 +    candidates.push_back(shape);
@@ -6854,6 +7406,7 @@ index 00000000..00baa47a
 +// static
 +void JSRegionObject::PushCurrent(Isolate* isolate, int region) {
 +  RegionLiterals::Of(isolate).current.push_back(region);
++  isolate->set_current_region(region);
 +}
 +
 +// static
@@ -6862,15 +7415,15 @@ index 00000000..00baa47a
 +  for (auto it = current.rbegin(); it != current.rend(); ++it) {
 +    if (*it == region) {
 +      current.erase(std::next(it).base());
-+      return;
++      break;
 +    }
 +  }
++  isolate->set_current_region(current.empty() ? -1 : current.back());
 +}
 +
 +// static
 +int JSRegionObject::Current(Isolate* isolate) {
-+  std::vector<int>& current = RegionLiterals::Of(isolate).current;
-+  return current.empty() ? -1 : current.back();
++  return static_cast<int>(isolate->current_region());
 +}
 +
 +// static
@@ -6927,6 +7480,60 @@ index 00000000..00baa47a
 +  RegionRegistry::AddBytes(region,
 +                           bytes + kHeaderSize + FixedArray::SizeFor(length));
 +  return object;
++}
++
++// static
++MaybeDirectHandle<Object> JSRegionObject::ShareLiteralValue(
++    Isolate* isolate, int region, DirectHandle<Object> value) {
++  DirectHandle<Object> shared;
++  ASSIGN_RETURN_ON_EXCEPTION(isolate, shared,
++                             LiteralValue(isolate, region, value));
++  if (IsString(*shared) && *shared != *value) {
++    RegionRegistry::AddBytes(region, Cast<String>(*shared)->Size());
++  }
++  return shared;
++}
++
++// static
++uint32_t JSRegionObject::LiteralCacheHash(
++    const DirectHandleVector<String>& keys) {
++  uint32_t hash = static_cast<uint32_t>(keys.size());
++  for (DirectHandle<String> key : keys) hash = hash * 31 + key->EnsureHash();
++  return hash;
++}
++
++// static
++void JSRegionObject::CacheLiteralShape(Isolate* isolate,
++                                       const DirectHandleVector<String>* keys,
++                                       DirectHandle<JSRegionObject> literal) {
++  Factory* factory = isolate->factory();
++  DirectHandle<NativeContext> context = isolate->native_context();
++  DirectHandle<FixedArray> cache;
++  if (IsFixedArray(context->region_literal_cache())) {
++    cache = direct_handle(Cast<FixedArray>(context->region_literal_cache()),
++                          isolate);
++  } else {
++    cache = factory->NewFixedArray(kLiteralCacheSize + 1, AllocationType::kOld);
++    context->set_region_literal_cache(*cache);
++  }
++  if (!keys) {
++    cache->set(kLiteralCacheArrayMapIndex, literal->map());
++    return;
++  }
++  int length = static_cast<int>(keys->size());
++  if (length > kMaxFastLiteralLength) return;
++  // Keys come from the constant pool, so the builtin compares pointers.
++  for (DirectHandle<String> key : *keys) {
++    if (!IsInternalizedString(*key)) return;
++  }
++  DirectHandle<FixedArray> entry = factory->NewFixedArray(
++      kLiteralCacheEntryFirstKeyIndex + length, AllocationType::kOld);
++  entry->set(kLiteralCacheEntryMapIndex, literal->map());
++  entry->set(kLiteralCacheEntryKeysIndex, literal->keys());
++  for (int i = 0; i < length; i++) {
++    entry->set(kLiteralCacheEntryFirstKeyIndex + i, *(*keys)[i]);
++  }
++  cache->set(LiteralCacheHash(*keys) & (kLiteralCacheSize - 1), *entry);
 +}
 +
 +bool IsJSRegionArray(Tagged<HeapObject> object) {
@@ -7133,10 +7740,10 @@ index 00000000..00baa47a
 +}  // namespace v8
 diff --git a/src/objects/js-region.h b/src/objects/js-region.h
 new file mode 100644
-index 00000000..c7384222
+index 00000000..832bd328
 --- /dev/null
 +++ b/src/objects/js-region.h
-@@ -0,0 +1,264 @@
+@@ -0,0 +1,294 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -7243,6 +7850,11 @@ index 00000000..c7384222
 +  // the owner, 0 while the region is in transit, or kFrozen.
 +  static Address owners_address() {
 +    return reinterpret_cast<Address>(&owners_[0]);
++  }
++  // Bytes per region id, which generated code adds to atomically.
++  static Address bytes_address() {
++    static_assert(sizeof(bytes_[0]) == sizeof(uint64_t));
++    return reinterpret_cast<Address>(&bytes_[0]);
 +  }
 +
 + private:
@@ -7355,6 +7967,31 @@ index 00000000..c7384222
 +  static MaybeDirectHandle<JSRegionObject> NewLiteral(
 +      Isolate* isolate, DirectHandleVector<String>* keys,
 +      const DirectHandleVector<Object>& values);
++
++  // A value of #{} or #[] as the object holds it: as it is, shared, copied
++  // or rejected. Counts the bytes of a string copied into the region.
++  static MaybeDirectHandle<Object> ShareLiteralValue(
++      Isolate* isolate, int region, DirectHandle<Object> value);
++
++  // The shapes of #{} that the literal builtins create objects of without the
++  // runtime, per native context: kLiteralCacheSize entries indexed by
++  // LiteralCacheHash() of the keys, each undefined or [map, keys, local key 0,
++  // local key 1, ...], and then the map of region arrays.
++  static constexpr int kLiteralCacheSize = 64;
++  static constexpr int kLiteralCacheArrayMapIndex = kLiteralCacheSize;
++  static constexpr int kLiteralCacheEntryMapIndex = 0;
++  static constexpr int kLiteralCacheEntryKeysIndex = 1;
++  static constexpr int kLiteralCacheEntryFirstKeyIndex = 2;
++  // Longer literals always go through the runtime.
++  static constexpr int kMaxFastLiteralLength = 32;
++  // The hash of the keys of a literal: hash = hash * 31 + key hash, starting
++  // with the number of keys. The literal builtin computes the same.
++  static uint32_t LiteralCacheHash(const DirectHandleVector<String>& keys);
++  // Remembers the shape of `literal`, just created by #{} with `keys` or by
++  // #[] without, in the cache of the current native context.
++  static void CacheLiteralShape(Isolate* isolate,
++                                const DirectHandleVector<String>* keys,
++                                DirectHandle<JSRegionObject> literal);
 +
 +  DECL_PRINTER(JSRegionObject)
 +  DECL_VERIFIER(JSRegionObject)
@@ -7876,7 +8513,7 @@ index 2ab60bab..433e7430 100644
          result = JSObject::GetPropertyAttributesWithInterceptor(&it);
          if (result.IsNothing()) return MaybeDirectHandle<Object>();
 diff --git a/src/runtime/runtime-object.cc b/src/runtime/runtime-object.cc
-index 96c1c2f4..89d0f9b7 100644
+index 96c1c2f4..1561b6cd 100644
 --- a/src/runtime/runtime-object.cc
 +++ b/src/runtime/runtime-object.cc
 @@ -15,6 +15,7 @@
@@ -7887,7 +8524,7 @@ index 96c1c2f4..89d0f9b7 100644
  #include "src/objects/property-descriptor-object.h"
  #include "src/objects/property-descriptor.h"
  #include "src/objects/property-details.h"
-@@ -87,6 +88,29 @@ Maybe<bool> Runtime::DeleteObjectProperty(Isolate* isolate,
+@@ -87,6 +88,40 @@ Maybe<bool> Runtime::DeleteObjectProperty(Isolate* isolate,
  }
  
  // https://tc39.es/ecma262/#sec-object.keys
@@ -7914,10 +8551,21 @@ index 96c1c2f4..89d0f9b7 100644
 +                           JSRegionObject::NewLiteral(isolate, nullptr, values));
 +}
 +
++// A value that the #{} and #[] builtins can't store as it is: a string or
++// number to share, a typed array to copy, or an error.
++RUNTIME_FUNCTION(Runtime_ShareRegionLiteralValue) {
++  HandleScope scope(isolate);
++  DCHECK_EQ(2, args.length());
++  int region = args.smi_value_at(0);
++  DirectHandle<Object> value = args.at(1);
++  RETURN_RESULT_OR_FAILURE(
++      isolate, JSRegionObject::ShareLiteralValue(isolate, region, value));
++}
++
  RUNTIME_FUNCTION(Runtime_ObjectKeys) {
    HandleScope scope(isolate);
    DirectHandle<Object> object = args.at(0);
-@@ -221,6 +245,7 @@ RUNTIME_FUNCTION(Runtime_HasOwnConstDataProperty) {
+@@ -221,6 +256,7 @@ RUNTIME_FUNCTION(Runtime_HasOwnConstDataProperty) {
        case LookupIterator::ACCESS_CHECK:
        case LookupIterator::JSPROXY:
        case LookupIterator::WASM_OBJECT:
@@ -7926,15 +8574,16 @@ index 96c1c2f4..89d0f9b7 100644
        case LookupIterator::ACCESSOR:
        case LookupIterator::MODULE_NAMESPACE:
 diff --git a/src/runtime/runtime.h b/src/runtime/runtime.h
-index 8be2dd32..3cbebbd3 100644
+index 8be2dd32..a20db6b4 100644
 --- a/src/runtime/runtime.h
 +++ b/src/runtime/runtime.h
-@@ -395,6 +395,8 @@ constexpr bool CanTriggerGC(T... properties) {
+@@ -395,6 +395,9 @@ constexpr bool CanTriggerGC(T... properties) {
    F(HasOwnConstDataProperty, 2, 1)                                     \
    F(ObjectIsExtensible, 1, 1)                                          \
    F(ObjectKeys, 1, 1)                                                  \
 +  F(CreateRegionObjectLiteral, -1 /* keys and values */, 1)            \
 +  F(CreateRegionArrayLiteral, -1 /* elements */, 1)                    \
++  F(ShareRegionLiteralValue, 2, 1)                                     \
    F(ObjectValues, 1, 1)                                                \
    F(ObjectValuesSkipFastPath, 1, 1)                                    \
    F(OptimizeObjectForAddingMultipleProperties, 2, 1)                   \

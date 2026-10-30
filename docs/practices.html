@@ -60,7 +60,7 @@
 <tr><td><a href="#typed">9. Много чисел</a></td><td>обычный массив чисел в регионе</td><td>типизированный массив в регионе</td><td class="num">6,9 мс → 0,66 мс</td></tr>
 <tr><td><a href="#map">10. Задачи в <code>map</code></a></td><td>колбэк запускает задачу и возвращает другое</td><td>колбэк возвращает ручку задачи</td><td class="num">задачи не дождались → дождались</td></tr>
 <tr><td><a href="#borrow-while">11. Билет в асинхронной задаче</a></td><td><code>borrow()</code> и отложенное чтение</td><td><code>return region.borrowWhile(async ...)</code></td><td class="num">OwnershipError → работает</td></tr>
-<tr><td><a href="#build">12. Большой набор данных в регион</a></td><td>по одному через <code>Region.object</code> или <code>#{}</code></td><td>собрать обычными объектами, один <code>run</code></td><td class="num">479 мс → 194 мс</td></tr>
+<tr><td><a href="#build">12. Большой набор данных в регион</a></td><td>по одному через <code>Region.object</code></td><td>литералы <code>#{}</code> или один <code>run</code></td><td class="num">446 мс → 86 мс</td></tr>
 </tbody>
 </table>
 </div>
@@ -122,8 +122,8 @@ region.<span class="tok-api">freeze</span>();
 (<span class="tok-keyword">async</span> () =&gt; {
   <span class="tok-keyword">await</span> <span class="tok-fn">measure</span>(<span class="tok-string">'обычный массив, захват'</span>, sumPlain);
   <span class="tok-keyword">await</span> <span class="tok-fn">measure</span>(<span class="tok-string">'замороженный регион   '</span>, sumFrozen);
-})();</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8; время у вас будет другим</span></div><pre class="out">обычный массив, захват: 1053.1 ms (сумма 4950000)
-замороженный регион   : 0.5 ms (сумма 4950000)</pre></figure></details>
+})();</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8; время у вас будет другим</span></div><pre class="out">обычный массив, захват: 1051.4 ms (сумма 4950000)
+замороженный регион   : 0.4 ms (сумма 4950000)</pre></figure></details>
 
 <p>Разница примерно в 1 500 раз, и почти вся она — копирование: около 33 мс на копию каталога, тридцать две копии подряд. Сама работа в задачах тут крошечная. Если данные нужно и читать, и менять, замораживать нельзя. Тогда смотрите следующую практику.</p>
 
@@ -191,8 +191,8 @@ region.<span class="tok-api">freeze</span>();
 <span class="tok-fn">print</span>(<span class="tok-string">`пересоздавать регион: ${</span><span class="tok-fn">best</span>(rebuild).<span class="tok-fn">toFixed</span>(<span class="tok-number">1</span>)<span class="tok-string">} µs за круг`</span>);
 <span class="tok-fn">print</span>(<span class="tok-string">`переезд туда-обратно: ${</span><span class="tok-fn">best</span>(move).<span class="tok-fn">toFixed</span>(<span class="tok-number">1</span>)<span class="tok-string">} µs за круг`</span>);
 <span class="tok-fn">print</span>(<span class="tok-string">'items[0].x после всех кругов:'</span>, items[<span class="tok-number">0</span>].x);
-worker.<span class="tok-api">terminate</span>();</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8; время у вас будет другим</span></div><pre class="out">пересоздавать регион: 3453.3 µs за круг
-переезд туда-обратно: 8.7 µs за круг
+worker.<span class="tok-api">terminate</span>();</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8; время у вас будет другим</span></div><pre class="out">пересоздавать регион: 3570.9 µs за круг
+переезд туда-обратно: 9.3 µs за круг
 items[0].x после всех кругов: 600</pre></figure></details>
 
 <p>8,8 микросекунды за круг — это два сообщения и два переезда региона, от размера данных время не зависит. 3,5 мс — почти всё копия 10 000 объектов в новый регион. Чем больше данных, тем больше разница.</p>
@@ -247,10 +247,10 @@ items[0].x после всех кругов: 600</pre></figure></details>
   <span class="tok-keyword">await</span> <span class="tok-fn">measure</span>(<span class="tok-string">'100 средних задач    '</span>, <span class="tok-keyword">async</span> () =&gt; <span class="tok-fn">sum</span>(<span class="tok-keyword">await</span> Promise.<span class="tok-fn">all</span>(<span class="tok-fn">split</span>(<span class="tok-number">100</span>))));
   <span class="tok-keyword">await</span> <span class="tok-fn">measure</span>(<span class="tok-string">`${</span><span class="tok-api">spawn</span>.<span class="tok-api">poolSize</span><span class="tok-string">} крупные задачи     `</span>, <span class="tok-keyword">async</span> () =&gt; <span class="tok-fn">sum</span>(<span class="tok-keyword">await</span> Promise.<span class="tok-fn">all</span>(<span class="tok-fn">split</span>(<span class="tok-api">spawn</span>.<span class="tok-api">poolSize</span>))));
 })();</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8; время у вас будет другим</span></div><pre class="out">воркеров в пуле: 4
-в главном потоке     : 180 ms (простых: 148933)
+в главном потоке     : 191 ms (простых: 148933)
 10 000 мелких задач  : 57 ms (простых: 148933)
 100 средних задач    : 52 ms (простых: 148933)
-4 крупные задачи     : 65 ms (простых: 148933)</pre></figure></details>
+4 крупные задачи     : 66 ms (простых: 148933)</pre></figure></details>
 
 <p>100 задач — в 3,7 раза быстрее главного потока, почти идеал для четырёх воркеров. 10 000 мелких задач заняли 57 мс: на 5 мс дольше, чем 100 задач, то есть около 0,5 мкс лишних на каждую из 10 000. Раньше, когда запуск стоил около 40 мкс, этот вариант шёл 377 мс и был вдвое медленнее той же работы в главном потоке без всякого <code>spawn</code>. Теперь разница с крупными задачами почти пропала, но совсем мелкие задачи всё равно немного проигрывают.</p>
 <p>Четыре крупные задачи дали только ×3: проверить большое число на простоту дольше, чем маленькое, поэтому последняя четверть считается дольше первой, и три воркера в конце простаивают. В отдельной проверке мы перебрали и другие числа частей: 8 частей — около 59 мс, 16 — около 55, от 32 до 1 000 — 52–53 мс, 10 000 — около 57.</p>
@@ -357,8 +357,8 @@ stats.sum = sum;</code></pre></figure>
 <span class="tok-fn">print</span>(<span class="tok-string">`запись: в регион на каждом шаге ${</span><span class="tok-fn">best</span>(writeEachStep)<span class="tok-string">} ms, локально и один раз ${</span><span class="tok-fn">best</span>(writeOnce)<span class="tok-string">} ms`</span>);
 <span class="tok-fn">print</span>(<span class="tok-string">`чтение: по массиву региона ${</span><span class="tok-fn">best</span>(readRegion)<span class="tok-string">} ms, копия циклом + обычный массив ${</span><span class="tok-fn">best</span>(readLoopCopy)<span class="tok-string">} ms, `</span> +
   <span class="tok-string">`копия Array.from + обычный массив ${</span><span class="tok-fn">best</span>(readArrayFrom)<span class="tok-string">} ms`</span>);
-<span class="tok-fn">print</span>(<span class="tok-string">'результаты совпадают:'</span>, <span class="tok-fn">readRegion</span>() === <span class="tok-fn">readLoopCopy</span>() &amp;&amp; <span class="tok-fn">readLoopCopy</span>() === <span class="tok-fn">readArrayFrom</span>());</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8; время у вас будет другим</span></div><pre class="out">запись: в регион на каждом шаге 13.51 ms, локально и один раз 0.70 ms
-чтение: по массиву региона 33.69 ms, копия циклом + обычный массив 3.48 ms, копия Array.from + обычный массив 18.25 ms
+<span class="tok-fn">print</span>(<span class="tok-string">'результаты совпадают:'</span>, <span class="tok-fn">readRegion</span>() === <span class="tok-fn">readLoopCopy</span>() &amp;&amp; <span class="tok-fn">readLoopCopy</span>() === <span class="tok-fn">readArrayFrom</span>());</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8; время у вас будет другим</span></div><pre class="out">запись: в регион на каждом шаге 13.70 ms, локально и один раз 0.72 ms
+чтение: по массиву региона 34.30 ms, копия циклом + обычный массив 3.76 ms, копия Array.from + обычный массив 18.43 ms
 результаты совпадают: true</pre></figure></details>
 
 <p>Копия циклом вместе с 50 проходами в 8,8 раза быстрее, чем 50 проходов по региону. Копия через <code>Array.from</code> выигрывает всего в 1,8 раза: почти всё время уходит на саму копию. Копия — это снимок. Изменения в регионе в ней не появятся, и запись в неё не попадёт в регион. Для одного прохода копировать смысла нет, об этом следующая практика. А если в массиве только числа, лучше с самого начала хранить их в типизированном массиве (<a href="#typed">практика 9</a>): тогда копия не нужна вовсе.</p>
@@ -424,10 +424,10 @@ stats.sum = sum;</code></pre></figure>
 <span class="tok-fn">print</span>(<span class="tok-string">`регион, цикл for:                   ${</span><span class="tok-fn">best</span>(loopOnRegion)<span class="tok-string">} ms`</span>);
 <span class="tok-fn">print</span>(<span class="tok-string">`копия циклом, filter/map/reduce:    ${</span><span class="tok-fn">best</span>(methodsOnCopy)<span class="tok-string">} ms`</span>);
 <span class="tok-fn">print</span>(<span class="tok-string">`копия циклом, цикл for:             ${</span><span class="tok-fn">best</span>(loopOnCopy)<span class="tok-string">} ms`</span>);
-<span class="tok-fn">print</span>(<span class="tok-string">'результаты совпадают:'</span>, <span class="tok-fn">methodsOnRegion</span>() === <span class="tok-fn">loopOnRegion</span>() &amp;&amp; <span class="tok-fn">loopOnCopy</span>() === <span class="tok-fn">methodsOnCopy</span>());</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8; время у вас будет другим</span></div><pre class="out">регион, filter/map/reduce:          216.31 ms
-регион, цикл for:                     7.88 ms
-копия циклом, filter/map/reduce:     25.88 ms
-копия циклом, цикл for:               8.65 ms
+<span class="tok-fn">print</span>(<span class="tok-string">'результаты совпадают:'</span>, <span class="tok-fn">methodsOnRegion</span>() === <span class="tok-fn">loopOnRegion</span>() &amp;&amp; <span class="tok-fn">loopOnCopy</span>() === <span class="tok-fn">methodsOnCopy</span>());</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8; время у вас будет другим</span></div><pre class="out">регион, filter/map/reduce:          221.25 ms
+регион, цикл for:                     7.97 ms
+копия циклом, filter/map/reduce:     26.59 ms
+копия циклом, цикл for:               8.69 ms
 результаты совпадают: true</pre></figure></details>
 
 <p>Методы на массиве региона в 28 раз медленнее цикла. Если без методов никак, сначала скопируйте массив циклом (практика 4б): тогда методы работают с обычным массивом, и выходит 27,7 мс вместо 223. Для одного прохода с циклом копия не нужна: 8,7 мс с копией против 7,8 мс без неё. То же касается <code>for...of</code>: он тоже идёт через итератор.</p>
@@ -484,8 +484,8 @@ stats.sum = sum;</code></pre></figure>
   <span class="tok-keyword">const</span> plain = <span class="tok-fn">make</span>(shapes);
   <span class="tok-fn">print</span>(<span class="tok-string">`разных форм ${</span><span class="tok-fn">String</span>(shapes).<span class="tok-fn">padStart</span>(<span class="tok-number">2</span>)<span class="tok-string">}: регион ${</span><span class="tok-fn">best</span>(inRegion)<span class="tok-string">} ms | обычные объекты ${</span><span class="tok-fn">best</span>(plain)<span class="tok-string">} ms`</span>);
 }</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8; время у вас будет другим</span></div><pre class="out">разных форм  1: регион   20.7 ms | обычные объекты    1.4 ms
-разных форм  4: регион   26.7 ms | обычные объекты    1.6 ms
-разных форм 24: регион   20.2 ms | обычные объекты    6.9 ms</pre></figure></details>
+разных форм  4: регион   27.4 ms | обычные объекты    1.7 ms
+разных форм 24: регион   20.4 ms | обычные объекты    7.1 ms</pre></figure></details>
 
 <p>Здесь замер разошёлся с ожиданиями. У обычных объектов всё как в учебнике: одна форма 1,5 мс, 24 формы 7,3 мс, почти в 5 раз медленнее. У объектов региона хуже всего четыре формы (+31%), а 24 формы идут так же быстро, как одна. Похоже, общий путь для объектов региона и так используется всегда, потому что компилятор не встраивает доступ к ним, так что переход на него почти ничего не стоит. Совет всё равно в силе: он почти ничего не стоит, полиморфный случай заметно медленнее, а когда компиляторы научатся встраивать доступ к регионам, форма станет важна так же, как у обычных объектов.</p>
 <p>Ещё видно, что сумма поля по 100 000 объектов региона в 13 раз дольше, чем по обычным. Это в основном не форма, а доступ к региону в горячем цикле: индекс по массиву региона (практика 4б) и чтение поля без встраивания в машинный код.</p>
@@ -549,8 +549,8 @@ stats.sum = sum;</code></pre></figure>
   <span class="tok-keyword">await</span> <span class="tok-fn">watchMainThread</span>(<span class="tok-string">'await'</span>, <span class="tok-keyword">async</span> () =&gt; {
     <span class="tok-keyword">await</span> <span class="tok-api">spawn</span>(heavy, N);
   });
-})();</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8; время у вас будет другим</span></div><pre class="out">join : задача 180 ms, главный поток ответил 1 раз, самая длинная пауза 180.4 ms
-await: задача 192 ms, главный поток ответил 257707 раз, самая длинная пауза 0.2 ms</pre></figure></details>
+})();</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8; время у вас будет другим</span></div><pre class="out">join : задача 184 ms, главный поток ответил 1 раз, самая длинная пауза 183.8 ms
+await: задача 191 ms, главный поток ответил 257987 раз, самая длинная пауза 0.3 ms</pre></figure></details>
 
 <p>С <code>join()</code> главный поток не ответил ни разу, пока шла задача: единственный тик случился уже после неё, и пауза равна длине задачи. С <code>await</code> он ответил около 257 тысяч раз, и самая длинная пауза — 0,3 мс. Сама задача в обоих случаях считается одинаково долго. <code>join()</code> уместен в воркере или в скрипте d8, где отвечать некому. Вызов <code>spawn(...).join()</code> подчёркивает правило Biome из <a href="tooling.html#biome">песочницы</a>.</p>
 
@@ -684,12 +684,12 @@ await: задача 192 ms, главный поток ответил 257707 ра
 <span class="tok-fn">print</span>(<span class="tok-string">`запись, массив чисел в регионе:  ${</span><span class="tok-fn">best</span>(writeRegionArray)<span class="tok-string">} ms`</span>);
 <span class="tok-fn">print</span>(<span class="tok-string">`запись, Float64Array в регионе:  ${</span><span class="tok-fn">best</span>(writeRegionTyped)<span class="tok-string">} ms`</span>);
 <span class="tok-fn">print</span>(<span class="tok-string">`запись, обычный Float64Array:    ${</span><span class="tok-fn">best</span>(writePlainTyped)<span class="tok-string">} ms`</span>);
-<span class="tok-fn">print</span>(<span class="tok-string">'результаты совпадают:'</span>, <span class="tok-fn">sumRegionArray</span>() === <span class="tok-fn">sumRegionTyped</span>() &amp;&amp; <span class="tok-fn">sumRegionTyped</span>() === <span class="tok-fn">sumPlainTyped</span>());</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8; время у вас будет другим</span></div><pre class="out">сумма, массив чисел в регионе:    6.74 ms
+<span class="tok-fn">print</span>(<span class="tok-string">'результаты совпадают:'</span>, <span class="tok-fn">sumRegionArray</span>() === <span class="tok-fn">sumRegionTyped</span>() &amp;&amp; <span class="tok-fn">sumRegionTyped</span>() === <span class="tok-fn">sumPlainTyped</span>());</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8; время у вас будет другим</span></div><pre class="out">сумма, массив чисел в регионе:    6.83 ms
 сумма, Float64Array в регионе:    0.65 ms
-сумма, обычный Float64Array:      0.60 ms
+сумма, обычный Float64Array:      0.64 ms
 запись, массив чисел в регионе:   7.67 ms
-запись, Float64Array в регионе:   1.48 ms
-запись, обычный Float64Array:     0.76 ms
+запись, Float64Array в регионе:   1.59 ms
+запись, обычный Float64Array:     1.40 ms
 результаты совпадают: true</pre></figure></details>
 
 <p>Сумма по <code>Float64Array</code> в регионе идёт почти с той же скоростью, что по обычному <code>Float64Array</code>, и в 10 раз быстрее, чем по массиву чисел в регионе. Запись в массив региона идёт по быстрому пути inline cache (<a href="inside.html#arrays">как</a>), миллион записей занимает около 8 мс. В типизированный массив те же записи занимают около 1,5 мс, как и без регионов, то есть всё равно в пять раз быстрее. Записи в <code>Float64Array</code> между запусками скачут от 0,8 до 1,7 мс, у обычного и у регионального одинаково.</p>
@@ -731,9 +731,9 @@ await: задача 192 ms, главный поток ответил 257707 ра
 start = performance.<span class="tok-fn">now</span>();
 <span class="tok-keyword">const</span> good = <span class="tok-keyword">await</span> Promise.<span class="tok-fn">all</span>(parts.<span class="tok-fn">map</span>(() =&gt; <span class="tok-api">spawn</span>(heavy, <span class="tok-number">20_000_000</span>)));
 <span class="tok-fn">print</span>(<span class="tok-string">`хорошо: Promise.all вернул результаты через ${</span>(performance.<span class="tok-fn">now</span>() - start).<span class="tok-fn">toFixed</span>(<span class="tok-number">0</span>)<span class="tok-string">} ms, `</span> +
-  <span class="tok-string">`все одинаковые: ${</span>good.<span class="tok-fn">every</span>((v) =&gt; v === good[<span class="tok-number">0</span>])<span class="tok-string">}`</span>);</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8 --module; время у вас будет другим</span></div><pre class="out">плохо:  Promise.all вернул [0,1,2,3] через 7.1 ms
-        задачи закончились через 138 ms
-хорошо: Promise.all вернул результаты через 128 ms, все одинаковые: true</pre></figure>
+  <span class="tok-string">`все одинаковые: ${</span>good.<span class="tok-fn">every</span>((v) =&gt; v === good[<span class="tok-number">0</span>])<span class="tok-string">}`</span>);</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8 --module; время у вас будет другим</span></div><pre class="out">плохо:  Promise.all вернул [0,1,2,3] через 7.8 ms
+        задачи закончились через 140 ms
+хорошо: Promise.all вернул результаты через 130 ms, все одинаковые: true</pre></figure>
 
 <p>В плохом варианте <code>Promise.all</code> вернул номера частей, пока задачи только начинались: эти миллисекунды ушли на сами вызовы <code>spawn</code> и запуск воркеров пула. Задачи закончились намного позже, и узнать об этом удалось только через <code>spawn.idle()</code>. Эту ошибку подсвечивает правило ESLint <a href="tooling.html#no-floating-spawn"><code>no-floating-spawn</code></a>: оно отдельно говорит, что колбэк возвращает не ту ручку.</p>
 
@@ -752,9 +752,9 @@ start = performance.<span class="tok-fn">now</span>();
 </div>
 <p>Голый билет, переживший задачу, d8 замечает при запуске и печатает в воркере предупреждение. <code>borrowWhile</code> с асинхронной функцией без <code>return</code> видно ещё в редакторе: его подсвечивает правило ESLint <a href="tooling.html#no-floating-borrow-while"><code>no-floating-borrow-while</code></a>.</p>
 
-<h2 id="build"><span class="practice-num">12</span>Большой набор данных — одним <code>run</code>, а не по одному объекту</h2>
-<p><code>Region.object()</code>, <code>Region.array()</code> и литералы <code>#{}</code> удобны, когда данные появляются по ходу работы: пришёл заказ — положили его в регион (<a href="guide.html#direct">как</a>). Но у каждого вызова есть своя цена. <code>Region.object()</code> копирует свой литерал, а <code>#{}</code> пока идёт через рантайм. На десятке объектов этого не видно, на сотнях тысяч видно хорошо.</p>
-<p>Если весь набор известен сразу, соберите его обычными объектами и скопируйте в регион одним <code>run</code>. Обычные объекты движок создаёт прямо в машинном коде, а копия идёт по быстрому пути.</p>
+<h2 id="build"><span class="practice-num">12</span>Большой набор данных — литералами <code>#{}</code> или одним <code>run</code>, а не через <code>Region.object()</code></h2>
+<p><code>Region.object()</code> и <code>Region.array()</code> удобны, когда данные появляются по ходу работы: пришёл заказ — положили его в регион (<a href="guide.html#direct">как</a>). Но каждый вызов копирует свой аргумент: сначала движок создаёт обычный объект, потом его копию в регионе. На десятке объектов этого не видно, на сотнях тысяч видно хорошо.</p>
+<p>Литерал <code>#{}</code> ничего не копирует и после первого объекта каждой формы создаёт объект прямо в машинном коде. Если включён флаг <code>--harmony-region-literals</code>, собирайте набор литералами. Без флага соберите его обычными объектами и скопируйте в регион одним <code>run</code>: одна копия всего набора дешевле копии на каждый объект.</p>
 <div class="versus">
 <figure class="snippet bad"><div class="snippet-head"><span class="mark" aria-hidden="true"></span>Плохо</div><pre class="code"><code>{
   <span class="tok-keyword">using</span> _ = region.<span class="tok-api">enter</span>();
@@ -764,12 +764,21 @@ start = performance.<span class="tok-fn">now</span>();
       tags: <span class="tok-api">Region</span>.<span class="tok-api">array</span>(...row.tags), price: row.price }));
   }
 }</code></pre></figure>
-<figure class="snippet good"><div class="snippet-head"><span class="mark" aria-hidden="true"></span>Хорошо</div><pre class="code"><code><span class="tok-keyword">const</span> items = region.<span class="tok-api">run</span>(() =&gt; rows.<span class="tok-fn">map</span>((row) =&gt; ({
+<figure class="snippet good"><div class="snippet-head"><span class="mark" aria-hidden="true"></span>Хорошо</div><pre class="code"><code>{
+  <span class="tok-keyword">using</span> _ = region.<span class="tok-api">enter</span>();
+  <span class="tok-keyword">const</span> items = #[];
+  <span class="tok-keyword">for</span> (<span class="tok-keyword">const</span> row <span class="tok-keyword">of</span> rows) {               <span class="tok-comment">// без копии</span>
+    items.<span class="tok-fn">push</span>(#{ id: row.<span class="tok-api">id</span>, name: row.name,
+      tags: #[row.tags[<span class="tok-number">0</span>], row.tags[<span class="tok-number">1</span>]], price: row.price });
+  }
+}
+<span class="tok-comment">// Без флага литералов: одна копия всего набора.</span>
+<span class="tok-keyword">const</span> items = region.<span class="tok-api">run</span>(() =&gt; rows.<span class="tok-fn">map</span>((row) =&gt; ({
   id: row.<span class="tok-api">id</span>, name: row.name, tags: [...row.tags], price: row.price,
-})));                                     <span class="tok-comment">// одна копия</span></code></pre></figure>
+})));</code></pre></figure>
 </div>
 
-<figure class="chart"><h4>200 000 товаров в регион</h4><p class="sub">Время создания всего массива, мс. Короче значит лучше. Проход по готовому массиву у всех трёх одинаковый, около 2 мс.</p><ul class="legend"><li><span class="sw s2"></span>по одному объекту</li><li><span class="sw s1"></span>одним run</li></ul><svg viewBox="0 0 700 202" role="img" aria-labelledby="ch-p12-t"><title id="ch-p12-t">200 000 товаров в регион</title><line class="c-grid" x1="200.0" x2="200.0" y1="0" y2="158"/><text class="c-tick" x="200.0" y="174" text-anchor="middle">0</text><line class="c-grid" x1="280.8" x2="280.8" y1="0" y2="158"/><text class="c-tick" x="280.8" y="174" text-anchor="middle">100</text><line class="c-grid" x1="361.6" x2="361.6" y1="0" y2="158"/><text class="c-tick" x="361.6" y="174" text-anchor="middle">200</text><line class="c-grid" x1="442.4" x2="442.4" y1="0" y2="158"/><text class="c-tick" x="442.4" y="174" text-anchor="middle">300</text><line class="c-grid" x1="523.2" x2="523.2" y1="0" y2="158"/><text class="c-tick" x="523.2" y="174" text-anchor="middle">400</text><line class="c-grid" x1="604.0" x2="604.0" y1="0" y2="158"/><text class="c-tick" x="604.0" y="174" text-anchor="middle">500</text><line class="c-base" x1="200" x2="200" y1="0" y2="158"/><text class="c-axis" x="402.0" y="196" text-anchor="middle">миллисекунды</text><g class="bar" tabindex="0" role="img" aria-label="Region.object (по одному, push): 479 мс" data-value="479 мс" data-label="Region.object, по одному, push" data-note=""><rect class="c-hit" x="0" y="8.0" width="700" height="42" rx="6"/><text class="c-cat" x="188" y="27.0" text-anchor="end">Region.object</text><text class="c-cat-s" x="188" y="42.0" text-anchor="end">по одному, push</text><path d="M200.0,18.0 h383.0 a4,4 0 0 1 4,4 v14.0 a4,4 0 0 1 -4,4 h-383.0 z" class="c-s2"/><text class="c-val" x="594.0" y="33.5">479 мс</text></g><g class="bar" tabindex="0" role="img" aria-label="Литерал #{} (по одному, push): 253 мс" data-value="253 мс" data-label="Литерал #{}, по одному, push" data-note="без копии, но с вызовом рантайма на каждый литерал"><rect class="c-hit" x="0" y="58.0" width="700" height="42" rx="6"/><text class="c-cat" x="188" y="77.0" text-anchor="end">Литерал #{}</text><text class="c-cat-s" x="188" y="92.0" text-anchor="end">по одному, push</text><path d="M200.0,68.0 h200.4 a4,4 0 0 1 4,4 v14.0 a4,4 0 0 1 -4,4 h-200.4 z" class="c-s2"/><text class="c-val" x="411.4" y="83.5">253 мс</text></g><g class="bar" tabindex="0" role="img" aria-label="region.run (обычные объекты и одна копия): 194 мс" data-value="194 мс" data-label="region.run, обычные объекты и одна копия" data-note="в 2,5 раза быстрее Region.object, в 1,3 раза быстрее литералов"><rect class="c-hit" x="0" y="108.0" width="700" height="42" rx="6"/><text class="c-cat" x="188" y="127.0" text-anchor="end">region.run</text><text class="c-cat-s" x="188" y="142.0" text-anchor="end">обычные объекты и одна копия</text><path d="M200.0,118.0 h152.8 a4,4 0 0 1 4,4 v14.0 a4,4 0 0 1 -4,4 h-152.8 z" class="c-s1"/><text class="c-val" x="363.8" y="133.5">194 мс</text></g></svg><details class="table-view"><summary>Показать таблицей</summary><div class="table-wrap"><table><thead><tr><th>Способ</th><th class="num">Медиана</th><th class="num">Пять запусков</th></tr></thead><tbody><tr><td>Region.object и push, создание</td><td class="num">479 мс</td><td class="num">479 · 468 · 472 · 480 · 480</td></tr><tr><td>Литерал #{} и push, создание</td><td class="num">253 мс</td><td class="num">257 · 249 · 253 · 257 · 251</td></tr><tr><td>region.run, создание</td><td class="num">194 мс</td><td class="num">193 · 192 · 194 · 196 · 197</td></tr><tr><td>Region.object и push, проход</td><td class="num">2,1 мс</td><td class="num">2,1 · 2,1 · 2,2 · 2,1 · 2,1</td></tr><tr><td>Литерал #{} и push, проход</td><td class="num">2,2 мс</td><td class="num">2,1 · 2,2 · 2,2 · 2,2 · 2,2</td></tr><tr><td>region.run, проход</td><td class="num">2,0 мс</td><td class="num">2,0 · 2,0 · 2,0 · 2,0 · 2,0</td></tr></tbody></table></div></details></figure>
+<figure class="chart"><h4>200 000 товаров в регион</h4><p class="sub">Время создания всего массива, мс. Короче значит лучше. Проход по готовому массиву у всех трёх одинаковый, около 2 мс.</p><ul class="legend"><li><span class="sw s2"></span>копия на каждый объект</li><li><span class="sw s1"></span>хорошо</li></ul><svg viewBox="0 0 700 202" role="img" aria-labelledby="ch-p12-t"><title id="ch-p12-t">200 000 товаров в регион</title><line class="c-grid" x1="200.0" x2="200.0" y1="0" y2="158"/><text class="c-tick" x="200.0" y="174" text-anchor="middle">0</text><line class="c-grid" x1="280.8" x2="280.8" y1="0" y2="158"/><text class="c-tick" x="280.8" y="174" text-anchor="middle">100</text><line class="c-grid" x1="361.6" x2="361.6" y1="0" y2="158"/><text class="c-tick" x="361.6" y="174" text-anchor="middle">200</text><line class="c-grid" x1="442.4" x2="442.4" y1="0" y2="158"/><text class="c-tick" x="442.4" y="174" text-anchor="middle">300</text><line class="c-grid" x1="523.2" x2="523.2" y1="0" y2="158"/><text class="c-tick" x="523.2" y="174" text-anchor="middle">400</text><line class="c-grid" x1="604.0" x2="604.0" y1="0" y2="158"/><text class="c-tick" x="604.0" y="174" text-anchor="middle">500</text><line class="c-base" x1="200" x2="200" y1="0" y2="158"/><text class="c-axis" x="402.0" y="196" text-anchor="middle">миллисекунды</text><g class="bar" tabindex="0" role="img" aria-label="Region.object (по одному, push): 446 мс" data-value="446 мс" data-label="Region.object, по одному, push" data-note=""><rect class="c-hit" x="0" y="8.0" width="700" height="42" rx="6"/><text class="c-cat" x="188" y="27.0" text-anchor="end">Region.object</text><text class="c-cat-s" x="188" y="42.0" text-anchor="end">по одному, push</text><path d="M200.0,18.0 h356.4 a4,4 0 0 1 4,4 v14.0 a4,4 0 0 1 -4,4 h-356.4 z" class="c-s2"/><text class="c-val" x="567.4" y="33.5">446 мс</text></g><g class="bar" tabindex="0" role="img" aria-label="region.run (обычные объекты и одна копия): 197 мс" data-value="197 мс" data-label="region.run, обычные объекты и одна копия" data-note="в 2,3 раза быстрее Region.object; лучший способ без флага"><rect class="c-hit" x="0" y="58.0" width="700" height="42" rx="6"/><text class="c-cat" x="188" y="77.0" text-anchor="end">region.run</text><text class="c-cat-s" x="188" y="92.0" text-anchor="end">обычные объекты и одна копия</text><path d="M200.0,68.0 h155.2 a4,4 0 0 1 4,4 v14.0 a4,4 0 0 1 -4,4 h-155.2 z" class="c-s1"/><text class="c-val" x="366.2" y="83.5">197 мс</text></g><g class="bar" tabindex="0" role="img" aria-label="Литерал #{} (по одному, push): 86 мс" data-value="86 мс" data-label="Литерал #{}, по одному, push" data-note="в 2,3 раза быстрее run и в 5 раз быстрее Region.object"><rect class="c-hit" x="0" y="108.0" width="700" height="42" rx="6"/><text class="c-cat" x="188" y="127.0" text-anchor="end">Литерал #{}</text><text class="c-cat-s" x="188" y="142.0" text-anchor="end">по одному, push</text><path d="M200.0,118.0 h65.5 a4,4 0 0 1 4,4 v14.0 a4,4 0 0 1 -4,4 h-65.5 z" class="c-s1"/><text class="c-val" x="276.5" y="133.5">86 мс</text></g></svg><details class="table-view"><summary>Показать таблицей</summary><div class="table-wrap"><table><thead><tr><th>Способ</th><th class="num">Медиана</th><th class="num">Пять запусков</th></tr></thead><tbody><tr><td>Region.object и push, создание</td><td class="num">446 мс</td><td class="num">444 · 440 · 446 · 451 · 454</td></tr><tr><td>region.run, создание</td><td class="num">197 мс</td><td class="num">200 · 197 · 196 · 207 · 196</td></tr><tr><td>Литерал #{} и push, создание</td><td class="num">86 мс</td><td class="num">85 · 86 · 86 · 85 · 86</td></tr><tr><td>Region.object и push, проход</td><td class="num">2,1 мс</td><td class="num">2,1 · 2,3 · 2,1 · 2,1 · 2,3</td></tr><tr><td>region.run, проход</td><td class="num">2,0 мс</td><td class="num">2,0 · 2,1 · 2,0 · 2,1 · 2,0</td></tr><tr><td>Литерал #{} и push, проход</td><td class="num">2,1 мс</td><td class="num">2,1 · 2,1 · 2,0 · 2,0 · 2,1</td></tr></tbody></table></div></details></figure>
 
 <details class="ex-details"><summary>Код замера и вывод одного запуска <span class="file">examples/36-create.js</span></summary><figure class="example"><div class="ex-head"><span class="file"><a href="examples/36-create.js">examples/36-create.js</a></span><button class="copy" type="button">Копировать</button></div><pre class="code"><code><span class="tok-comment">// d8-flags: --harmony-region-literals</span>
 <span class="tok-comment">// Сколько стоит положить данные в регион: 200 000 товаров { id, name, tags, price }.</span>
@@ -840,14 +849,14 @@ start = performance.<span class="tok-fn">now</span>();
 <span class="tok-fn">measure</span>(<span class="tok-string">'region.run             '</span>, viaRun);
 <span class="tok-fn">measure</span>(<span class="tok-string">'Region.object, enter   '</span>, viaObject);
 <span class="tok-fn">measure</span>(<span class="tok-string">'Region.object и push   '</span>, viaPush);
-<span class="tok-fn">measure</span>(<span class="tok-string">'литерал #{} и push     '</span>, viaLiteral);</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8 --harmony-region-literals; время у вас будет другим</span></div><pre class="out">обычные объекты        : создание 27 ms, проход 0.2 ms (сумма 9900000)
-region.run             : создание 207 ms, проход 2.1 ms (сумма 9900000)
-Region.object, enter   : создание 473 ms, проход 2.0 ms (сумма 9900000)
-Region.object и push   : создание 472 ms, проход 2.1 ms (сумма 9900000)
-литерал #{} и push     : создание 252 ms, проход 2.0 ms (сумма 9900000)</pre></figure></details>
+<span class="tok-fn">measure</span>(<span class="tok-string">'литерал #{} и push     '</span>, viaLiteral);</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8 --harmony-region-literals; время у вас будет другим</span></div><pre class="out">обычные объекты        : создание 25 ms, проход 0.2 ms (сумма 9900000)
+region.run             : создание 199 ms, проход 3.0 ms (сумма 9900000)
+Region.object, enter   : создание 442 ms, проход 2.0 ms (сумма 9900000)
+Region.object и push   : создание 503 ms, проход 2.3 ms (сумма 9900000)
+литерал #{} и push     : создание 89 ms, проход 2.1 ms (сумма 9900000)</pre></figure></details>
 
-<p>Один <code>run</code> в 2,5 раза быстрее, чем <code>Region.object()</code> по одному, и в 1,3 раза быстрее литералов <code>#{}</code>, хотя литералы ничего не копируют. Читать потом все три массива одинаково быстро, около 2 мс за проход: объекты с одинаковыми ключами получают одну форму, каким бы способом их ни создали. Все пять способов — на странице <a href="numbers.html#create">«Цифры»</a>.</p>
-<p>Добавлять отдельные объекты в готовый регион по ходу работы можно спокойно, это микросекунды на объект. Из двух способов литерал <code>#{}</code> дешевле, потому что не копирует. <code>push</code> уже идёт по быстрому пути. Когда он появится и у литералов (<a href="limits.html#roadmap">планы</a>), разница с <code>run</code> может сократиться, и этот совет придётся перемерить.</p>
+<p>Литералы в 2,3 раза быстрее одного <code>run</code> и в 5 раз быстрее <code>Region.object()</code> по одному. Один <code>run</code> в свою очередь в 2,3 раза быстрее <code>Region.object()</code>. Читать потом все три массива одинаково быстро, около 2 мс за проход: объекты с одинаковыми ключами получают одну форму, каким бы способом их ни создали. Все пять способов — на странице <a href="numbers.html#create">«Цифры»</a>.</p>
+<p>Добавлять отдельные объекты в готовый регион по ходу работы можно спокойно, это микросекунды на объект. Из двух способов литерал <code>#{}</code> дешевле, потому что не копирует.</p>
 <nav class="pager" aria-label="Соседние страницы"><a class="prev" href="channels.html"><span>← Назад</span>Каналы</a><a class="next" href="tooling.html"><span>Дальше →</span>Редактор и линтеры</a></nav>
 <p class="footer">Регионы владения в V8 — исследовательский прототип, не продукт. Цифры получены на сборке с включёнными проверками (dcheck), Apple Silicon.</p>
 </article>

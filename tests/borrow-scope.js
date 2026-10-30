@@ -1,4 +1,4 @@
-// d8 --harmony-regions borrow-scope.js
+// d8 --harmony-regions --module borrow-scope.js
 // Borrows taken in a task end with the task; borrowWhile() keeps one for
 // async work.
 const sleep = () => new Promise((resolve) => setTimeout(resolve, 0));
