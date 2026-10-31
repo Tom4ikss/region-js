@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
-<meta name="description" content="Region, region.run, правила чтения и записи, переезд через postMessage, Region.of, freeze, borrow, рассылка, типизированные массивы, free, запись прямо в регион и литералы #{}. Каждый шаг с запущенным примером.">
+<meta name="description" content="Region, region.run, правила чтения и записи, переезд через postMessage, Region.of, freeze, borrow, seal и Region.share, рассылка, типизированные массивы, free, запись прямо в регион и литералы #{}. Каждый шаг с запущенным примером.">
 <title>API шаг за шагом · Регионы владения в V8</title>
 <link rel="stylesheet" href="assets/style.css">
 </head>
@@ -518,6 +518,70 @@ borrow незамороженного: Region must be frozen to borrow it</pre><
 <p>Зато пока билет у вас, <code>thaw()</code> не пройдёт: он бросит «Region is still borrowed by N reader(s)». Поэтому читатель никогда не увидит разморозку посреди чтения и не прочитает устаревшее значение.</p>
 <p><code>region.borrowWhile(fn)</code> берёт билет, вызывает <code>fn</code> и сдаёт билет, когда <code>fn</code> закончилась. Если <code>fn</code> вернула промис, билет сдаётся, когда промис выполнится или отклонится. <code>borrowWhile</code> возвращает то, что вернула <code>fn</code> (для асинхронной функции — промис с её результатом). Внутри задач <code>spawn</code> для асинхронной работы нужен именно он, потому что обычный билет живёт не дольше задачи (<a href="spawn.html#borrow">подробнее на странице про spawn</a>).</p>
 
+<h3 id="seal">Запечатать навсегда: <code>seal</code> и <code>Region.share</code></h3>
+<p>Билеты нужны, потому что замороженный регион могут разморозить. Если данные общие на всё время работы (конфиг, справочник, таблица весов), это право не нужно никому. <code>region.seal()</code> замораживает регион навсегда: разморозить, освободить и перенести его нельзя, поэтому читают его все потоки без билетов, как <code>Arc&lt;T&gt;</code> в Rust. <code>Region.share(data)</code> делает всё сразу: копирует данные в новый регион, запечатывает его и возвращает копию. Вторым аргументом, как у <code>run</code>, можно передать список буферов типизированных массивов, которые переедут без копии.</p>
+
+<figure class="example"><div class="ex-head"><span class="file"><a href="examples/41-seal.js">examples/41-seal.js</a></span><button class="copy" type="button">Копировать</button></div><pre class="code"><code><span class="tok-comment">// Region.share(): общие данные навсегда, как Arc&lt;T&gt; в Rust. Читают все потоки,</span>
+<span class="tok-comment">// без билетов и без копий; изменить, разморозить или освободить нельзя.</span>
+<span class="tok-keyword">const</span> config = <span class="tok-api">Region</span>.<span class="tok-fn">share</span>({
+  api: <span class="tok-string">'https://example.test'</span>,
+  retries: <span class="tok-number">3</span>,
+  weights: <span class="tok-keyword">new</span> <span class="tok-fn">Float64Array</span>([<span class="tok-number">0.5</span>, <span class="tok-number">1.5</span>, <span class="tok-number">2.5</span>]),
+});
+<span class="tok-keyword">const</span> region = <span class="tok-api">Region</span>.<span class="tok-keyword">of</span>(config);
+<span class="tok-fn">print</span>(<span class="tok-string">'sealed:'</span>, region.sealed, <span class="tok-string">'| frozen:'</span>, region.<span class="tok-api">frozen</span>);
+
+<span class="tok-comment">// Задачи читают те же объекты параллельно: билет не нужен, копии нет.</span>
+<span class="tok-keyword">const</span> results = [<span class="tok-number">1</span>, <span class="tok-number">2</span>, <span class="tok-number">3</span>].<span class="tok-fn">map</span>((n) =&gt; <span class="tok-api">spawn</span>((config, n) =&gt; {
+  <span class="tok-keyword">const</span> w = config.weights;
+  <span class="tok-keyword">return</span> <span class="tok-string">`задача ${</span>n<span class="tok-string">}: ${</span>config.api<span class="tok-string">}, retries ${</span>config.retries<span class="tok-string">}, w[${</span>n - <span class="tok-number">1</span><span class="tok-string">}] = ${</span>w[n - <span class="tok-number">1</span>]<span class="tok-string">}`</span>;
+}, config, n));
+<span class="tok-keyword">for</span> (<span class="tok-keyword">const</span> task <span class="tok-keyword">of</span> results) <span class="tok-fn">print</span>(task.<span class="tok-api">join</span>());
+
+<span class="tok-comment">// Воркер тоже читает без билета.</span>
+<span class="tok-keyword">const</span> worker = <span class="tok-keyword">new</span> <span class="tok-api">Worker</span>(
+  <span class="tok-string">'onmessage = ({ data }) =&gt; postMessage(data.retries * 10)'</span>,
+  { type: <span class="tok-string">'string'</span> },
+);
+worker.<span class="tok-api">postMessage</span>(config);
+<span class="tok-fn">print</span>(<span class="tok-string">'воркер:'</span>, worker.<span class="tok-api">getMessage</span>());
+worker.<span class="tok-api">terminate</span>();
+
+<span class="tok-keyword">for</span> (<span class="tok-keyword">const</span> [what, fn] <span class="tok-keyword">of</span> [
+  [<span class="tok-string">'запись'</span>, () =&gt; { config.retries = <span class="tok-number">5</span>; }],
+  [<span class="tok-string">'thaw'</span>, () =&gt; region.<span class="tok-api">thaw</span>()],
+  [<span class="tok-string">'free'</span>, () =&gt; region.<span class="tok-api">free</span>()],
+]) {
+  <span class="tok-keyword">try</span> {
+    <span class="tok-fn">fn</span>();
+  } <span class="tok-keyword">catch</span> (e) {
+    <span class="tok-fn">print</span>(what + <span class="tok-string">':'</span>, e.message);
+  }
+}
+
+<span class="tok-comment">// Запечатать можно и свой регион, и замороженный, даже пока его читают под</span>
+<span class="tok-comment">// билетами: право разморозить пропадает навсегда.</span>
+<span class="tok-keyword">const</span> own = <span class="tok-keyword">new</span> <span class="tok-api">Region</span>();
+<span class="tok-keyword">const</span> stats = own.<span class="tok-api">run</span>(() =&gt; ({ hits: <span class="tok-number">0</span> }));
+stats.hits = <span class="tok-number">42</span>;
+own.<span class="tok-fn">seal</span>();
+<span class="tok-fn">print</span>(<span class="tok-string">'own sealed:'</span>, own.sealed, <span class="tok-string">'| hits ='</span>, stats.hits);</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8</span></div><pre class="out">sealed: true | frozen: true
+задача 1: https://example.test, retries 3, w[0] = 0.5
+задача 2: https://example.test, retries 3, w[1] = 1.5
+задача 3: https://example.test, retries 3, w[2] = 2.5
+воркер: 30
+<span class="err">запись: OwnershipError: region 0 is sealed and cannot change</span>
+thaw: Region is sealed and cannot be thawed
+free: Region is sealed; the GC frees it once nothing refers to it
+own sealed: true | hits = 42</pre></figure>
+
+<p>Запечатать может владелец или тот, кто регион заморозил, в том числе пока регион читают под билетами: выданные билеты сдаются как обычно, но право разморозить пропадает. Повторный <code>seal()</code> ничего не делает. View типизированных массивов запечатанного региона доступны только для чтения и не отсоединяются никогда, ведь регион больше не изменится. View владельца, как при <code>freeze()</code>, отсоединяются в момент запечатки.</p>
+<p>Память запечатанного региона освобождает сборщик мусора, когда на его объекты не осталось ссылок ни в одном потоке. <code>free()</code> и <code>using</code> его не освобождают. Отправляют запечатанный регион без списка transfer, задачам <code>spawn</code> и в каналы он передаётся так же, как замороженный: по ссылке.</p>
+<div class="callout aside">
+<span class="callout-title">Как это устроено</span>
+<p>Проверка чтения в машинном коде не изменилась: регион заморожен, и у потока в таблице чтения стоит его бит. У запечатанного региона бит ставится при первом чтении в потоке, в медленном пути, и больше не снимается: разморозки, после которой его пришлось бы снять, не будет. Когда сборщик освобождает номер региона, бит снимается во всех таблицах, так что новый регион с тем же номером снова потребует билет.</p>
+</div>
+
 <h2 id="typed">9. Типизированные массивы</h2>
 <p>В регион можно положить <code>Uint8Array</code>, <code>Float64Array</code> и остальные типизированные массивы, включая <code>BigInt64Array</code> и <code>Float16Array</code>. Они устроены иначе, чем объекты региона: регион хранит сам блок памяти, а при чтении поля вы получаете обычный локальный типизированный массив, который смотрит на эту память (view). Поэтому работа с ним идёт на полной скорости, как с любым типизированным массивом, без проверки владельца на каждом элементе.</p>
 
@@ -789,6 +853,8 @@ view после free: 0
 <tr><td><code>region.frozen</code>, <code>region.readers</code></td><td>Заморожен ли регион и сколько билетов сейчас выдано.</td></tr>
 <tr><td><code>region.frozenHere</code></td><td>Есть ли у текущего потока право разморозить регион.</td></tr>
 <tr><td><code>region.borrow()</code></td><td>Билет читателя: без него замороженный регион читает только тот, кто его заморозил, и задачи <code>spawn</code>, которым он достался. У билета есть <code>release()</code>, и его можно объявить через <code>using</code>.</td></tr>
+<tr><td><code>region.seal()</code>, <code>region.sealed</code></td><td>Заморозить навсегда: читают все потоки без билетов, разморозить, освободить и перенести нельзя, память освобождает сборщик. Запечатан ли регион.</td></tr>
+<tr><td><code>Region.share(data)</code></td><td>Скопировать данные в новый запечатанный регион и вернуть копию, как <code>Arc::new</code>.</td></tr>
 <tr><td><code>region.borrowWhile(fn)</code></td><td>Держит билет, пока выполняется <code>fn</code> или пока не выполнится её промис. Возвращает результат <code>fn</code>.</td></tr>
 <tr><td><code>using _ = region.enter()</code></td><td>Сделать регион текущим до конца блока.</td></tr>
 <tr><td><code>Region.object(obj)</code>, <code>Region.array(...items)</code></td><td>Объект или массив в текущем регионе.</td></tr>
@@ -822,6 +888,9 @@ view после free: 0
 <tr><td><code>… cannot be moved into a region</code></td><td>В <code>run</code> попала функция, <code>Map</code>, <code>Date</code>, <code>DataView</code>, массив поверх <code>SharedArrayBuffer</code>, экземпляр класса, наследник <code>Array</code> и т. п.</td></tr>
 <tr><td><code>Region is not frozen by this isolate</code></td><td><code>thaw()</code> в потоке, у которого нет права разморозить.</td></tr>
 <tr><td><code>Region was frozen by another isolate</code></td><td>Замороженный регион в списке transfer у потока без права разморозить.</td></tr>
+<tr><td><code>OwnershipError: region N is sealed and cannot change</code></td><td>Запись в запечатанный регион.</td></tr>
+<tr><td><code>Region is sealed and cannot be thawed</code>, <code>Region is sealed; the GC frees it once nothing refers to it</code></td><td><code>thaw()</code> и <code>free()</code> запечатанного региона.</td></tr>
+<tr><td><code>Region is sealed: its objects are shared, send them without a transfer list</code></td><td>Запечатанный регион в списке transfer.</td></tr>
 <tr><td><code>Region is still borrowed by N reader(s)</code></td><td><code>thaw()</code>, пока не сданы билеты.</td></tr>
 <tr><td><code>Region must be frozen to borrow it</code></td><td><code>borrow()</code> у незамороженного региона.</td></tr>
 <tr><td><code>#{} and #[] need a current region: use region.enter() or region.run()</code></td><td>Литерал вне <code>enter()</code> и <code>run()</code>.</td></tr>

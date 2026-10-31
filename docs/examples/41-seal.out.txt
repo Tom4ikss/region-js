@@ -1,0 +1,9 @@
+sealed: true | frozen: true
+задача 1: https://example.test, retries 3, w[0] = 0.5
+задача 2: https://example.test, retries 3, w[1] = 1.5
+задача 3: https://example.test, retries 3, w[2] = 2.5
+воркер: 30
+запись: OwnershipError: region 0 is sealed and cannot change
+thaw: Region is sealed and cannot be thawed
+free: Region is sealed; the GC frees it once nothing refers to it
+own sealed: true | hits = 42

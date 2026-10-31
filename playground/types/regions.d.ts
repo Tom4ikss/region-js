@@ -41,6 +41,7 @@ type OwnershipError = TypeError;
  * - `worker.postMessage(message, [region])` moves the region without copying:
  *   the sender loses access, the receiver becomes the owner.
  * - `freeze` lets every thread read the region and nobody write it.
+ * - `seal` freezes it for good, like Arc<T>: no borrows needed to read it.
  */
 declare class Region implements Disposable {
   constructor();
@@ -53,6 +54,8 @@ declare class Region implements Disposable {
   /** Whether this thread froze the region, or was handed the right to thaw
    * it; only that thread may call thaw(). */
   readonly frozenHere: boolean;
+  /** Whether the region is sealed: frozen for good. */
+  readonly sealed: boolean;
   /** Number of active borrows of a frozen region. */
   readonly readers: number;
 
@@ -91,6 +94,13 @@ declare class Region implements Disposable {
   /** Everyone may read, nobody may write. Detaches the owner's typed array
    * views; readers get immutable views. */
   freeze(): void;
+  /** Freezes the region for good, like Arc<T>: every thread reads it without
+   * a borrow, nobody may write, thaw, free or move it, and the GC releases it
+   * once nothing refers to it. The owner, or the thread that froze it, may
+   * seal it; borrows taken before keep working. Sealing an owned region
+   * detaches the owner's typed array views; views of a sealed region are
+   * immutable and never detached. */
+  seal(): void;
   /** Gives write access back to the owner. Throws while the region is borrowed. */
   thaw(): void;
   /** Keeps a frozen region from being thawed until the borrow is released.
@@ -117,6 +127,11 @@ declare class Region implements Disposable {
   /** Bytes copied into the region, roughly: its objects, arrays, strings and
    * typed array buffers. 0 once freed. */
   readonly byteSize: number;
+  /** Copies `data` into a new sealed region and returns the copy, like
+   * Arc::new: send it to workers, tasks and channels without copying, read it
+   * anywhere without a borrow. Typed arrays whose buffers are in `transfer`
+   * move in without a copy. */
+  static share<T extends object & RegionData>(data: T, transfer?: ArrayBuffer[]): Readonly<T>;
   /** Live and freed regions of the process and the bytes the live ones hold. */
   static stats(): { regions: number; freed: number; bytes: number };
 

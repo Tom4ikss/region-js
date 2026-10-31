@@ -196,11 +196,12 @@ ref.ui.deref();                               // в потоке-создате�
 В дескрипторе есть атомарное слово состояния:
 
 ```
-state: Owned(isolate_id) | Frozen(owner_id, readers)
+state: Owned(isolate_id) | Frozen(owner_id, readers) | Sealed
 ```
 
 - `move` — `compareExchange(Owned(me), Owned(target))`.
 - `freeze` — `Owned(me) → Frozen(me, 0)`; `borrow` — `readers + 1`; `thaw` — только при `readers == 0`.
+- `seal` — `Owned(me) | Frozen(me, n) → Sealed`, как `Arc<T>`. В прототипе это `Frozen` с `frozen_by_ == kSealedBy`: разморозить, освободить и передать право нельзя. Бит в таблице чтения ставится в медленном пути при первом чтении и не снимается до освобождения номера сборщиком (`ReleaseUnusedRegions` чистит все таблицы), поэтому быстрый путь в IC, Maglev и Turbofan не изменился. View типизированных массивов не отслеживаются и не отсоединяются.
 - У каждого isolate есть битсет регионов, которые он сейчас заимствует.
 
 **Проверка доступа**: `page(obj) → region → state`. Разрешено, если `Owned(me)` или
