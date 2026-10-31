@@ -2714,7 +2714,7 @@ index 8aab5f56..0bc22f26 100644
        CheckValueInputIs(node, 1, Type::Any());
 diff --git a/src/d8/d8-channel.cc b/src/d8/d8-channel.cc
 new file mode 100644
-index 00000000..4ed17f3b
+index 00000000..681794d5
 --- /dev/null
 +++ b/src/d8/d8-channel.cc
 @@ -0,0 +1,1659 @@
@@ -3395,7 +3395,7 @@ index 00000000..4ed17f3b
 +  DataOf(isolate).held.emplace_back(state, write);
 +  i::Handle<i::Object> root;
 +  if (!i::JSRegionObject::ToJSValue(
-+           i_isolate, i::handle(lock->root->GetPersisted(0), i_isolate))
++           i_isolate, i::handle(lock->root->GetPersisted(i_isolate, 0), i_isolate))
 +           .ToHandle(&root)) {
 +    return {};
 +  }
@@ -4457,7 +4457,7 @@ index 00000000..9446d334
 +#endif  // V8_D8_D8_CHANNEL_H_
 diff --git a/src/d8/d8-port.cc b/src/d8/d8-port.cc
 new file mode 100644
-index 00000000..072b3b86
+index 00000000..70596750
 --- /dev/null
 +++ b/src/d8/d8-port.cc
 @@ -0,0 +1,1129 @@
@@ -4834,7 +4834,7 @@ index 00000000..072b3b86
 +      }
 +      case Kind::kShared:
 +        elements.push_back(Utils::ToLocal(i::direct_handle(
-+            message->shared->GetPersisted(slot.index), i_isolate)));
++            message->shared->GetPersisted(i_isolate, slot.index), i_isolate)));
 +        break;
 +      case Kind::kChannel: {
 +        Local<Object> channel;
@@ -8546,7 +8546,7 @@ index 78db0339..8bf11dad 100644
      std::ostream& os) {
    JSObjectPrintHeader(os, this, "JSDeferredModuleNamespace");
 diff --git a/src/execution/isolate.cc b/src/execution/isolate.cc
-index e98604b7..ceb95283 100644
+index e98604b7..f204e252 100644
 --- a/src/execution/isolate.cc
 +++ b/src/execution/isolate.cc
 @@ -91,6 +91,7 @@
@@ -8577,11 +8577,20 @@ index e98604b7..ceb95283 100644
    TRACE_ISOLATE(deinit);
  
  #ifdef V8_ENABLE_REGEXP_DIAGNOSTICS
+@@ -5223,6 +5228,8 @@ void Isolate::Deinit() {
+   }
+ 
+   shared_space_isolate_.reset();
++  // No GC visits this isolate any more, so it holds no region objects.
++  RegionRegistry::ForgetHolder(this);
+ 
+   // Since there are no other threads left, we can lock this mutex without any
+   // ceremony. This signals to the tear down code that we are in a safepoint.
 diff --git a/src/execution/isolate.h b/src/execution/isolate.h
-index 793be1a7..8054ea1e 100644
+index 793be1a7..8da96a4b 100644
 --- a/src/execution/isolate.h
 +++ b/src/execution/isolate.h
-@@ -1796,6 +1796,41 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
+@@ -1796,6 +1796,50 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
    bool force_slow_path() const { return force_slow_path_; }
    bool* force_slow_path_address() { return &force_slow_path_; }
  
@@ -8620,10 +8629,19 @@ index 793be1a7..8054ea1e 100644
 +    return &region_allocation_region_;
 +  }
 +
++  // The bit of this isolate in the holder sets of regions, or -1 until it
++  // gets one. Maintained by RegionRegistry.
++  int region_holder_slot() const {
++    return region_holder_slot_.load(std::memory_order_acquire);
++  }
++  void set_region_holder_slot(int slot) {
++    region_holder_slot_.store(slot, std::memory_order_release);
++  }
++
    bool jitless() const { return jitless_; }
  
    void SetStackSize(size_t v);
-@@ -2823,6 +2858,11 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
+@@ -2823,6 +2867,12 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
    std::unique_ptr<PersistentHandlesList> persistent_handles_list_;
  
    bool force_slow_path_ = false;
@@ -8632,6 +8650,7 @@ index 793be1a7..8054ea1e 100644
 +  LinearAllocationArea shared_allocation_info_;
 +  LinearAllocationArea region_allocation_info_;
 +  intptr_t region_allocation_region_ = -1;
++  std::atomic<int> region_holder_slot_{-1};
  
    // Certain objects may be allocated in RO space if suitable for the snapshot.
    bool enable_ro_allocation_for_snapshot_ = false;
@@ -8749,6 +8768,57 @@ index 8f144e35..73c68255 100644
    V(JSGlobalObject, JS_GLOBAL_OBJECT_TYPE) \
    V(JSGlobalProxy, JS_GLOBAL_PROXY_TYPE) \
    V(JSPrimitiveWrapper, JS_PRIMITIVE_WRAPPER_TYPE) \
+diff --git a/src/handles/shared-object-conveyor-handles.cc b/src/handles/shared-object-conveyor-handles.cc
+index 1fa3ce82..0f424afc 100644
+--- a/src/handles/shared-object-conveyor-handles.cc
++++ b/src/handles/shared-object-conveyor-handles.cc
+@@ -4,6 +4,8 @@
+ 
+ #include "src/handles/shared-object-conveyor-handles.h"
+ 
++#include "src/handles/persistent-handles.h"
++#include "src/objects/js-region.h"
+ #include "src/objects/objects-inl.h"
+ 
+ namespace v8 {
+@@ -18,10 +20,20 @@ SharedObjectConveyorHandles::SharedObjectConveyorHandles(Isolate* isolate)
+ uint32_t SharedObjectConveyorHandles::Persist(
+     Tagged<HeapObject> shared_object) {
+   DCHECK(IsShared(shared_object));
++  // The persistent handles are roots of the shared space isolate.
++  RegionRegistry::AddHolderOf(persistent_handles_->isolate(), shared_object);
+   uint32_t id = static_cast<uint32_t>(shared_objects_.size());
+   shared_objects_.push_back(persistent_handles_->NewHandle(shared_object));
+   return id;
+ }
+ 
++Tagged<HeapObject> SharedObjectConveyorHandles::GetPersisted(
++    Isolate* receiver, uint32_t object_id) const {
++  DCHECK(HasPersisted(object_id));
++  Tagged<HeapObject> object = *shared_objects_[object_id];
++  RegionRegistry::AddHolderOf(receiver, object);
++  return object;
++}
++
+ }  // namespace internal
+ }  // namespace v8
+diff --git a/src/handles/shared-object-conveyor-handles.h b/src/handles/shared-object-conveyor-handles.h
+index 073ae1d3..eda08655 100644
+--- a/src/handles/shared-object-conveyor-handles.h
++++ b/src/handles/shared-object-conveyor-handles.h
+@@ -40,10 +40,8 @@ class SharedObjectConveyorHandles {
+     return object_id < shared_objects_.size();
+   }
+ 
+-  Tagged<HeapObject> GetPersisted(uint32_t object_id) const {
+-    DCHECK(HasPersisted(object_id));
+-    return *shared_objects_[object_id];
+-  }
++  // The object for `receiver`, which from now on may hold a pointer to it.
++  Tagged<HeapObject> GetPersisted(Isolate* receiver, uint32_t object_id) const;
+ 
+  private:
+   std::unique_ptr<PersistentHandles> persistent_handles_;
 diff --git a/src/heap/factory.cc b/src/heap/factory.cc
 index 9c2a0c4c..75402a03 100644
 --- a/src/heap/factory.cc
@@ -8848,7 +8918,7 @@ index cead3955..2dc18143 100644
  
      shared_trusted_space_allocator_.emplace(
 diff --git a/src/heap/heap.cc b/src/heap/heap.cc
-index edb398ee..092f2689 100644
+index edb398ee..383bbcae 100644
 --- a/src/heap/heap.cc
 +++ b/src/heap/heap.cc
 @@ -119,6 +119,7 @@
@@ -8883,7 +8953,16 @@ index edb398ee..092f2689 100644
  
    if (!incremental_marking_->IsMarking()) {
      young_pending_allocations_->ResetVersion();
-@@ -3307,6 +3318,7 @@ void Heap::MakeHeapIterable(CompleteSweepingReason reason) {
+@@ -2528,6 +2539,8 @@ void Heap::MarkCompact() {
+   uint64_t external_memory_before_gc =
+       AllocatedExternalMemorySinceMarkCompact();
+ 
++  // Before marking: the isolate is stopped and done sweeping.
++  if (v8_flags.harmony_regions) RegionRegistry::ReportHolders(isolate());
+   mark_compact_collector()->Prepare();
+ 
+   ms_count_++;
+@@ -3307,6 +3320,7 @@ void Heap::MakeHeapIterable(CompleteSweepingReason reason) {
  
  void Heap::MakeLinearAllocationAreasIterable() {
    allocator()->MakeLinearAllocationAreasIterable();
@@ -8891,7 +8970,7 @@ index edb398ee..092f2689 100644
  
    safepoint()->IterateLocalHeaps([](LocalHeap* local_heap) {
      local_heap->MakeLinearAllocationAreasIterable();
-@@ -3333,12 +3345,14 @@ void Heap::FreeLinearAllocationAreas() {
+@@ -3333,12 +3347,14 @@ void Heap::FreeLinearAllocationAreas() {
  
  void Heap::FreeMainThreadLinearAllocationAreas() {
    allocator()->FreeLinearAllocationAreas();
@@ -8906,7 +8985,7 @@ index edb398ee..092f2689 100644
  
    safepoint()->IterateLocalHeaps([](LocalHeap* local_heap) {
      local_heap->MarkSharedLinearAllocationAreasBlack();
-@@ -3350,6 +3364,7 @@ void Heap::FreeSharedLinearAllocationAreasAndResetFreeLists() {
+@@ -3350,6 +3366,7 @@ void Heap::FreeSharedLinearAllocationAreasAndResetFreeLists() {
    DCHECK(v8_flags.black_allocated_pages);
    allocator()->FreeSharedLinearAllocationAreasAndResetFreeLists();
    main_thread_local_heap()->FreeSharedLinearAllocationAreasAndResetFreeLists();
@@ -8948,10 +9027,140 @@ index a39ccf5e..dfe2de73 100644
    heap()->safepoint()->IterateLocalHeaps([](LocalHeap* local_heap) {
      if (v8_flags.black_allocated_pages) {
 diff --git a/src/heap/mark-compact.cc b/src/heap/mark-compact.cc
-index 4ca7cd53..51f98794 100644
+index 4ca7cd53..1826fd6f 100644
 --- a/src/heap/mark-compact.cc
 +++ b/src/heap/mark-compact.cc
-@@ -6214,8 +6214,9 @@ void MarkCompactCollector::StartSweepSpace(PagedSpace* space) {
+@@ -2139,6 +2139,129 @@ void MarkCompactCollector::MarkObjectsFromClientHeap(Isolate* client) {
+ #endif  // V8_ENABLE_SANDBOX
+ }
+ 
++namespace {
++
++// Calls a function with every object in writable shared space that the
++// visited slots point to.
++class SharedHeapReferenceVisitor final
++    : public HeapVisitor<SharedHeapReferenceVisitor>,
++      public RootVisitor {
++ public:
++  SharedHeapReferenceVisitor(
++      Isolate* isolate, base::FunctionRef<void(Tagged<HeapObject>)> visit)
++      : HeapVisitor(isolate), visit_(visit) {}
++
++  void Check(Tagged<MaybeObject> object) {
++    Tagged<HeapObject> heap_object;
++    if (object.GetHeapObject(&heap_object) &&
++        HeapLayout::InWritableSharedSpace(heap_object)) {
++      visit_(heap_object);
++    }
++  }
++
++  // RootVisitor.
++  void VisitRootPointers(Root root, const char* description,
++                         FullObjectSlot start, FullObjectSlot end) final {
++    for (FullObjectSlot p = start; p < end; ++p) Check(*p);
++  }
++  void VisitCompressedRootPointers(Root root, const char* description,
++                                   OffHeapObjectSlot start,
++                                   OffHeapObjectSlot end) final {
++    for (OffHeapObjectSlot p = start; p < end; ++p) {
++      Check(p.load(cage_base()));
++    }
++  }
++
++  // HeapVisitor.
++  void VisitMapPointer(Tagged<HeapObject> host) final {}
++  void VisitPointers(Tagged<HeapObject> host, ObjectSlot start,
++                     ObjectSlot end) final {
++    for (ObjectSlot p = start; p < end; ++p) Check(p.load(cage_base()));
++  }
++  void VisitPointers(Tagged<HeapObject> host, MaybeObjectSlot start,
++                     MaybeObjectSlot end) final {
++    for (MaybeObjectSlot p = start; p < end; ++p) Check(p.load(cage_base()));
++  }
++  void VisitInstructionStreamPointer(Tagged<Code> host,
++                                     InstructionStreamSlot slot) final {}
++  void VisitCodeTarget(Tagged<InstructionStream> host,
++                       RelocInfo* rinfo) final {}
++  void VisitEmbeddedPointer(Tagged<InstructionStream> host,
++                            RelocInfo* rinfo) final {
++    Check(rinfo->target_object());
++  }
++
++ private:
++  base::FunctionRef<void(Tagged<HeapObject>)> visit_;
++};
++
++}  // namespace
++
++// static
++void MarkCompactCollector::VisitPointersToSharedHeap(
++    Isolate* isolate, bool whole_heap,
++    base::FunctionRef<void(Tagged<HeapObject>)> visit) {
++  Heap* heap = isolate->heap();
++  DCHECK(!heap->sweeping_in_progress());
++  SharedHeapReferenceVisitor visitor(isolate, visit);
++  heap->IterateRoots(&visitor, base::EnumSet<SkipRoot>{
++                                   SkipRoot::kConservativeStack,
++                                   SkipRoot::kReadOnlyBuiltins});
++  heap->EnsureQuarantinedPagesSweepingCompleted();
++  heap->sweeper()->FinishMinorJobs();
++
++  if (whole_heap) {
++    for (SpaceIterator spaces(heap); spaces.HasNext();) {
++      Space* space = spaces.Next();
++      // The shared space isolate owns the shared spaces.
++      if (IsAnyWritableSharedSpace(space->identity())) continue;
++      std::unique_ptr<ObjectIterator> objects =
++          space->GetObjectIterator(heap);
++      for (Tagged<HeapObject> object = objects->Next(); !object.is_null();
++           object = objects->Next()) {
++        visitor.Visit(object);
++      }
++    }
++    return;
++  }
++
++  // As in MarkObjectsFromClientHeap(): the young generation has no
++  // OLD_TO_SHARED slots.
++  if (auto* new_space = heap->new_space()) {
++    for (NormalPage* page : *new_space) {
++      for (Tagged<HeapObject> object : HeapObjectRange(page)) {
++        visitor.Visit(object);
++      }
++    }
++  }
++  if (heap->new_lo_space()) {
++    std::unique_ptr<ObjectIterator> objects =
++        heap->new_lo_space()->GetObjectIterator(heap);
++    for (Tagged<HeapObject> object = objects->Next(); !object.is_null();
++         object = objects->Next()) {
++      visitor.Visit(object);
++    }
++  }
++
++  PtrComprCageBase cage_base(isolate);
++  OldGenerationMemoryChunkIterator pages(heap);
++  for (MutablePage* page = pages.next(); page; page = pages.next()) {
++    RememberedSet<OLD_TO_SHARED>::Iterate(
++        page,
++        [&visitor, cage_base](MaybeObjectSlot slot) {
++          visitor.Check(slot.Relaxed_Load(cage_base));
++          return KEEP_SLOT;
++        },
++        SlotSet::KEEP_EMPTY_BUCKETS);
++    RememberedSet<OLD_TO_SHARED>::IterateTyped(
++        page, [&visitor, heap](SlotType slot_type, Address slot) {
++          visitor.Check(
++              UpdateTypedSlotHelper::GetTargetObject(heap, slot_type, slot));
++          return KEEP_SLOT;
++        });
++  }
++}
++
+ bool MarkCompactCollector::MarkTransitiveClosureFixpoint() {
+   int iterations = 0;
+ 
+@@ -6214,8 +6337,9 @@ void MarkCompactCollector::StartSweepSpace(PagedSpace* space) {
      }
  
      // One unused page is kept, all further are released before sweeping them.
@@ -8962,6 +9171,33 @@ index 4ca7cd53..51f98794 100644
          ReleasePage(space, p);
          continue;
        }
+diff --git a/src/heap/mark-compact.h b/src/heap/mark-compact.h
+index 8b1de531..36af5e4c 100644
+--- a/src/heap/mark-compact.h
++++ b/src/heap/mark-compact.h
+@@ -9,6 +9,7 @@
+ 
+ #include "absl/container/flat_hash_set.h"
+ #include "include/v8-internal.h"
++#include "src/base/functional/function-ref.h"
+ #include "src/common/globals.h"
+ #include "src/heap/marking-state.h"
+ #include "src/heap/marking-visitor.h"
+@@ -190,6 +191,14 @@ class MarkCompactCollector final {
+   explicit MarkCompactCollector(Heap* heap);
+   ~MarkCompactCollector();
+ 
++  // Calls `visit` with every object in writable shared space that the isolate
++  // may point to: from its roots, its young generation and its OLD_TO_SHARED
++  // slots, as the shared GC finds them, or with `whole_heap` from every object
++  // of its heap. The isolate is stopped, and its sweeping is done.
++  static void VisitPointersToSharedHeap(
++      Isolate* isolate, bool whole_heap,
++      base::FunctionRef<void(Tagged<HeapObject>)> visit);
++
+  private:
+   using ResizeNewSpaceMode = Heap::ResizeNewSpaceMode;
+ 
 diff --git a/src/heap/mutable-page.h b/src/heap/mutable-page.h
 index b5280854..8abac5e3 100644
 --- a/src/heap/mutable-page.h
@@ -10866,10 +11102,10 @@ index 00000000..844041ef
 +#endif  // V8_OBJECTS_JS_REGION_INL_H_
 diff --git a/src/objects/js-region.cc b/src/objects/js-region.cc
 new file mode 100644
-index 00000000..88bdd02e
+index 00000000..14c58637
 --- /dev/null
 +++ b/src/objects/js-region.cc
-@@ -0,0 +1,2003 @@
+@@ -0,0 +1,2126 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -10877,6 +11113,7 @@ index 00000000..88bdd02e
 +#include "src/objects/js-region.h"
 +
 +#include <algorithm>
++#include <bitset>
 +#include <limits>
 +#include <unordered_map>
 +#include <vector>
@@ -10886,6 +11123,9 @@ index 00000000..88bdd02e
 +#include "src/execution/isolate.h"
 +#include "src/heap/factory.h"
 +#include "src/heap/heap-inl.h"
++#include "src/heap/heap-layout-inl.h"
++#include "src/heap/mark-compact.h"
++#include "src/heap/mutable-page-inl.h"
 +#include "src/heap/paged-spaces-inl.h"
 +#include "src/execution/protectors-inl.h"
 +#include "src/handles/global-handles.h"
@@ -10911,6 +11151,7 @@ index 00000000..88bdd02e
 +std::atomic<bool> RegionRegistry::in_use_[RegionRegistry::kMaxRegions];
 +std::atomic<bool> RegionRegistry::locked_[RegionRegistry::kMaxRegions];
 +std::atomic<size_t> RegionRegistry::bytes_[RegionRegistry::kMaxRegions];
++std::atomic<uint64_t> RegionRegistry::holders_[RegionRegistry::kMaxRegions];
 +
 +namespace {
 +
@@ -10927,6 +11168,36 @@ index 00000000..88bdd02e
 +std::vector<int>* FreeRegions() {
 +  static base::LeakyObject<std::vector<int>> free_regions;
 +  return free_regions.get();
++}
++
++// The holder bit that isolates beyond the first 63 share.
++constexpr int kSharedHolderSlot = RegionRegistry::kHolderSlots - 1;
++
++// Holder slots in use, guarded by RegionsMutex().
++std::bitset<RegionRegistry::kHolderSlots>* HolderSlots() {
++  static base::LeakyObject<std::bitset<RegionRegistry::kHolderSlots>> slots;
++  return slots.get();
++}
++
++uint64_t HolderBit(Isolate* isolate) {
++  int slot = isolate->region_holder_slot();
++  if (slot < 0) {
++    // Other threads give the shared space isolate its bit for messages.
++    base::MutexGuard guard(RegionsMutex());
++    slot = isolate->region_holder_slot();
++    if (slot < 0) {
++      slot = kSharedHolderSlot;
++      for (int i = 0; i < kSharedHolderSlot; i++) {
++        if (!HolderSlots()->test(i)) {
++          HolderSlots()->set(i);
++          slot = i;
++          break;
++        }
++      }
++      isolate->set_region_holder_slot(slot);
++    }
++  }
++  return uint64_t{1} << slot;
 +}
 +
 +// Bytes of the typed arrays in regions, indexed by
@@ -11117,8 +11388,92 @@ index 00000000..88bdd02e
 +  owner_ids_[region].store(owner->id(), std::memory_order_relaxed);
 +  readers_[region].store(kNotFrozen, std::memory_order_relaxed);
 +  frozen_by_[region].store(0, std::memory_order_relaxed);
++  holders_[region].store(HolderBit(owner), std::memory_order_relaxed);
 +  owners_[region].store(OwnerKey(owner), std::memory_order_release);
 +  return region;
++}
++
++// static
++void RegionRegistry::AddHolder(int region, Isolate* isolate) {
++  holders_[region].fetch_or(HolderBit(isolate), std::memory_order_acq_rel);
++}
++
++// static
++int RegionRegistry::RegionOf(Isolate* isolate, Tagged<HeapObject> object) {
++  if (!HeapLayout::InWritableSharedSpace(object)) return -1;
++  int region = MutablePage::FromHeapObject(isolate, object)->region_id();
++  if (region != MutablePage::kNoRegion) return region;
++  if (IsJSRegionObject(object)) return Cast<JSRegionObject>(object)->region_id();
++  return -1;
++}
++
++// static
++void RegionRegistry::AddHolderOf(Isolate* isolate, Tagged<HeapObject> object) {
++  int region = RegionOf(isolate, object);
++  if (region >= 0) AddHolder(region, isolate);
++}
++
++// static
++uint64_t RegionRegistry::Holders(int region) {
++  return holders_[region].load(std::memory_order_acquire);
++}
++
++// static
++bool RegionRegistry::IsHolder(int region, Isolate* isolate) {
++  return (Holders(region) & HolderBit(isolate)) != 0;
++}
++
++// static
++void RegionRegistry::ReportHolders(Isolate* isolate) {
++  int slot = isolate->region_holder_slot();
++  if (slot < 0 || slot == kSharedHolderSlot) return;
++  int count = next_region_.load(std::memory_order_acquire);
++  if (count == 0) return;
++  uint64_t bit = uint64_t{1} << slot;
++  std::vector<bool> referenced(count);
++  MarkCompactCollector::VisitPointersToSharedHeap(
++      isolate, false, [&](Tagged<HeapObject> object) {
++        int region = RegionOf(isolate, object);
++        if (region >= 0 && region < count) referenced[region] = true;
++      });
++  uintptr_t key = OwnerKey(isolate);
++  for (int region = 0; region < count; region++) {
++    if (referenced[region] ||
++        (holders_[region].load(std::memory_order_relaxed) & bit) == 0) {
++      continue;
++    }
++    // The owner gets new pointers by allocating, the isolate that froze a
++    // region by thawing it.
++    if (owners_[region].load(std::memory_order_acquire) == key ||
++        frozen_by_[region].load(std::memory_order_acquire) == key) {
++      continue;
++    }
++    holders_[region].fetch_and(~bit, std::memory_order_acq_rel);
++  }
++  if (v8_flags.verify_heap) {
++    MarkCompactCollector::VisitPointersToSharedHeap(
++        isolate, true, [&](Tagged<HeapObject> object) {
++          int region = RegionOf(isolate, object);
++          if (region >= 0) {
++            CHECK_NE(holders_[region].load(std::memory_order_relaxed) & bit, 0);
++          }
++        });
++  }
++}
++
++// static
++void RegionRegistry::ForgetHolder(Isolate* isolate) {
++  int slot = isolate->region_holder_slot();
++  if (slot < 0) return;
++  isolate->set_region_holder_slot(-1);
++  if (slot == kSharedHolderSlot) return;
++  uint64_t bit = uint64_t{1} << slot;
++  int count = next_region_.load(std::memory_order_acquire);
++  for (int region = 0; region < count; region++) {
++    holders_[region].fetch_and(~bit, std::memory_order_acq_rel);
++  }
++  base::MutexGuard guard(RegionsMutex());
++  HolderSlots()->reset(slot);
 +}
 +
 +int RegionRegistry::Owner(int region) {
@@ -11168,6 +11523,7 @@ index 00000000..88bdd02e
 +
 +// static
 +void RegionRegistry::SetReadable(int region, Isolate* isolate, bool readable) {
++  if (readable) AddHolder(region, isolate);
 +  uint8_t* table = isolate->region_read_table();
 +  if (!table) {
 +    if (!readable) return;
@@ -11278,6 +11634,8 @@ index 00000000..88bdd02e
 +
 +bool RegionRegistry::Claim(int region, int generation, Isolate* isolate) {
 +  if (Generation(region) != generation) return false;
++  // Before the claim: once the region is ours, objects of it may reach us.
++  AddHolder(region, isolate);
 +  uintptr_t expected = 0;
 +  if (!owners_[region].compare_exchange_strong(expected, OwnerKey(isolate),
 +                                               std::memory_order_acq_rel)) {
@@ -11383,6 +11741,7 @@ index 00000000..88bdd02e
 +    owner_ids_[region].store(kInTransit, std::memory_order_relaxed);
 +    readers_[region].store(kNotFrozen, std::memory_order_relaxed);
 +    bytes_[region].store(0, std::memory_order_relaxed);
++    holders_[region].store(0, std::memory_order_relaxed);
 +    FreeRegions()->push_back(region);
 +  }
 +}
@@ -12875,10 +13234,10 @@ index 00000000..88bdd02e
 +}  // namespace v8
 diff --git a/src/objects/js-region.h b/src/objects/js-region.h
 new file mode 100644
-index 00000000..097b2f81
+index 00000000..1ecbcef2
 --- /dev/null
 +++ b/src/objects/js-region.h
-@@ -0,0 +1,378 @@
+@@ -0,0 +1,403 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -12960,6 +13319,30 @@ index 00000000..097b2f81
 +  static void AddHandle(int region);
 +  static void RemoveHandle(int region);
 +
++  // Isolates that may hold pointers to objects of a region, a bit each. An
++  // isolate gets its bit before it can get such a pointer: when it creates,
++  // claims or may read the region, and when a message hands it an object of
++  // the region. Messages in transit hold their objects through the shared
++  // space isolate, which gets its bit when an object is put into one. The bit
++  // is cleared only by a report of the isolate's own full GC that found no
++  // pointer into the region, never by a move: the old owner keeps raw
++  // pointers until its GC drops them. The last bit is shared by isolates
++  // beyond the first 63 and only cleared when the id is released.
++  static constexpr int kHolderSlots = 64;
++  static void AddHolder(int region, Isolate* isolate);
++  // AddHolder for the region of a shared object, if it has one.
++  static void AddHolderOf(Isolate* isolate, Tagged<HeapObject> object);
++  // The region of a shared object as the reports see it: the region of its
++  // page, or of a region object on a common page; -1 otherwise.
++  static int RegionOf(Isolate* isolate, Tagged<HeapObject> object);
++  static uint64_t Holders(int region);
++  static bool IsHolder(int region, Isolate* isolate);
++  // Called at the start of each full GC of the isolate, which is stopped and
++  // done sweeping.
++  static void ReportHolders(Isolate* isolate);
++  // Called once the isolate has left the shared heap: it holds nothing.
++  static void ForgetHolder(Isolate* isolate);
++
 +  // Releases regions that have neither live objects nor handles, so that their
 +  // ids can be reused. Called by the shared space isolate after a full GC,
 +  // while all isolates are stopped.
@@ -13032,6 +13415,7 @@ index 00000000..097b2f81
 +  static std::atomic<bool> in_use_[kMaxRegions];
 +  static std::atomic<bool> locked_[kMaxRegions];
 +  static std::atomic<size_t> bytes_[kMaxRegions];
++  static std::atomic<uint64_t> holders_[kMaxRegions];
 +};
 +
 +// Memory for the objects of ownership regions. A region that holds
@@ -13584,7 +13968,7 @@ index b53ecd4a..2272f487 100644
  
  @cppScope('SharedFunctionInfo::Flags2')
 diff --git a/src/objects/value-serializer.cc b/src/objects/value-serializer.cc
-index 3de06302..9e6a7db3 100644
+index 3de06302..48d170f7 100644
 --- a/src/objects/value-serializer.cc
 +++ b/src/objects/value-serializer.cc
 @@ -627,7 +627,8 @@ Maybe<bool> ValueSerializer::WriteJSReceiver(
@@ -13606,6 +13990,16 @@ index 3de06302..9e6a7db3 100644
  #if V8_ENABLE_WEBASSEMBLY
      case WASM_MODULE_OBJECT_TYPE:
        return WriteWasmModule(Cast<WasmModuleObject>(receiver));
+@@ -2631,7 +2634,8 @@ MaybeDirectHandle<HeapObject> ValueDeserializer::ReadSharedObject() {
+   }
+ 
+   DirectHandle<HeapObject> shared_object(
+-      shared_object_conveyor_->GetPersisted(shared_object_id), isolate_);
++      shared_object_conveyor_->GetPersisted(isolate_, shared_object_id),
++      isolate_);
+   DCHECK(IsShared(*shared_object));
+   AddObjectWithID(id, Cast<JSReceiver>(shared_object));
+   return shared_object;
 diff --git a/src/parsing/parse-info.cc b/src/parsing/parse-info.cc
 index aa1647ec..5a5be6d0 100644
 --- a/src/parsing/parse-info.cc
@@ -14036,10 +14430,18 @@ index 2ab60bab..433e7430 100644
          result = JSObject::GetPropertyAttributesWithInterceptor(&it);
          if (result.IsNothing()) return MaybeDirectHandle<Object>();
 diff --git a/src/runtime/runtime-object.cc b/src/runtime/runtime-object.cc
-index 96c1c2f4..9a03efd6 100644
+index 96c1c2f4..04c2a636 100644
 --- a/src/runtime/runtime-object.cc
 +++ b/src/runtime/runtime-object.cc
-@@ -13,8 +13,11 @@
+@@ -3,6 +3,7 @@
+ // found in the LICENSE file.
+ 
+ #include "src/api/api-arguments-inl.h"
++#include "src/base/bits.h"
+ #include "src/base/logging.h"
+ #include "src/base/macros.h"
+ #include "src/builtins/builtins.h"
+@@ -13,8 +14,11 @@
  #include "src/execution/isolate-inl.h"
  #include "src/execution/messages.h"
  #include "src/handles/maybe-handles.h"
@@ -14051,7 +14453,7 @@ index 96c1c2f4..9a03efd6 100644
  #include "src/objects/property-descriptor-object.h"
  #include "src/objects/property-descriptor.h"
  #include "src/objects/property-details.h"
-@@ -87,6 +90,65 @@ Maybe<bool> Runtime::DeleteObjectProperty(Isolate* isolate,
+@@ -87,6 +91,88 @@ Maybe<bool> Runtime::DeleteObjectProperty(Isolate* isolate,
  }
  
  // https://tc39.es/ecma262/#sec-object.keys
@@ -14114,10 +14516,33 @@ index 96c1c2f4..9a03efd6 100644
 +          ->region_id());
 +}
 +
++// For tests: how many isolates may hold pointers into a region, and whether
++// this one may.
++RUNTIME_FUNCTION(Runtime_RegionHolderCount) {
++  HandleScope scope(isolate);
++  DCHECK_EQ(1, args.length());
++  int region = args.smi_value_at(0);
++  if (region < 0 || region >= RegionRegistry::kMaxRegions) {
++    return Smi::FromInt(-1);
++  }
++  return Smi::FromInt(base::bits::CountPopulation(
++      RegionRegistry::Holders(region)));
++}
++
++RUNTIME_FUNCTION(Runtime_RegionIsHolder) {
++  HandleScope scope(isolate);
++  DCHECK_EQ(1, args.length());
++  int region = args.smi_value_at(0);
++  if (region < 0 || region >= RegionRegistry::kMaxRegions) {
++    return ReadOnlyRoots(isolate).false_value();
++  }
++  return isolate->heap()->ToBoolean(RegionRegistry::IsHolder(region, isolate));
++}
++
  RUNTIME_FUNCTION(Runtime_ObjectKeys) {
    HandleScope scope(isolate);
    DirectHandle<Object> object = args.at(0);
-@@ -221,6 +283,7 @@ RUNTIME_FUNCTION(Runtime_HasOwnConstDataProperty) {
+@@ -221,6 +307,7 @@ RUNTIME_FUNCTION(Runtime_HasOwnConstDataProperty) {
        case LookupIterator::ACCESS_CHECK:
        case LookupIterator::JSPROXY:
        case LookupIterator::WASM_OBJECT:
@@ -14126,10 +14551,10 @@ index 96c1c2f4..9a03efd6 100644
        case LookupIterator::ACCESSOR:
        case LookupIterator::MODULE_NAMESPACE:
 diff --git a/src/runtime/runtime.h b/src/runtime/runtime.h
-index 8be2dd32..5ed194e5 100644
+index 8be2dd32..35bda83c 100644
 --- a/src/runtime/runtime.h
 +++ b/src/runtime/runtime.h
-@@ -395,6 +395,11 @@ constexpr bool CanTriggerGC(T... properties) {
+@@ -395,6 +395,13 @@ constexpr bool CanTriggerGC(T... properties) {
    F(HasOwnConstDataProperty, 2, 1)                                     \
    F(ObjectIsExtensible, 1, 1)                                          \
    F(ObjectKeys, 1, 1)                                                  \
@@ -14138,6 +14563,8 @@ index 8be2dd32..5ed194e5 100644
 +  F(ShareRegionLiteralValue, 2, 1)                                     \
 +  F(AllocateInRegion, 2, 1)                                            \
 +  F(RegionPageOf, 1, 1)                                                \
++  F(RegionHolderCount, 1, 1)                                           \
++  F(RegionIsHolder, 1, 1)                                              \
    F(ObjectValues, 1, 1)                                                \
    F(ObjectValuesSkipFastPath, 1, 1)                                    \
    F(OptimizeObjectForAddingMultipleProperties, 2, 1)                   \
