@@ -99,28 +99,29 @@ index 2762ad61..b103ce08 100644
    void set_function_token_position(int pos) { function_token_position_ = pos; }
    int function_token_position() const { return function_token_position_; }
 diff --git a/src/ast/scopes.h b/src/ast/scopes.h
-index 9f4dd132..a5f40fb8 100644
+index 9f4dd132..6d7aa9e6 100644
 --- a/src/ast/scopes.h
 +++ b/src/ast/scopes.h
-@@ -1057,6 +1057,9 @@ class V8_EXPORT_PRIVATE DeclarationScope : public Scope {
-     is_being_lazily_parsed_ = is_being_lazily_parsed;
-   }
+@@ -1059,6 +1059,10 @@ class V8_EXPORT_PRIVATE DeclarationScope : public Scope {
    bool is_being_lazily_parsed() const { return is_being_lazily_parsed_; }
-+
+ #endif
+ 
++  // Whether {} and [] in this function are #{} and #[] ('use region').
 +  bool region_literals() const { return region_literals_; }
 +  void set_region_literals() { region_literals_ = true; }
- #endif
- 
++
    void set_zone(Zone* zone) {
-@@ -1446,6 +1449,8 @@ class V8_EXPORT_PRIVATE DeclarationScope : public Scope {
- 
+ #ifdef DEBUG
+     needs_migration_ = true;
+@@ -1447,6 +1451,8 @@ class V8_EXPORT_PRIVATE DeclarationScope : public Scope {
  #if DEBUG
    bool is_being_lazily_parsed_;
+ #endif
 +  // Whether {} and [] in this function are #{} and #[] ('use region').
 +  bool region_literals_ = false;
- #endif
  
    // If the scope is a function scope, this is the function kind.
+   FunctionKind function_kind_;
 diff --git a/src/builtins/array-flat.tq b/src/builtins/array-flat.tq
 index 659de786..d3df5b28 100644
 --- a/src/builtins/array-flat.tq
