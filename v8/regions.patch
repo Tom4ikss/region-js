@@ -1200,7 +1200,7 @@ index 8dae69c0..c17febaa 100644
    // the special Oddball ones that have no wrapper counterparts (i.e. Null,
    // Undefined and TheHole).
 diff --git a/src/compiler/js-native-context-specialization.cc b/src/compiler/js-native-context-specialization.cc
-index d97b04e4..35b3f408 100644
+index d97b04e4..d7ec2bcb 100644
 --- a/src/compiler/js-native-context-specialization.cc
 +++ b/src/compiler/js-native-context-specialization.cc
 @@ -38,7 +38,6 @@
@@ -1219,7 +1219,7 @@ index d97b04e4..35b3f408 100644
        zone_(zone),
        shared_zone_(shared_zone),
        type_cache_(TypeCache::Get()),
-@@ -1373,6 +1373,245 @@ Reduction JSNativeContextSpecialization::ReduceMegaDOMPropertyAccess(
+@@ -1373,6 +1373,327 @@ Reduction JSNativeContextSpecialization::ReduceMegaDOMPropertyAccess(
    return Replace(value);
  }
  
@@ -1309,6 +1309,34 @@ index d97b04e4..35b3f408 100644
 +                            Control{NodeProperties::GetControlInput(node)});
 +}
 +
++FeedbackSource JSNativeContextSpecialization::RegionLoopFeedback(
++    Node* control) {
++  if (!v8_flags.region_loop_speculation) return {};
++  // Walk up the control chain: a loop exit leads around its loop, and the
++  // first loop header reached is the innermost loop.
++  for (int steps = 0; steps < 10000; ++steps) {
++    switch (control->opcode()) {
++      case IrOpcode::kLoop: {
++        FeedbackSource feedback = OpParameter<FeedbackSource>(control->op());
++        if (!feedback.IsValid() || broker()->GetFeedbackForJumpLoop(feedback) !=
++                                       SpeculationMode::kAllowSpeculation) {
++          return {};
++        }
++        return feedback;
++      }
++      case IrOpcode::kLoopExit:
++        control = NodeProperties::GetControlInput(
++            NodeProperties::GetControlInput(control, 1), 0);
++        break;
++      default:
++        if (control->op()->ControlInputCount() == 0) return {};
++        control = NodeProperties::GetControlInput(control, 0);
++        break;
++    }
++  }
++  return {};
++}
++
 +Node* JSNativeContextSpecialization::BuildGenericAccessClone(
 +    Node* node, Node* effect, Node* control, ZoneVector<Node*>* if_exceptions,
 +    Node** success) {
@@ -1381,54 +1409,108 @@ index d97b04e4..35b3f408 100644
 +    controls.push_back(other_success);
 +  }
 +
-+  // The region path: the inline access, and the generic access when the
-+  // fast path can't do it (the region is not accessible, the value must be
-+  // shared or is a typed array, the index is out of range, and so on). Loads
-+  // then return the hole and stores false.
-+  Node* fast;
-+  if (field_index.has_value()) {
-+    fast = effect =
-+        is_store
-+            ? graph()->NewNode(simplified()->StoreRegionField(*field_index),
-+                               receiver, value, effect, region_control)
-+            : graph()->NewNode(simplified()->LoadRegionField(*field_index),
-+                               receiver, effect, region_control);
-+  } else {
-+    fast = effect =
-+        is_store ? graph()->NewNode(simplified()->StoreRegionElement(),
-+                                    receiver, key, value, effect,
-+                                    region_control)
-+                 : graph()->NewNode(simplified()->LoadRegionElement(),
-+                                    receiver, key, effect, region_control);
-+  }
-+  Node* use_fast =
-+      is_store ? fast
-+               : graph()->NewNode(
-+                     simplified()->BooleanNot(),
-+                     graph()->NewNode(simplified()->ReferenceEqual(), fast,
-+                                      jsgraph()->TheHoleConstant()));
-+  Node* branch = graph()->NewNode(common()->Branch(BranchHint::kTrue), use_fast,
-+                                  region_control);
-+  Node* if_fast = graph()->NewNode(common()->IfTrue(), branch);
-+  Node* if_slow = graph()->NewNode(common()->IfFalse(), branch);
-+  if (is_store) {
-+    values.push_back(value);
++  // In a loop that allows speculation the access deoptimizes when the fast
++  // path can't do it, so the loop has no call. The access check is a node of
++  // its own then: RedundancyElimination keeps only the first one for an
++  // object in such a loop, which loop peeling moves out of it.
++  FeedbackSource loop_feedback = RegionLoopFeedback(control);
++  if (loop_feedback.IsValid()) {
++    effect = Effect{graph()->NewNode(
++        simplified()->CheckRegionAccess(is_store, loop_feedback), receiver,
++        effect, region_control)};
++    Node* fast;
++    if (field_index.has_value()) {
++      fast = effect = is_store
++                          ? graph()->NewNode(
++                                simplified()->StoreRegionField(*field_index,
++                                                               false),
++                                receiver, value, effect, region_control)
++                          : graph()->NewNode(
++                                simplified()->LoadRegionField(*field_index,
++                                                              false),
++                                receiver, effect, region_control);
++    } else {
++      fast = effect =
++          is_store ? graph()->NewNode(simplified()->StoreRegionElement(false),
++                                      receiver, key, value, effect,
++                                      region_control)
++                   : graph()->NewNode(simplified()->LoadRegionElement(false),
++                                      receiver, key, effect, region_control);
++    }
++    Node* done =
++        is_store ? fast
++                 : graph()->NewNode(
++                       simplified()->BooleanNot(),
++                       graph()->NewNode(simplified()->ReferenceEqual(), fast,
++                                        jsgraph()->TheHoleConstant()));
++    effect = Effect{graph()->NewNode(
++        simplified()->CheckIf(DeoptimizeReason::kRegionAccess, loop_feedback),
++        done, effect, region_control)};
++    Node* result = value;
++    if (!is_store) {
++      result = effect = Effect{
++          graph()->NewNode(common()->TypeGuard(Type::NonInternal()), fast,
++                           effect, region_control)};
++    }
++    if (controls.empty()) {
++      ReplaceWithValue(node, result, effect, region_control);
++      return Replace(result);
++    }
++    values.push_back(result);
 +    effects.push_back(effect);
++    controls.push_back(region_control);
 +  } else {
-+    Node* fast_value = graph()->NewNode(
-+        common()->TypeGuard(Type::NonInternal()), fast, effect, if_fast);
-+    values.push_back(fast_value);
-+    effects.push_back(fast_value);
-+  }
-+  controls.push_back(if_fast);
++    // The region path: the inline access, and the generic access when the
++    // fast path can't do it (the region is not accessible, the value must be
++    // shared or is a typed array, the index is out of range, and so on).
++    // Loads then return the hole and stores false.
++    Node* fast;
++    if (field_index.has_value()) {
++      fast = effect =
++          is_store
++              ? graph()->NewNode(
++                    simplified()->StoreRegionField(*field_index, true),
++                    receiver, value, effect, region_control)
++              : graph()->NewNode(
++                    simplified()->LoadRegionField(*field_index, true),
++                    receiver, effect, region_control);
++    } else {
++      fast = effect =
++          is_store ? graph()->NewNode(simplified()->StoreRegionElement(true),
++                                      receiver, key, value, effect,
++                                      region_control)
++                   : graph()->NewNode(simplified()->LoadRegionElement(true),
++                                      receiver, key, effect, region_control);
++    }
++    Node* use_fast =
++        is_store ? fast
++                 : graph()->NewNode(
++                       simplified()->BooleanNot(),
++                       graph()->NewNode(simplified()->ReferenceEqual(), fast,
++                                        jsgraph()->TheHoleConstant()));
++    Node* branch = graph()->NewNode(common()->Branch(BranchHint::kTrue),
++                                    use_fast, region_control);
++    Node* if_fast = graph()->NewNode(common()->IfTrue(), branch);
++    Node* if_slow = graph()->NewNode(common()->IfFalse(), branch);
++    if (is_store) {
++      values.push_back(value);
++      effects.push_back(effect);
++    } else {
++      Node* fast_value = graph()->NewNode(
++          common()->TypeGuard(Type::NonInternal()), fast, effect, if_fast);
++      values.push_back(fast_value);
++      effects.push_back(fast_value);
++    }
++    controls.push_back(if_fast);
 +
-+  Node* slow_success;
-+  Node* slow =
-+      BuildGenericAccessClone(node, effect, if_slow, if_exceptions, &slow_success);
-+  region_fallbacks_.insert(slow);
-+  values.push_back(is_store ? value : slow);
-+  effects.push_back(slow);
-+  controls.push_back(slow_success);
++    Node* slow_success;
++    Node* slow = BuildGenericAccessClone(node, effect, if_slow, if_exceptions,
++                                         &slow_success);
++    region_fallbacks_.insert(slow);
++    values.push_back(is_store ? value : slow);
++    effects.push_back(slow);
++    controls.push_back(slow_success);
++  }
 +
 +  int const count = static_cast<int>(controls.size());
 +  control = Control{
@@ -1465,7 +1547,7 @@ index d97b04e4..35b3f408 100644
  Reduction JSNativeContextSpecialization::ReduceNamedAccess(
      Node* node, Node* value, NamedAccessFeedback const& feedback,
      AccessMode access_mode, FeedbackSource const& source, Node* key) {
-@@ -1445,6 +1684,12 @@ Reduction JSNativeContextSpecialization::ReduceNamedAccess(
+@@ -1445,6 +1766,12 @@ Reduction JSNativeContextSpecialization::ReduceNamedAccess(
      }
    }
  
@@ -1478,7 +1560,7 @@ index d97b04e4..35b3f408 100644
    ZoneVector<PropertyAccessInfo> access_infos(zone());
    {
      ZoneVector<PropertyAccessInfo> access_infos_for_feedback(zone());
-@@ -2300,6 +2545,18 @@ Reduction JSNativeContextSpecialization::ReduceElementAccess(
+@@ -2300,6 +2627,18 @@ Reduction JSNativeContextSpecialization::ReduceElementAccess(
    }
  
    AccessMode access_mode = refined_feedback.keyed_mode().access_mode();
@@ -1498,10 +1580,10 @@ index d97b04e4..35b3f408 100644
        receiver->opcode() == IrOpcode::kHeapConstant) {
      Reduction reduction = ReduceElementLoadFromHeapConstant(
 diff --git a/src/compiler/js-native-context-specialization.h b/src/compiler/js-native-context-specialization.h
-index 4c7f0103..062882c2 100644
+index 4c7f0103..3ad40c55 100644
 --- a/src/compiler/js-native-context-specialization.h
 +++ b/src/compiler/js-native-context-specialization.h
-@@ -97,6 +97,26 @@ class V8_EXPORT_PRIVATE JSNativeContextSpecialization final
+@@ -97,6 +97,31 @@ class V8_EXPORT_PRIVATE JSNativeContextSpecialization final
    Reduction ReduceJSStoreInArrayLiteral(Node* node);
    Reduction ReduceJSToObject(Node* node);
  
@@ -1518,6 +1600,11 @@ index 4c7f0103..062882c2 100644
 +                               std::optional<int> field_index, Node* key,
 +                               Node* value, bool is_store, Effect effect,
 +                               Control control);
++  // The feedback of the innermost loop around {control}, if that loop allows
++  // speculation, or an invalid FeedbackSource. Region accesses in such a loop
++  // deoptimize instead of calling the generic access, and the deoptimization
++  // turns speculation off for the loop.
++  FeedbackSource RegionLoopFeedback(Node* control);
 +  // A copy of the generic access {node} at {effect} and {control}. Its
 +  // IfException goes to {if_exceptions} if given; {success} gets the control
 +  // that continues after it.
@@ -1528,7 +1615,7 @@ index 4c7f0103..062882c2 100644
    Reduction ReduceElementAccess(Node* node, Node* index, Node* value,
                                  ElementAccessFeedback const& feedback);
    // In the case of non-keyed (named) accesses, pass the name as {static_name}
-@@ -294,6 +314,9 @@ class V8_EXPORT_PRIVATE JSNativeContextSpecialization final
+@@ -294,6 +319,9 @@ class V8_EXPORT_PRIVATE JSNativeContextSpecialization final
    Flags const flags_;
    Handle<JSGlobalObject> global_object_;
    Handle<JSGlobalProxy> global_proxy_;
@@ -1538,11 +1625,49 @@ index 4c7f0103..062882c2 100644
    Zone* const zone_;
    Zone* const shared_zone_;
    TypeCache const* type_cache_;
+diff --git a/src/compiler/load-elimination.cc b/src/compiler/load-elimination.cc
+index 05c5ca55..5d3f953d 100644
+--- a/src/compiler/load-elimination.cc
++++ b/src/compiler/load-elimination.cc
+@@ -1320,8 +1320,12 @@ Reduction LoadElimination::ReduceOtherNode(Node* node) {
+       // just yet because we will have to recompute anyway once we compute
+       // the predecessor.
+       if (state == nullptr) return NoChange();
+-      // Check if this {node} has some uncontrolled side effects.
+-      if (!node->op()->HasProperty(Operator::kNoWrite)) {
++      // Check if this {node} has some uncontrolled side effects. Stores to
++      // region objects write only their values() and length, which nothing
++      // tracked here reads.
++      if (!node->op()->HasProperty(Operator::kNoWrite) &&
++          node->opcode() != IrOpcode::kStoreRegionField &&
++          node->opcode() != IrOpcode::kStoreRegionElement) {
+         state = state->KillAll(zone());
+       }
+       return UpdateState(node, state);
+@@ -1470,7 +1474,9 @@ LoadElimination::AbstractState const* LoadElimination::ComputeLoopState(
+             }
+             break;
+           }
+-          case IrOpcode::kStoreTypedElement: {
++          case IrOpcode::kStoreTypedElement:
++          case IrOpcode::kStoreRegionField:
++          case IrOpcode::kStoreRegionElement: {
+             // Doesn't affect anything we track with the state currently.
+             break;
+           }
 diff --git a/src/compiler/opcodes.h b/src/compiler/opcodes.h
-index 30fd3e16..06cf46aa 100644
+index 30fd3e16..f954a5c5 100644
 --- a/src/compiler/opcodes.h
 +++ b/src/compiler/opcodes.h
-@@ -517,6 +517,8 @@
+@@ -490,6 +490,7 @@
+   V(CheckNumberFitsInt32)                   \
+   V(CheckReceiver)                          \
+   V(CheckReceiverOrNullOrUndefined)         \
++  V(CheckRegionAccess)                      \
+   V(CheckSmi)                               \
+   V(CheckString)                            \
+   V(CheckStringOrStringWrapper)             \
+@@ -517,6 +518,8 @@
    V(LoadFromObject)                         \
    V(LoadImmutableFromObject)                \
    V(LoadMessage)                            \
@@ -1551,7 +1676,7 @@ index 30fd3e16..06cf46aa 100644
    V(LoadStackArgument)                      \
    V(LoadTypedElement)                       \
    V(MaybeGrowFastElements)                  \
-@@ -556,6 +558,8 @@
+@@ -556,6 +559,8 @@
    V(StoreElement)                           \
    V(StoreField)                             \
    V(StoreMessage)                           \
@@ -1560,11 +1685,228 @@ index 30fd3e16..06cf46aa 100644
    V(StoreSignedSmallElement)                \
    V(StoreToObject)                          \
    V(StoreTypedElement)                      \
+diff --git a/src/compiler/redundancy-elimination.cc b/src/compiler/redundancy-elimination.cc
+index 64d01b3e..44718192 100644
+--- a/src/compiler/redundancy-elimination.cc
++++ b/src/compiler/redundancy-elimination.cc
+@@ -17,6 +17,7 @@ RedundancyElimination::RedundancyElimination(Editor* editor, JSGraph* jsgraph,
+                                              Zone* zone)
+     : AdvancedReducer(editor),
+       node_checks_(zone),
++      loops_changing_region_access_(zone),
+       jsgraph_(jsgraph),
+       zone_(zone) {}
+ 
+@@ -40,6 +41,7 @@ Reduction RedundancyElimination::Reduce(Node* node) {
+     case IrOpcode::kCheckNumberFitsInt32:
+     case IrOpcode::kCheckReceiver:
+     case IrOpcode::kCheckReceiverOrNullOrUndefined:
++    case IrOpcode::kCheckRegionAccess:
+     case IrOpcode::kCheckSmi:
+     case IrOpcode::kCheckString:
+     case IrOpcode::kCheckStringOrStringWrapper:
+@@ -177,10 +179,47 @@ struct Subsumption {
+   const Operator* conversion_op_;
+ };
+ 
++// Whether {node} may change which regions this isolate can access. Only the
++// isolate itself changes that, in the runtime: by moving, freezing, thawing or
++// freeing a region, or by giving up a borrow. So anything that may call does,
++// and memory accesses and allocation don't.
++bool MayChangeRegionAccess(Node const* node) {
++  if (node->op()->HasProperty(Operator::kNoWrite)) return false;
++  switch (node->opcode()) {
++    case IrOpcode::kAllocate:
++    case IrOpcode::kAllocateRaw:
++    case IrOpcode::kBeginRegion:
++    case IrOpcode::kEnsureWritableFastElements:
++    case IrOpcode::kFinishRegion:
++    case IrOpcode::kMaybeGrowFastElements:
++    case IrOpcode::kStore:
++    case IrOpcode::kStoreElement:
++    case IrOpcode::kStoreField:
++    case IrOpcode::kStoreRegionElement:
++    case IrOpcode::kStoreRegionField:
++    case IrOpcode::kStoreSignedSmallElement:
++    case IrOpcode::kStoreTypedElement:
++    case IrOpcode::kTransitionElementsKind:
++      return false;
++    default:
++      return true;
++  }
++}
++
+ // Does check {a} subsume check {b}?
+ Subsumption CheckSubsumes(Node const* a, Node const* b,
+                           MachineOperatorBuilder* machine) {
+   Subsumption subsumption = Subsumption::Implicit();
++  if (a->opcode() == IrOpcode::kCheckRegionAccess ||
++      b->opcode() == IrOpcode::kCheckRegionAccess) {
++    // Access to write implies access to read.
++    if (a->opcode() != b->opcode() || a->InputAt(0) != b->InputAt(0) ||
++        (!CheckRegionAccessParametersOf(a->op()).for_write() &&
++         CheckRegionAccessParametersOf(b->op()).for_write())) {
++      return Subsumption::None();
++    }
++    return subsumption;
++  }
+   if (a->op() != b->op()) {
+     if (a->opcode() == IrOpcode::kCheckInternalizedString &&
+         b->opcode() == IrOpcode::kCheckString) {
+@@ -353,6 +392,31 @@ Node* RedundancyElimination::EffectPathChecks::LookupBoundsCheckFor(
+   return nullptr;
+ }
+ 
++RedundancyElimination::EffectPathChecks const*
++RedundancyElimination::EffectPathChecks::WithoutRegionChecks(
++    Zone* zone) const {
++  // Keep the tail after the last region check, so that merges still find it.
++  Check* last = nullptr;
++  for (Check* check = head_; check != nullptr; check = check->next) {
++    if (check->node->opcode() == IrOpcode::kCheckRegionAccess) last = check;
++  }
++  if (last == nullptr) return this;
++  ZoneVector<Node*> prefix(zone);
++  for (Check* check = head_; check != last; check = check->next) {
++    if (check->node->opcode() != IrOpcode::kCheckRegionAccess) {
++      prefix.push_back(check->node);
++    }
++  }
++  Check* head = last->next;
++  size_t size = 0;
++  for (Check* check = head; check != nullptr; check = check->next) size++;
++  for (auto it = prefix.rbegin(); it != prefix.rend(); ++it) {
++    head = zone->New<Check>(*it, head);
++    size++;
++  }
++  return zone->New<EffectPathChecks>(head, size);
++}
++
+ RedundancyElimination::EffectPathChecks const*
+ RedundancyElimination::PathChecksForEffectNodes::Get(Node* node) const {
+   size_t const id = node->id();
+@@ -388,8 +452,14 @@ Reduction RedundancyElimination::ReduceEffectPhi(Node* node) {
+   if (control->opcode() == IrOpcode::kLoop) {
+     // Here we rely on having only reducible loops:
+     // The loop entry edge always dominates the header, so we can just use
+-    // the information from the loop entry edge.
+-    return TakeChecksFromFirstEffect(node);
++    // the information from the loop entry edge. A region check holds in the
++    // loop only if nothing in it may change region access.
++    EffectPathChecks const* checks =
++        node_checks_.Get(NodeProperties::GetEffectInput(node));
++    if (checks == nullptr) return NoChange();
++    EffectPathChecks const* without = checks->WithoutRegionChecks(zone());
++    if (without != checks && LoopMayChangeRegionAccess(node)) checks = without;
++    return UpdateChecks(node, checks);
+   }
+   DCHECK_EQ(IrOpcode::kMerge, control->opcode());
+ 
+@@ -511,6 +581,12 @@ Reduction RedundancyElimination::ReduceStart(Node* node) {
+ Reduction RedundancyElimination::ReduceOtherNode(Node* node) {
+   if (node->op()->EffectInputCount() == 1) {
+     if (node->op()->EffectOutputCount() == 1) {
++      if (MayChangeRegionAccess(node)) {
++        EffectPathChecks const* checks =
++            node_checks_.Get(NodeProperties::GetEffectInput(node));
++        if (checks == nullptr) return NoChange();
++        return UpdateChecks(node, checks->WithoutRegionChecks(zone()));
++      }
+       return TakeChecksFromFirstEffect(node);
+     } else {
+       // Effect terminators should be handled specially.
+@@ -522,6 +598,36 @@ Reduction RedundancyElimination::ReduceOtherNode(Node* node) {
+   return NoChange();
+ }
+ 
++bool RedundancyElimination::LoopMayChangeRegionAccess(Node* effect_phi) {
++  auto cached = loops_changing_region_access_.find(effect_phi->id());
++  if (cached != loops_changing_region_access_.end()) return cached->second;
++  bool result = false;
++  // Walk the effect chains back from the back edges to the loop header, as
++  // LoadElimination::ComputeLoopState does.
++  ZoneQueue<Node*> queue(zone());
++  ZoneSet<Node*> visited(zone());
++  visited.insert(effect_phi);
++  for (int i = 1; i < effect_phi->op()->EffectInputCount(); ++i) {
++    queue.push(NodeProperties::GetEffectInput(effect_phi, i));
++  }
++  while (!queue.empty()) {
++    Node* const current = queue.front();
++    queue.pop();
++    if (!visited.insert(current).second) continue;
++    if (current->opcode() != IrOpcode::kEffectPhi &&
++        MayChangeRegionAccess(current)) {
++      result = true;
++      break;
++    }
++    for (int i = 0; i < current->op()->EffectInputCount(); ++i) {
++      queue.push(NodeProperties::GetEffectInput(current, i));
++    }
++  }
++  // Reducers don't add calls to a loop, so the answer stays right.
++  loops_changing_region_access_[effect_phi->id()] = result;
++  return result;
++}
++
+ Reduction RedundancyElimination::TakeChecksFromFirstEffect(Node* node) {
+   DCHECK_EQ(1, node->op()->EffectOutputCount());
+   Node* const effect = NodeProperties::GetEffectInput(node);
+diff --git a/src/compiler/redundancy-elimination.h b/src/compiler/redundancy-elimination.h
+index ffa02df7..1b9b183d 100644
+--- a/src/compiler/redundancy-elimination.h
++++ b/src/compiler/redundancy-elimination.h
+@@ -7,6 +7,7 @@
+ 
+ #include "src/compiler/graph-reducer.h"
+ #include "src/compiler/machine-operator.h"
++#include "src/zone/zone-containers.h"
+ 
+ namespace v8 {
+ namespace internal {
+@@ -42,6 +43,8 @@ class V8_EXPORT_PRIVATE RedundancyElimination final : public AdvancedReducer {
+     EffectPathChecks const* AddCheck(Zone* zone, Node* node) const;
+     Node* LookupCheck(Node* node, JSGraph* jsgraph) const;
+     Node* LookupBoundsCheckFor(Node* node) const;
++    // The same checks without CheckRegionAccess.
++    EffectPathChecks const* WithoutRegionChecks(Zone* zone) const;
+ 
+    private:
+     friend Zone;
+@@ -72,11 +75,15 @@ class V8_EXPORT_PRIVATE RedundancyElimination final : public AdvancedReducer {
+   Reduction ReduceOtherNode(Node* node);
+ 
+   Reduction TakeChecksFromFirstEffect(Node* node);
++  // Whether the loop of {effect_phi} has a node that may change which regions
++  // this isolate can access.
++  bool LoopMayChangeRegionAccess(Node* effect_phi);
+   Reduction UpdateChecks(Node* node, EffectPathChecks const* checks);
+ 
+   Zone* zone() const { return zone_; }
+ 
+   PathChecksForEffectNodes node_checks_;
++  ZoneUnorderedMap<NodeId, bool> loops_changing_region_access_;
+   JSGraph* jsgraph_;
+   Zone* const zone_;
+ };
 diff --git a/src/compiler/simplified-lowering.cc b/src/compiler/simplified-lowering.cc
-index 9ea2e639..120c8201 100644
+index 9ea2e639..cdd8427f 100644
 --- a/src/compiler/simplified-lowering.cc
 +++ b/src/compiler/simplified-lowering.cc
-@@ -4226,6 +4226,22 @@ class RepresentationSelector {
+@@ -4077,6 +4077,12 @@ class RepresentationSelector {
+         SetOutput<T>(node, MachineRepresentation::kNone);
+         return;
+       }
++      case IrOpcode::kCheckRegionAccess: {
++        ProcessInput<T>(node, 0, UseInfo::AnyTagged());
++        ProcessRemainingInputs<T>(node, 1);
++        SetOutput<T>(node, MachineRepresentation::kNone);
++        return;
++      }
+       case IrOpcode::kCheckInternalizedString: {
+         VisitCheck<T>(node, Type::InternalizedString(), lowering);
+         return;
+@@ -4226,6 +4232,22 @@ class RepresentationSelector {
          SetOutput<T>(node, MachineRepresentation::kNone);
          return;
        }
@@ -1588,62 +1930,159 @@ index 9ea2e639..120c8201 100644
          if (truncation.IsUnused()) return VisitUnused<T>(node);
          VisitBinop<T>(node, UseInfo::AnyTagged(), UseInfo::TruncatingWord32(),
 diff --git a/src/compiler/simplified-operator.cc b/src/compiler/simplified-operator.cc
-index 38a92b04..3cb512b8 100644
+index 38a92b04..66a403b4 100644
 --- a/src/compiler/simplified-operator.cc
 +++ b/src/compiler/simplified-operator.cc
-@@ -2395,6 +2395,38 @@ const Operator* SimplifiedOperatorBuilder::TypedArrayLength(
+@@ -2395,6 +2395,92 @@ const Operator* SimplifiedOperatorBuilder::TypedArrayLength(
        elements_kind);  // parameter
  }
  
-+int RegionFieldIndexOf(const Operator* op) {
-+  DCHECK(op->opcode() == IrOpcode::kLoadRegionField ||
-+         op->opcode() == IrOpcode::kStoreRegionField);
-+  return OpParameter<int>(op);
++bool operator==(RegionAccessParameters const& lhs,
++                RegionAccessParameters const& rhs) {
++  return lhs.index() == rhs.index() && lhs.check_access() == rhs.check_access();
 +}
 +
-+const Operator* SimplifiedOperatorBuilder::LoadRegionField(int index) {
-+  return zone()->New<Operator1<int>>(
++size_t hash_value(RegionAccessParameters const& p) {
++  return base::hash_combine(p.index(), p.check_access());
++}
++
++std::ostream& operator<<(std::ostream& os, RegionAccessParameters const& p) {
++  os << p.index();
++  if (!p.check_access()) os << ", access checked";
++  return os;
++}
++
++RegionAccessParameters const& RegionAccessParametersOf(const Operator* op) {
++  DCHECK(op->opcode() == IrOpcode::kLoadRegionField ||
++         op->opcode() == IrOpcode::kStoreRegionField ||
++         op->opcode() == IrOpcode::kLoadRegionElement ||
++         op->opcode() == IrOpcode::kStoreRegionElement);
++  return OpParameter<RegionAccessParameters>(op);
++}
++
++bool operator==(CheckRegionAccessParameters const& lhs,
++                CheckRegionAccessParameters const& rhs) {
++  return lhs.for_write() == rhs.for_write() && lhs.feedback() == rhs.feedback();
++}
++
++size_t hash_value(CheckRegionAccessParameters const& p) {
++  FeedbackSource::Hash feedback_hash;
++  return base::hash_combine(p.for_write(), feedback_hash(p.feedback()));
++}
++
++std::ostream& operator<<(std::ostream& os,
++                         CheckRegionAccessParameters const& p) {
++  return os << (p.for_write() ? "write" : "read") << ", " << p.feedback();
++}
++
++CheckRegionAccessParameters const& CheckRegionAccessParametersOf(
++    const Operator* op) {
++  DCHECK_EQ(op->opcode(), IrOpcode::kCheckRegionAccess);
++  return OpParameter<CheckRegionAccessParameters>(op);
++}
++
++const Operator* SimplifiedOperatorBuilder::LoadRegionField(int index,
++                                                           bool check_access) {
++  return zone()->New<Operator1<RegionAccessParameters>>(
 +      IrOpcode::kLoadRegionField,
 +      Operator::kNoThrow | Operator::kNoDeopt | Operator::kNoWrite,
-+      "LoadRegionField", 1, 1, 1, 1, 1, 0, index);
++      "LoadRegionField", 1, 1, 1, 1, 1, 0,
++      RegionAccessParameters(index, check_access));
 +}
 +
-+const Operator* SimplifiedOperatorBuilder::StoreRegionField(int index) {
-+  return zone()->New<Operator1<int>>(
++const Operator* SimplifiedOperatorBuilder::StoreRegionField(int index,
++                                                            bool check_access) {
++  return zone()->New<Operator1<RegionAccessParameters>>(
 +      IrOpcode::kStoreRegionField, Operator::kNoThrow | Operator::kNoDeopt,
-+      "StoreRegionField", 2, 1, 1, 1, 1, 0, index);
++      "StoreRegionField", 2, 1, 1, 1, 1, 0,
++      RegionAccessParameters(index, check_access));
 +}
 +
-+const Operator* SimplifiedOperatorBuilder::LoadRegionElement() {
-+  return zone()->New<Operator>(
++const Operator* SimplifiedOperatorBuilder::LoadRegionElement(
++    bool check_access) {
++  return zone()->New<Operator1<RegionAccessParameters>>(
 +      IrOpcode::kLoadRegionElement,
 +      Operator::kNoThrow | Operator::kNoDeopt | Operator::kNoWrite,
-+      "LoadRegionElement", 2, 1, 1, 1, 1, 0);
++      "LoadRegionElement", 2, 1, 1, 1, 1, 0,
++      RegionAccessParameters(-1, check_access));
 +}
 +
-+const Operator* SimplifiedOperatorBuilder::StoreRegionElement() {
-+  return zone()->New<Operator>(
++const Operator* SimplifiedOperatorBuilder::StoreRegionElement(
++    bool check_access) {
++  return zone()->New<Operator1<RegionAccessParameters>>(
 +      IrOpcode::kStoreRegionElement, Operator::kNoThrow | Operator::kNoDeopt,
-+      "StoreRegionElement", 3, 1, 1, 1, 1, 0);
++      "StoreRegionElement", 3, 1, 1, 1, 1, 0,
++      RegionAccessParameters(-1, check_access));
++}
++
++const Operator* SimplifiedOperatorBuilder::CheckRegionAccess(
++    bool for_write, const FeedbackSource& feedback) {
++  return zone()->New<Operator1<CheckRegionAccessParameters>>(
++      IrOpcode::kCheckRegionAccess, Operator::kNoThrow | Operator::kNoWrite,
++      "CheckRegionAccess", 1, 1, 1, 0, 1, 0,
++      CheckRegionAccessParameters(for_write, feedback));
 +}
 +
  int FormalParameterCountOf(const Operator* op) {
    DCHECK(op->opcode() == IrOpcode::kArgumentsLength ||
           op->opcode() == IrOpcode::kRestLength);
 diff --git a/src/compiler/simplified-operator.h b/src/compiler/simplified-operator.h
-index 2e47ad4d..93cfbcb2 100644
+index 2e47ad4d..6ac3227b 100644
 --- a/src/compiler/simplified-operator.h
 +++ b/src/compiler/simplified-operator.h
-@@ -757,6 +757,8 @@ bool operator==(SpeculativeBigIntAsNParameters const&,
+@@ -757,6 +757,51 @@ bool operator==(SpeculativeBigIntAsNParameters const&,
  const SpeculativeBigIntAsNParameters& SpeculativeBigIntAsNParametersOf(
      const Operator* op) V8_WARN_UNUSED_RESULT;
  
-+int RegionFieldIndexOf(const Operator* op) V8_WARN_UNUSED_RESULT;
++// Parameters of LoadRegionField, StoreRegionField, LoadRegionElement and
++// StoreRegionElement: the position in values() for a field, and whether the
++// operator itself checks that this isolate may access the region. It does not
++// when a CheckRegionAccess on the same object comes before it.
++class RegionAccessParameters final {
++ public:
++  RegionAccessParameters(int index, bool check_access)
++      : index_(index), check_access_(check_access) {}
++
++  int index() const { return index_; }
++  bool check_access() const { return check_access_; }
++
++ private:
++  int index_;
++  bool check_access_;
++};
++
++bool operator==(RegionAccessParameters const&, RegionAccessParameters const&);
++size_t hash_value(RegionAccessParameters const&);
++std::ostream& operator<<(std::ostream&, RegionAccessParameters const&);
++RegionAccessParameters const& RegionAccessParametersOf(const Operator* op)
++    V8_WARN_UNUSED_RESULT;
++
++// Parameters of CheckRegionAccess: whether the access writes, and the feedback
++// that a deoptimization updates.
++class CheckRegionAccessParameters final {
++ public:
++  CheckRegionAccessParameters(bool for_write, const FeedbackSource& feedback)
++      : for_write_(for_write), feedback_(feedback) {}
++
++  bool for_write() const { return for_write_; }
++  FeedbackSource const& feedback() const { return feedback_; }
++
++ private:
++  bool for_write_;
++  FeedbackSource feedback_;
++};
++
++bool operator==(CheckRegionAccessParameters const&,
++                CheckRegionAccessParameters const&);
++size_t hash_value(CheckRegionAccessParameters const&);
++std::ostream& operator<<(std::ostream&, CheckRegionAccessParameters const&);
++CheckRegionAccessParameters const& CheckRegionAccessParametersOf(
++    const Operator* op) V8_WARN_UNUSED_RESULT;
 +
  int FormalParameterCountOf(const Operator* op) V8_WARN_UNUSED_RESULT;
  
  class AllocateParameters {
-@@ -1252,6 +1254,18 @@ class V8_EXPORT_PRIVATE SimplifiedOperatorBuilder final
+@@ -1252,6 +1297,25 @@ class V8_EXPORT_PRIVATE SimplifiedOperatorBuilder final
    const Operator* StoreMessage();
  
    const Operator* LoadFieldByIndex();
@@ -1652,21 +2091,37 @@ index 2e47ad4d..93cfbcb2 100644
 +  // store values()[index] of a region object, where index comes from the
 +  // inline cache handler (LoadHandler::kRegionArrayLengthIndex loads the
 +  // length of an array), and elements of a region array. They check that
-+  // this isolate may access the region and that the value can be used as it
-+  // is. When it can't, a load returns the hole and a store returns false,
-+  // without side effects, and the caller takes the generic path.
-+  const Operator* LoadRegionField(int index);
-+  const Operator* StoreRegionField(int index);
-+  const Operator* LoadRegionElement();
-+  const Operator* StoreRegionElement();
++  // this isolate may access the region (unless {check_access} is false) and
++  // that the value can be used as it is. When it can't, a load returns the
++  // hole and a store returns false, without side effects, and the caller
++  // takes the generic path or deoptimizes.
++  const Operator* LoadRegionField(int index, bool check_access);
++  const Operator* StoreRegionField(int index, bool check_access);
++  const Operator* LoadRegionElement(bool check_access);
++  const Operator* StoreRegionElement(bool check_access);
++  // Deoptimizes unless this isolate may read (or write) the region of the
++  // object. Only the isolate itself can take that right away from itself, by
++  // calling into the runtime, so RedundancyElimination drops a repeated check
++  // of the same object unless something in between may call.
++  const Operator* CheckRegionAccess(bool for_write,
++                                    const FeedbackSource& feedback);
    const Operator* LoadDictionaryField(InternalIndex dictionary_index,
                                        NameRef name,
                                        const FeedbackSource& feedback,
 diff --git a/src/compiler/turbofan-typer.cc b/src/compiler/turbofan-typer.cc
-index e52c358e..cea2a74b 100644
+index e52c358e..3dc8af36 100644
 --- a/src/compiler/turbofan-typer.cc
 +++ b/src/compiler/turbofan-typer.cc
-@@ -2592,6 +2592,22 @@ Type Typer::Visitor::TypeLoadFieldByIndex(Node* node) {
+@@ -2473,6 +2473,8 @@ Type Typer::Visitor::TypeCheckHeapObject(Node* node) {
+ 
+ Type Typer::Visitor::TypeCheckIf(Node* node) { UNREACHABLE(); }
+ 
++Type Typer::Visitor::TypeCheckRegionAccess(Node* node) { UNREACHABLE(); }
++
+ Type Typer::Visitor::TypeCheckInternalizedString(Node* node) {
+   Type arg = Operand(node, 0);
+   return Type::Intersect(arg, Type::InternalizedString(), zone());
+@@ -2592,6 +2594,22 @@ Type Typer::Visitor::TypeLoadFieldByIndex(Node* node) {
    return Type::NonInternal();
  }
  
@@ -1703,7 +2158,7 @@ index f7525792..70305f25 100644
      case JS_ARRAY_ITERATOR_TYPE:
      case JS_REG_EXP_TYPE:
 diff --git a/src/compiler/turboshaft/graph-builder.cc b/src/compiler/turboshaft/graph-builder.cc
-index 568f11e8..518d2cad 100644
+index 568f11e8..f6a7e862 100644
 --- a/src/compiler/turboshaft/graph-builder.cc
 +++ b/src/compiler/turboshaft/graph-builder.cc
 @@ -47,7 +47,9 @@
@@ -1716,7 +2171,7 @@ index 568f11e8..518d2cad 100644
  #include "src/objects/map.h"
  #include "src/zone/zone-containers.h"
  
-@@ -243,6 +245,124 @@ struct GraphBuilder {
+@@ -243,6 +245,199 @@ struct GraphBuilder {
    TurnTaggedSignedInputIntoSmi(OpIndex value, MemoryRepresentation rep,
                                 WriteBarrierKind write_barrier);
  
@@ -1831,142 +2286,198 @@ index 568f11e8..518d2cad 100644
 +                                       offsetof(JSRegionObject, values_)));
 +  }
 +
-+  V<Object> BuildLoadRegionField(V<HeapObject> object, int index);
-+  V<Word32> BuildStoreRegionField(V<HeapObject> object, int index,
-+                                  V<Object> value);
-+  V<Object> BuildLoadRegionElement(V<HeapObject> object, V<Object> key);
++  // 1 if the access needn't check the region (a CheckRegionAccess did).
++  V<Word32> RegionAccessAllowedIf(bool check_access, V<Smi> region,
++                                  bool for_write) {
++    return check_access ? RegionAccessAllowed(region, for_write)
++                        : __ Word32Constant(1);
++  }
++
++  // The array part of a region object: whether it is an array, its length
++  // and values(). These are loaded before the checks, so that in a loop
++  // without calls load elimination can keep them from the peeled iteration.
++  struct RegionArray {
++    V<Word32> is_array;
++    V<WordPtr> length;
++    V<FixedArray> values;
++    V<WordPtr> capacity;
++  };
++  RegionArray LoadRegionArray(V<HeapObject> object) {
++    V<Object> keys = V<Object>::Cast(
++        __ Load(object, LoadOp::Kind::TaggedBase(),
++                MemoryRepresentation::AnyTagged(),
++                offsetof(JSRegionObject, keys_)));
++    V<FixedArray> values = LoadRegionValues(object);
++    return {
++        __ TaggedEqual(keys,
++                       __ HeapConstant(isolate->factory()->undefined_value())),
++        __ ChangeInt32ToIntPtr(__ UntagSmi(V<Smi>::Cast(
++            __ Load(object, LoadOp::Kind::TaggedBase(),
++                    MemoryRepresentation::TaggedSigned(),
++                    offsetof(JSRegionObject, array_length_))))),
++        values,
++        __ ChangeUint32ToUintPtr(__ Load(values, LoadOp::Kind::TaggedBase(),
++                                         MemoryRepresentation::Uint32(),
++                                         FixedArrayBase::kLengthOffset))};
++  }
++
++  V<Object> BuildLoadRegionField(V<HeapObject> object,
++                                 const RegionAccessParameters& params);
++  // {value_type} is what Turbofan knows about the stored value: a Smi or an
++  // oddball needs no storability check.
++  V<Word32> RegionValueStorableIf(compiler::Type value_type, V<Smi> region,
++                                  V<Object> value) {
++    if (value_type.Is(compiler::Type::SignedSmall()) ||
++        value_type.Is(compiler::Type::BooleanOrNullOrUndefined())) {
++      return __ Word32Constant(1);
++    }
++    return RegionValueStorable(region, value);
++  }
++  static WriteBarrierKind RegionWriteBarrier(compiler::Type value_type) {
++    return value_type.Is(compiler::Type::SignedSmall())
++               ? WriteBarrierKind::kNoWriteBarrier
++               : WriteBarrierKind::kFullWriteBarrier;
++  }
++  static compiler::Type TypeOfStoredValue(Node* value) {
++    // Representation selection puts untyped conversions to tagged in front
++    // of the value; they keep the value of a number.
++    switch (value->opcode()) {
++      case IrOpcode::kChangeInt31ToTaggedSigned:
++        return compiler::Type::SignedSmall();
++      case IrOpcode::kChangeInt32ToTagged:
++      case IrOpcode::kChangeUint32ToTagged:
++      case IrOpcode::kChangeInt64ToTagged:
++      case IrOpcode::kChangeUint64ToTagged:
++      case IrOpcode::kChangeBitToTagged:
++        if (!NodeProperties::IsTyped(value)) value = value->InputAt(0);
++        break;
++      default:
++        break;
++    }
++    return NodeProperties::IsTyped(value) ? NodeProperties::GetType(value)
++                                          : compiler::Type::Any();
++  }
++
++  V<Word32> BuildStoreRegionField(V<HeapObject> object,
++                                  const RegionAccessParameters& params,
++                                  V<Object> value, compiler::Type value_type);
++  V<Object> BuildLoadRegionElement(V<HeapObject> object, V<Object> key,
++                                   const RegionAccessParameters& params);
 +  V<Word32> BuildStoreRegionElement(V<HeapObject> object, V<Object> key,
-+                                    V<Object> value);
++                                    V<Object> value,
++                                    const RegionAccessParameters& params,
++                                    compiler::Type value_type);
 +
    OpIndex Process(Node* node, BasicBlock* block,
                    const base::SmallVector<int, 16>& predecessor_permutation,
                    V<EagerFrameState>& dominating_frame_state,
-@@ -432,6 +552,133 @@ GraphBuilder::TurnTaggedSignedInputIntoSmi(OpIndex value,
+@@ -432,6 +627,114 @@ GraphBuilder::TurnTaggedSignedInputIntoSmi(OpIndex value,
    return {value, rep, write_barrier};
  }
  
-+V<Object> GraphBuilder::BuildLoadRegionField(V<HeapObject> object,
-+                                             int index) {
++V<Object> GraphBuilder::BuildLoadRegionField(
++    V<HeapObject> object, const RegionAccessParameters& params) {
 +  Variable result = __ NewVariable(RegisterRepresentation::Tagged());
 +  __ SetVariable(result, __ HeapConstant(isolate->factory()->the_hole_value()));
-+  IF (LIKELY(RegionAccessAllowed(LoadRegionId(object), false))) {
-+    if (index == static_cast<int>(LoadHandler::kRegionArrayLengthIndex)) {
-+      __ SetVariable(result,
-+                     __ Load(object, LoadOp::Kind::TaggedBase(),
-+                             MemoryRepresentation::TaggedSigned(),
-+                             offsetof(JSRegionObject, array_length_)));
-+    } else {
-+      // The map fixes the keys, so every object with it has this index.
-+      V<Object> value = V<Object>::Cast(
-+          __ Load(LoadRegionValues(object), LoadOp::Kind::TaggedBase(),
-+                  MemoryRepresentation::AnyTagged(),
-+                  FixedArray::OffsetOfElementAt(index)));
++  if (params.index() == static_cast<int>(LoadHandler::kRegionArrayLengthIndex)) {
++    V<Object> length = V<Object>::Cast(
++        __ Load(object, LoadOp::Kind::TaggedBase(),
++                MemoryRepresentation::TaggedSigned(),
++                offsetof(JSRegionObject, array_length_)));
++    IF (LIKELY(RegionAccessAllowedIf(params.check_access(),
++                                     LoadRegionId(object), false))) {
++      __ SetVariable(result, length);
++    }
++  } else {
++    // The map fixes the keys, so every object with it has this index.
++    V<Object> value = V<Object>::Cast(
++        __ Load(LoadRegionValues(object), LoadOp::Kind::TaggedBase(),
++                MemoryRepresentation::AnyTagged(),
++                FixedArray::OffsetOfElementAt(params.index())));
++    IF (LIKELY(RegionAccessAllowedIf(params.check_access(),
++                                     LoadRegionId(object), false))) {
 +      __ SetVariable(result, RegionValueOrHole(value));
 +    }
 +  }
 +  return V<Object>::Cast(__ GetVariable(result));
 +}
 +
-+V<Word32> GraphBuilder::BuildStoreRegionField(V<HeapObject> object, int index,
-+                                              V<Object> value) {
++V<Word32> GraphBuilder::BuildStoreRegionField(
++    V<HeapObject> object, const RegionAccessParameters& params,
++    V<Object> value, compiler::Type value_type) {
 +  Variable done = __ NewVariable(RegisterRepresentation::Word32());
 +  __ SetVariable(done, __ Word32Constant(0));
 +  V<Smi> region = LoadRegionId(object);
-+  IF (LIKELY(RegionAccessAllowed(region, true))) {
-+    IF (LIKELY(RegionValueStorable(region, value))) {
-+      __ Store(LoadRegionValues(object), value, StoreOp::Kind::TaggedBase(),
-+               MemoryRepresentation::AnyTagged(),
-+               WriteBarrierKind::kFullWriteBarrier,
-+               FixedArray::OffsetOfElementAt(index));
-+      __ SetVariable(done, __ Word32Constant(1));
-+    }
++  V<FixedArray> values = LoadRegionValues(object);
++  IF (LIKELY(__ Word32BitwiseAnd(
++          RegionAccessAllowedIf(params.check_access(), region, true),
++          RegionValueStorableIf(value_type, region, value)))) {
++    __ Store(values, value, StoreOp::Kind::TaggedBase(),
++             MemoryRepresentation::AnyTagged(), RegionWriteBarrier(value_type),
++             FixedArray::OffsetOfElementAt(params.index()));
++    __ SetVariable(done, __ Word32Constant(1));
 +  }
 +  return V<Word32>::Cast(__ GetVariable(done));
 +}
 +
-+V<Object> GraphBuilder::BuildLoadRegionElement(V<HeapObject> object,
-+                                               V<Object> key) {
++V<Object> GraphBuilder::BuildLoadRegionElement(
++    V<HeapObject> object, V<Object> key, const RegionAccessParameters& params) {
 +  Variable result = __ NewVariable(RegisterRepresentation::Tagged());
 +  __ SetVariable(result, __ HeapConstant(isolate->factory()->the_hole_value()));
++  // Only arrays map element indices to values(); a reader of a frozen array
++  // may race with a thaw that replaces values() (see tests/thaw-race.js), so
++  // the index is checked against both lengths.
++  RegionArray array = LoadRegionArray(object);
 +  IF (LIKELY(__ IsSmi(key))) {
 +    V<WordPtr> index = __ ChangeInt32ToIntPtr(__ UntagSmi(V<Smi>::Cast(key)));
-+    IF (LIKELY(RegionAccessAllowed(LoadRegionId(object), false))) {
-+      // Only arrays map element indices to values(); a reader of a frozen
-+      // array may race with a thaw that replaces values() (see
-+      // tests/thaw-race.js), so the index is checked against both lengths.
-+      V<Object> keys = V<Object>::Cast(
-+          __ Load(object, LoadOp::Kind::TaggedBase(),
++    IF (LIKELY(__ Word32BitwiseAnd(
++            __ Word32BitwiseAnd(
++                RegionAccessAllowedIf(params.check_access(),
++                                      LoadRegionId(object), false),
++                array.is_array),
++            __ Word32BitwiseAnd(__ UintPtrLessThan(index, array.length),
++                                __ UintPtrLessThan(index, array.capacity))))) {
++      V<Object> value = V<Object>::Cast(
++          __ Load(array.values, index, LoadOp::Kind::TaggedBase(),
 +                  MemoryRepresentation::AnyTagged(),
-+                  offsetof(JSRegionObject, keys_)));
-+      IF (LIKELY(__ TaggedEqual(
-+              keys, __ HeapConstant(isolate->factory()->undefined_value())))) {
-+        V<WordPtr> length = __ ChangeInt32ToIntPtr(__ UntagSmi(V<Smi>::Cast(
-+            __ Load(object, LoadOp::Kind::TaggedBase(),
-+                    MemoryRepresentation::TaggedSigned(),
-+                    offsetof(JSRegionObject, array_length_)))));
-+        V<FixedArray> values = LoadRegionValues(object);
-+        V<WordPtr> capacity = __ ChangeUint32ToUintPtr(
-+            __ Load(values, LoadOp::Kind::TaggedBase(),
-+                    MemoryRepresentation::Uint32(),
-+                    FixedArrayBase::kLengthOffset));
-+        IF (LIKELY(__ Word32BitwiseAnd(__ UintPtrLessThan(index, length),
-+                                       __ UintPtrLessThan(index, capacity)))) {
-+          V<Object> value = V<Object>::Cast(
-+              __ Load(values, index, LoadOp::Kind::TaggedBase(),
-+                      MemoryRepresentation::AnyTagged(),
-+                      OFFSET_OF_DATA_START(FixedArray), kTaggedSizeLog2));
-+          __ SetVariable(result, RegionValueOrHole(value));
-+        }
-+      }
++                  OFFSET_OF_DATA_START(FixedArray), kTaggedSizeLog2));
++      __ SetVariable(result, RegionValueOrHole(value));
 +    }
 +  }
 +  return V<Object>::Cast(__ GetVariable(result));
 +}
 +
-+V<Word32> GraphBuilder::BuildStoreRegionElement(V<HeapObject> object,
-+                                                V<Object> key,
-+                                                V<Object> value) {
++V<Word32> GraphBuilder::BuildStoreRegionElement(
++    V<HeapObject> object, V<Object> key, V<Object> value,
++    const RegionAccessParameters& params, compiler::Type value_type) {
 +  Variable done = __ NewVariable(RegisterRepresentation::Word32());
 +  __ SetVariable(done, __ Word32Constant(0));
++  V<Smi> region = LoadRegionId(object);
++  RegionArray array = LoadRegionArray(object);
 +  IF (LIKELY(__ IsSmi(key))) {
 +    V<WordPtr> index = __ ChangeInt32ToIntPtr(__ UntagSmi(V<Smi>::Cast(key)));
-+    V<Smi> region = LoadRegionId(object);
-+    IF (LIKELY(__ Word32BitwiseAnd(RegionAccessAllowed(region, true),
-+                                   RegionValueStorable(region, value)))) {
-+      V<Object> keys = V<Object>::Cast(
-+          __ Load(object, LoadOp::Kind::TaggedBase(),
-+                  MemoryRepresentation::AnyTagged(),
-+                  offsetof(JSRegionObject, keys_)));
-+      IF (LIKELY(__ TaggedEqual(
-+              keys, __ HeapConstant(isolate->factory()->undefined_value())))) {
-+        V<WordPtr> length = __ ChangeInt32ToIntPtr(__ UntagSmi(V<Smi>::Cast(
-+            __ Load(object, LoadOp::Kind::TaggedBase(),
-+                    MemoryRepresentation::TaggedSigned(),
-+                    offsetof(JSRegionObject, array_length_)))));
-+        V<FixedArray> values = LoadRegionValues(object);
-+        V<WordPtr> capacity = __ ChangeUint32ToUintPtr(
-+            __ Load(values, LoadOp::Kind::TaggedBase(),
-+                    MemoryRepresentation::Uint32(),
-+                    FixedArrayBase::kLengthOffset));
-+        // In bounds, or one past the end while there is room, as push() does.
-+        IF (LIKELY(__ Word32BitwiseAnd(
-+                __ UintPtrLessThanOrEqual(index, length),
-+                __ UintPtrLessThan(index, capacity)))) {
-+          __ Store(values, index, value, StoreOp::Kind::TaggedBase(),
-+                   MemoryRepresentation::AnyTagged(),
-+                   WriteBarrierKind::kFullWriteBarrier,
-+                   OFFSET_OF_DATA_START(FixedArray), kTaggedSizeLog2);
-+          IF (__ WordPtrEqual(index, length)) {
-+            __ Store(object, __ TagSmi(__ TruncateWordPtrToWord32(
-+                                 __ WordPtrAdd(index, 1))),
-+                     StoreOp::Kind::TaggedBase(),
-+                     MemoryRepresentation::TaggedSigned(),
-+                     WriteBarrierKind::kNoWriteBarrier,
-+                     offsetof(JSRegionObject, array_length_));
-+          }
-+          __ SetVariable(done, __ Word32Constant(1));
-+        }
++    // In bounds, or one past the end while there is room, as push() does.
++    IF (LIKELY(__ Word32BitwiseAnd(
++            __ Word32BitwiseAnd(
++                __ Word32BitwiseAnd(
++                    RegionAccessAllowedIf(params.check_access(), region, true),
++                    array.is_array),
++                RegionValueStorableIf(value_type, region, value)),
++            __ Word32BitwiseAnd(
++                __ UintPtrLessThanOrEqual(index, array.length),
++                __ UintPtrLessThan(index, array.capacity))))) {
++      __ Store(array.values, index, value, StoreOp::Kind::TaggedBase(),
++               MemoryRepresentation::AnyTagged(), RegionWriteBarrier(value_type),
++               OFFSET_OF_DATA_START(FixedArray), kTaggedSizeLog2);
++      IF (__ WordPtrEqual(index, array.length)) {
++        __ Store(object,
++                 __ TagSmi(__ TruncateWordPtrToWord32(__ WordPtrAdd(index, 1))),
++                 StoreOp::Kind::TaggedBase(),
++                 MemoryRepresentation::TaggedSigned(),
++                 WriteBarrierKind::kNoWriteBarrier,
++                 offsetof(JSRegionObject, array_length_));
 +      }
++      __ SetVariable(done, __ Word32Constant(1));
 +    }
 +  }
 +  return V<Word32>::Cast(__ GetVariable(done));
@@ -1975,24 +2486,39 @@ index 568f11e8..518d2cad 100644
  OpIndex GraphBuilder::Process(
      Node* node, BasicBlock* block,
      const base::SmallVector<int, 16>& predecessor_permutation,
-@@ -2232,6 +2479,21 @@ OpIndex GraphBuilder::Process(
+@@ -2232,6 +2535,36 @@ OpIndex GraphBuilder::Process(
        return __ CheckedClosure(Map(node->InputAt(0)), dominating_frame_state,
                                 FeedbackCellOf(node->op()));
  
 +    case IrOpcode::kLoadRegionField:
 +      return BuildLoadRegionField(Map<HeapObject>(node->InputAt(0)),
-+                                  RegionFieldIndexOf(node->op()));
++                                  RegionAccessParametersOf(node->op()));
 +    case IrOpcode::kStoreRegionField:
 +      return BuildStoreRegionField(Map<HeapObject>(node->InputAt(0)),
-+                                   RegionFieldIndexOf(node->op()),
-+                                   Map<Object>(node->InputAt(1)));
++                                   RegionAccessParametersOf(node->op()),
++                                   Map<Object>(node->InputAt(1)),
++                                   TypeOfStoredValue(node->InputAt(1)));
 +    case IrOpcode::kLoadRegionElement:
 +      return BuildLoadRegionElement(Map<HeapObject>(node->InputAt(0)),
-+                                    Map<Object>(node->InputAt(1)));
++                                    Map<Object>(node->InputAt(1)),
++                                    RegionAccessParametersOf(node->op()));
 +    case IrOpcode::kStoreRegionElement:
 +      return BuildStoreRegionElement(Map<HeapObject>(node->InputAt(0)),
 +                                     Map<Object>(node->InputAt(1)),
-+                                     Map<Object>(node->InputAt(2)));
++                                     Map<Object>(node->InputAt(2)),
++                                     RegionAccessParametersOf(node->op()),
++                                     TypeOfStoredValue(node->InputAt(2)));
++    case IrOpcode::kCheckRegionAccess: {
++      DCHECK(dominating_frame_state.valid());
++      const CheckRegionAccessParameters& params =
++          CheckRegionAccessParametersOf(node->op());
++      V<HeapObject> object = Map<HeapObject>(node->InputAt(0));
++      __ DeoptimizeIfNot(
++          RegionAccessAllowed(LoadRegionId(object), params.for_write()),
++          dominating_frame_state, DeoptimizeReason::kRegionAccess,
++          params.feedback());
++      return OpIndex::Invalid();
++    }
 +
      case IrOpcode::kCheckEqualsSymbol:
        DCHECK(dominating_frame_state.valid());
@@ -2032,10 +2558,21 @@ index 4220021c..f984c75f 100644
                                  const maglev::ProcessingState& state) {
      SetMap(node, __ LoadFixedArrayElement(
 diff --git a/src/compiler/verifier.cc b/src/compiler/verifier.cc
-index 8aab5f56..b2e7c4d5 100644
+index 8aab5f56..0bc22f26 100644
 --- a/src/compiler/verifier.cc
 +++ b/src/compiler/verifier.cc
-@@ -1770,6 +1770,24 @@ void Verifier::Visitor::Check(Node* node, const AllNodes& all) {
+@@ -1613,6 +1613,10 @@ void Verifier::Visitor::Check(Node* node, const AllNodes& all) {
+       CheckValueInputIs(node, 0, Type::Boolean());
+       CheckNotTyped(node);
+       break;
++    case IrOpcode::kCheckRegionAccess:
++      CheckValueInputIs(node, 0, Type::Any());
++      CheckNotTyped(node);
++      break;
+     case IrOpcode::kCheckInternalizedString:
+       CheckValueInputIs(node, 0, Type::Any());
+       CheckTypeIs(node, Type::InternalizedString());
+@@ -1770,6 +1774,24 @@ void Verifier::Visitor::Check(Node* node, const AllNodes& all) {
        CheckValueInputIs(node, 1, Type::SignedSmall());
        CheckTypeIs(node, Type::NonInternal());
        break;
@@ -7792,6 +8329,18 @@ index 0c7ad50a..4a21d437 100644
    static Local<ObjectTemplate> CreateAsyncHookTemplate(Isolate* isolate);
    static Local<ObjectTemplate> CreatePerformanceTemplate(Isolate* isolate);
    static Local<ObjectTemplate> CreateRealmTemplate(Isolate* isolate);
+diff --git a/src/deoptimizer/deoptimize-reason.h b/src/deoptimizer/deoptimize-reason.h
+index b8e55445..c8b59d07 100644
+--- a/src/deoptimizer/deoptimize-reason.h
++++ b/src/deoptimizer/deoptimize-reason.h
+@@ -84,6 +84,7 @@ namespace internal {
+   V(OSREarlyExit, "exit from OSR'd inner loop")                                \
+   V(Overflow, "overflow")                                                      \
+   V(PrepareForOnStackReplacement, "prepare for on stack replacement (OSR)")    \
++  V(RegionAccess, "region access needs the generic path")                      \
+   V(Smi, "Smi")                                                                \
+   V(StoreToConstant, "Storing to a constant field")                            \
+   V(StringTooLarge, "Result string larger than String::kMaxLength")            \
 diff --git a/src/diagnostics/objects-debug.cc b/src/diagnostics/objects-debug.cc
 index 28f4d0c8..12ac3919 100644
 --- a/src/diagnostics/objects-debug.cc
@@ -7942,10 +8491,10 @@ index 793be1a7..38cae9e7 100644
    // Certain objects may be allocated in RO space if suitable for the snapshot.
    bool enable_ro_allocation_for_snapshot_ = false;
 diff --git a/src/flags/flag-definitions.h b/src/flags/flag-definitions.h
-index f47b7006..26056c20 100644
+index f47b7006..116537a2 100644
 --- a/src/flags/flag-definitions.h
 +++ b/src/flags/flag-definitions.h
-@@ -1306,6 +1306,17 @@ DEFINE_WEAK_IMPLICATION(trace_baseline, trace_baseline_batch_compilation)
+@@ -1306,6 +1306,20 @@ DEFINE_WEAK_IMPLICATION(trace_baseline, trace_baseline_batch_compilation)
  // Internalize into a shared string table in the shared isolate
  DEFINE_BOOL(shared_strings, false, "allow sharing of strings")
  DEFINE_IMPLICATION(shared_strings, shared_heap)
@@ -7960,6 +8509,9 @@ index f47b7006..26056c20 100644
 +DEFINE_IMPLICATION(harmony_region_literals, harmony_regions)
 +DEFINE_BOOL(inline_region_access, true,
 +            "inline loads and stores of region objects in Maglev and Turbofan")
++DEFINE_BOOL(region_loop_speculation, true,
++            "in Turbofan loops, check access to a region object once and "
++            "deoptimize instead of calling the inline cache")
  DEFINE_BOOL_READONLY(
      harmony_struct, false,
      "DEPRECATED. harmony structs, shared structs, and shared arrays")

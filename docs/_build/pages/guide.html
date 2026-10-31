@@ -85,7 +85,7 @@
 
 <div class="callout limit">
 <span class="callout-title">Про скорость</span>
-<p>Методы из <code>Array.prototype</code> (<code>map</code>, <code>filter</code>, <code>reduce</code>, <code>includes</code>), <code>for...of</code>, <code>Array.from</code> и spread массива читают массив региона напрямую и стоят почти столько же, сколько на обычном массиве. Доступ по индексу в цикле <code>for</code> медленнее обычного примерно в 3 раза: на каждом обращении проверяется владелец. Цифры — на страницах <a href="numbers.html#methods">«Цифры»</a> и <a href="practices.html#methods">«Как делать и как не делать»</a>.</p>
+<p>Методы из <code>Array.prototype</code> (<code>map</code>, <code>filter</code>, <code>reduce</code>, <code>includes</code>), <code>for...of</code>, <code>Array.from</code> и spread массива читают массив региона напрямую и стоят почти столько же, сколько на обычном массиве. Доступ по индексу в цикле <code>for</code> медленнее обычного примерно в 2 раза: владельца оптимизированный цикл проверяет один раз, но форма и индекс проверяются на каждом обращении. Цифры — на страницах <a href="numbers.html#methods">«Цифры»</a> и <a href="practices.html#methods">«Как делать и как не делать»</a>.</p>
 </div>
 
 <h2 id="not-allowed">Что нельзя положить в регион</h2>
