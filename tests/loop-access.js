@@ -19,6 +19,14 @@ const attempt = (fn) => {
     return e.message;
   }
 };
+// Only the error class: the message says whether the move has finished.
+const failure = (fn) => {
+  try {
+    return fn();
+  } catch (e) {
+    return e.name;
+  }
+};
 // 'optimized' unless Turbofan is on and the function is not optimized.
 const tier = (fn) =>
   !%IsTurbofanEnabled() || %ActiveTierIsTurbofan(fn) ? 'optimized' : 'deoptimized';
@@ -176,6 +184,66 @@ const worker = () => new Worker('onmessage = () => {};', { type: 'string' });
   freezeAt = -1;
   print('mixed loop, frozen:', frozen, bump(plain), JSON.stringify(a));
   r.thaw();
+}
+
+// An object read from a region object is in the same region, so one check
+// covers both. A call in the loop still takes that away.
+{
+  const w = worker();
+  const list = new Region().run(() => {
+    let head = null;
+    for (let i = 0; i < 8; i++) head = { v: i, next: head };
+    return head;
+  });
+  let moveAt = -1;
+  const maybeMove = (i) => {
+    if (i === moveAt) w.postMessage(list, [list]);
+  };
+  const walk = optimize((head) => {
+    let s = 0;
+    let i = 0;
+    for (let n = head; n !== null; n = n.next) {
+      maybeMove(i++);
+      s += n.v;
+    }
+    return s;
+  }, list);
+  const quiet = optimize((head) => {
+    let s = 0;
+    for (let n = head; n !== null; n = n.next) s += n.v;
+    return s;
+  }, list);
+  print('list walk:', walk(list), quiet(list), tier(quiet));
+  moveAt = 4;
+  print('list walk, moved:', failure(() => walk(list)), failure(() => quiet(list)));
+  w.terminate();
+}
+
+// Objects of two regions in one loop: access to one says nothing about the
+// other.
+{
+  const w = worker();
+  const a = new Region().run(() => ({ v: 1, next: { v: 2, next: null } }));
+  const b = new Region().run(() => ({ v: 10, next: { v: 20, next: null } }));
+  const both = optimize((a, b, useB) => {
+    let s = a.v;
+    for (let n = useB ? b : a; n !== null; n = n.next) s += n.v;
+    return s;
+  }, a, b, true);
+  both(a, b, false);
+  const rows = new Region().run(() => [{ x: 1 }, { x: 2 }]);
+  const other = new Region().run(() => [{ x: 10 }, { x: 20 }]);
+  const pairs = optimize((p, q) => {
+    let s = 0;
+    for (let i = 0; i < p.length; i++) s += p[i].x + q[i].x;
+    return s;
+  }, rows, other);
+  print('two regions:', both(a, b, true), pairs(rows, other));
+  w.postMessage(b, [b]);
+  w.postMessage(other, [other]);
+  print('two regions, one moved:', both(a, b, false), failure(() => both(a, b, true)),
+        failure(() => pairs(rows, other)));
+  w.terminate();
 }
 
 // A try block in the loop catches the error.

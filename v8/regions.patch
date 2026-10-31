@@ -1686,7 +1686,7 @@ index 30fd3e16..f954a5c5 100644
    V(StoreToObject)                          \
    V(StoreTypedElement)                      \
 diff --git a/src/compiler/redundancy-elimination.cc b/src/compiler/redundancy-elimination.cc
-index 64d01b3e..44718192 100644
+index 64d01b3e..84b992db 100644
 --- a/src/compiler/redundancy-elimination.cc
 +++ b/src/compiler/redundancy-elimination.cc
 @@ -17,6 +17,7 @@ RedundancyElimination::RedundancyElimination(Editor* editor, JSGraph* jsgraph,
@@ -1705,7 +1705,7 @@ index 64d01b3e..44718192 100644
      case IrOpcode::kCheckSmi:
      case IrOpcode::kCheckString:
      case IrOpcode::kCheckStringOrStringWrapper:
-@@ -177,10 +179,47 @@ struct Subsumption {
+@@ -177,10 +179,82 @@ struct Subsumption {
    const Operator* conversion_op_;
  };
  
@@ -1736,14 +1736,49 @@ index 64d01b3e..44718192 100644
 +  }
 +}
 +
++// The object whose region {node} is in, as far as the graph shows: {node}
++// itself, or the region object it was loaded from. A region object holds only
++// primitives and objects of its own region, and an object never changes its
++// region, so a value loaded from it is in the same region (if it is an object
++// at all). A phi whose inputs come from one object, or from the phi itself
++// (as in `for (n = head; n; n = n.next)`), is in the region of that object.
++Node* RegionOrigin(Node* node, Node* phi = nullptr, int depth = 0) {
++  while (true) {
++    switch (node->opcode()) {
++      case IrOpcode::kCheckHeapObject:
++      case IrOpcode::kFinishRegion:
++      case IrOpcode::kLoadRegionElement:
++      case IrOpcode::kLoadRegionField:
++      case IrOpcode::kTypeGuard:
++        node = node->InputAt(0);
++        break;
++      case IrOpcode::kPhi: {
++        if (node == phi || depth == 3) return node;
++        Node* origin = nullptr;
++        for (int i = 0; i < node->op()->ValueInputCount(); ++i) {
++          Node* input = RegionOrigin(node->InputAt(i), node, depth + 1);
++          if (input == node) continue;
++          if (origin != nullptr && origin != input) return node;
++          origin = input;
++        }
++        return origin != nullptr ? origin : node;
++      }
++      default:
++        return node;
++    }
++  }
++}
++
  // Does check {a} subsume check {b}?
  Subsumption CheckSubsumes(Node const* a, Node const* b,
                            MachineOperatorBuilder* machine) {
    Subsumption subsumption = Subsumption::Implicit();
 +  if (a->opcode() == IrOpcode::kCheckRegionAccess ||
 +      b->opcode() == IrOpcode::kCheckRegionAccess) {
-+    // Access to write implies access to read.
-+    if (a->opcode() != b->opcode() || a->InputAt(0) != b->InputAt(0) ||
++    // Access depends only on the region, so a check covers every object of
++    // the same region. Access to write implies access to read.
++    if (a->opcode() != b->opcode() ||
++        RegionOrigin(a->InputAt(0)) != RegionOrigin(b->InputAt(0)) ||
 +        (!CheckRegionAccessParametersOf(a->op()).for_write() &&
 +         CheckRegionAccessParametersOf(b->op()).for_write())) {
 +      return Subsumption::None();
@@ -1753,7 +1788,7 @@ index 64d01b3e..44718192 100644
    if (a->op() != b->op()) {
      if (a->opcode() == IrOpcode::kCheckInternalizedString &&
          b->opcode() == IrOpcode::kCheckString) {
-@@ -353,6 +392,31 @@ Node* RedundancyElimination::EffectPathChecks::LookupBoundsCheckFor(
+@@ -353,6 +427,31 @@ Node* RedundancyElimination::EffectPathChecks::LookupBoundsCheckFor(
    return nullptr;
  }
  
@@ -1785,7 +1820,7 @@ index 64d01b3e..44718192 100644
  RedundancyElimination::EffectPathChecks const*
  RedundancyElimination::PathChecksForEffectNodes::Get(Node* node) const {
    size_t const id = node->id();
-@@ -388,8 +452,14 @@ Reduction RedundancyElimination::ReduceEffectPhi(Node* node) {
+@@ -388,8 +487,14 @@ Reduction RedundancyElimination::ReduceEffectPhi(Node* node) {
    if (control->opcode() == IrOpcode::kLoop) {
      // Here we rely on having only reducible loops:
      // The loop entry edge always dominates the header, so we can just use
@@ -1802,7 +1837,7 @@ index 64d01b3e..44718192 100644
    }
    DCHECK_EQ(IrOpcode::kMerge, control->opcode());
  
-@@ -511,6 +581,12 @@ Reduction RedundancyElimination::ReduceStart(Node* node) {
+@@ -511,6 +616,12 @@ Reduction RedundancyElimination::ReduceStart(Node* node) {
  Reduction RedundancyElimination::ReduceOtherNode(Node* node) {
    if (node->op()->EffectInputCount() == 1) {
      if (node->op()->EffectOutputCount() == 1) {
@@ -1815,7 +1850,7 @@ index 64d01b3e..44718192 100644
        return TakeChecksFromFirstEffect(node);
      } else {
        // Effect terminators should be handled specially.
-@@ -522,6 +598,36 @@ Reduction RedundancyElimination::ReduceOtherNode(Node* node) {
+@@ -522,6 +633,36 @@ Reduction RedundancyElimination::ReduceOtherNode(Node* node) {
    return NoChange();
  }
  
