@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
-<meta name="description" content="Регионы владения: экспериментальный форк V8, в котором объекты переезжают между потоками без копирования.">
+<meta name="description" content="Регионы владения: экспериментальный форк V8 для параллельного JavaScript без копий. spawn, литералы в общей памяти, каналы и сравнение с tokio.">
 <title>Что это такое · Регионы владения в V8</title>
 <link rel="stylesheet" href="assets/style.css">
 </head>
@@ -21,8 +21,8 @@
 <li><a href="index.html" aria-current="page">Что это такое</a></li>
 <li><a href="problem.html">Зачем это нужно</a></li>
 <li><a href="ideas.html">Идея владения</a></li>
-<li><a href="guide.html">API шаг за шагом</a></li>
 <li><a href="spawn.html">spawn: задачи в потоках</a></li>
+<li><a href="guide.html">Данные в регионах</a></li>
 <li><a href="channels.html">Каналы</a></li>
 <li><a href="practices.html">Как делать и как не делать</a></li>
 <li><a href="tooling.html">Редактор и линтеры</a></li>
@@ -36,8 +36,8 @@
 <article class="content">
 <section class="hero">
 <p class="eyebrow">Эксперимент с движком V8</p>
-<h1>Регионы владения: объекты, которые переезжают между потоками без копирования</h1>
-<p class="lead">Это исследовательский форк V8. В нём обычные объекты и массивы можно сложить в «регион» и отдать воркеру за доли миллисекунды, сколько бы данных там ни было. Взамен у региона в каждый момент только один хозяин, и движок проверяет это при каждом обращении.</p>
+<h1>Параллельный JavaScript без копий</h1>
+<p class="lead">Это исследовательский форк V8. <code>spawn(fn)</code> запускает функцию в другом потоке одной строкой. Объекты, созданные с директивой <code>'use region'</code> или литералами <code>#{}</code>, сразу лежат в общей памяти и переходят между потоками без копирования, сколько бы их ни было. Взамен у данных в каждый момент один хозяин, и движок проверяет это при каждом обращении. Гонок данных нет.</p>
 </section>
 
 <div class="callout limit">
@@ -45,68 +45,91 @@
 <p>Всё это работает только в d8, тестовой оболочке V8. В браузере и в Node этого нет. Это прототип: его задача — проверить, можно ли так сделать вообще и сколько это стоит. Подробно об ограничениях — на <a href="limits.html">последней странице</a>.</p>
 </div>
 
-<h2>Пример: дерево из 131 тысячи узлов</h2>
-<p>Возьмём обычное дерево объектов и отправим его в воркер двумя способами. Сначала как сегодня: <code>postMessage</code> копирует всё дерево. Потом через регион: дерево лежит в общей памяти, и воркеру передаётся право им пользоваться.</p>
+<h2>Пример: заказы в четырёх потоках</h2>
+<p>Четыре задачи <code>spawn</code> собирают по 25 тысяч заказов. Из-за <code>'use region'</code> каждый <code>{}</code> и <code>[]</code> в функции создаётся прямо в общей памяти, в регионе задачи. Возвращённый массив уезжает к главному потоку вместе с регионом, ничего не копируется. Для сравнения то же самое делают обычные воркеры: <code>postMessage</code> копирует каждый заказ обратно.</p>
 
-<figure class="example"><div class="ex-head"><span class="file"><a href="examples/02-before-after.js">examples/02-before-after.js</a></span><button class="copy" type="button">Копировать</button></div><pre class="code"><code><span class="tok-comment">// До и после: одно и то же дерево отправляем в воркер копией и «переездом».</span>
-<span class="tok-keyword">const</span> build = (depth) =&gt;
-  depth === <span class="tok-number">0</span>
-    ? { value: <span class="tok-number">1</span>, left: <span class="tok-keyword">null</span>, right: <span class="tok-keyword">null</span> }
-    : { value: <span class="tok-number">1</span>, left: <span class="tok-fn">build</span>(depth - <span class="tok-number">1</span>), right: <span class="tok-fn">build</span>(depth - <span class="tok-number">1</span>) };
+<figure class="example"><div class="ex-head"><span class="file"><a href="examples/43-orders.js">examples/43-orders.js</a></span><button class="copy" type="button">Копировать</button></div><pre class="code"><code><span class="tok-comment">// d8-flags: --module --harmony-region-literals</span>
+<span class="tok-comment">// Четыре задачи spawn собирают 100 000 заказов. Объекты создаются сразу в общей</span>
+<span class="tok-comment">// памяти ('use region'), и главный поток получает их без копии.</span>
+<span class="tok-keyword">const</span> ORDERS = <span class="tok-number">100_000</span>;
+<span class="tok-keyword">const</span> TASKS = <span class="tok-number">4</span>;
 
-<span class="tok-keyword">const</span> worker = <span class="tok-keyword">new</span> <span class="tok-api">Worker</span>(
-  <span class="tok-string">`onmessage = ({ data }) =&gt; postMessage(data.tree.value)`</span>,
-  { type: <span class="tok-string">'string'</span> },
-);
-<span class="tok-keyword">const</span> roundTrip = (message, transfer) =&gt; {
-  <span class="tok-keyword">const</span> start = performance.<span class="tok-fn">now</span>();
-  worker.<span class="tok-api">postMessage</span>(message, transfer);
-  worker.<span class="tok-api">getMessage</span>();
-  <span class="tok-keyword">return</span> performance.<span class="tok-fn">now</span>() - start;
+<span class="tok-keyword">const</span> build = (from, to) =&gt; {
+  <span class="tok-string">'use region'</span>;
+  <span class="tok-keyword">using</span> _ = <span class="tok-keyword">new</span> <span class="tok-api">Region</span>().<span class="tok-api">enter</span>();
+  <span class="tok-keyword">const</span> orders = [];
+  <span class="tok-keyword">for</span> (<span class="tok-keyword">let</span> i = from; i &lt; to; i++) {
+    orders.<span class="tok-fn">push</span>({
+      id: i,
+      customer: { name: <span class="tok-string">'customer '</span> + (i % <span class="tok-number">1000</span>) },
+      items: [{ sku: <span class="tok-string">'sku '</span> + (i % <span class="tok-number">500</span>), qty: <span class="tok-number">1</span> + (i % <span class="tok-number">3</span>) }],
+    });
+  }
+  <span class="tok-keyword">return</span> orders; <span class="tok-comment">// уезжает к вызывающему вместе с регионом</span>
 };
 
-<span class="tok-keyword">const</span> plain = <span class="tok-fn">build</span>(<span class="tok-number">16</span>); <span class="tok-comment">// 131 071 узел</span>
-<span class="tok-fn">print</span>(<span class="tok-string">'узлов в дереве:'</span>, <span class="tok-number">2</span> ** <span class="tok-number">17</span> - <span class="tok-number">1</span>);
+<span class="tok-keyword">let</span> start = performance.<span class="tok-fn">now</span>();
+<span class="tok-keyword">const</span> parts = <span class="tok-keyword">await</span> Promise.<span class="tok-fn">all</span>(Array.<span class="tok-fn">from</span>({ length: TASKS }, (_, t) =&gt;
+  <span class="tok-api">spawn</span>(build, t * ORDERS / TASKS, (t + <span class="tok-number">1</span>) * ORDERS / TASKS)));
+<span class="tok-keyword">const</span> viaSpawn = performance.<span class="tok-fn">now</span>() - start;
+<span class="tok-keyword">let</span> qty = <span class="tok-number">0</span>;
+<span class="tok-keyword">for</span> (<span class="tok-keyword">const</span> part <span class="tok-keyword">of</span> parts) <span class="tok-keyword">for</span> (<span class="tok-keyword">const</span> order <span class="tok-keyword">of</span> part) qty += order.items[<span class="tok-number">0</span>].qty;
+<span class="tok-fn">print</span>(<span class="tok-string">`spawn: ${</span>parts.<span class="tok-fn">reduce</span>((n, p) =&gt; n + p.length, <span class="tok-number">0</span>)<span class="tok-string">} заказов, qty ${</span>qty<span class="tok-string">}, ${</span>viaSpawn.<span class="tok-fn">toFixed</span>(<span class="tok-number">0</span>)<span class="tok-string">} мс`</span>);
+<span class="tok-fn">print</span>(<span class="tok-string">'лежат в регионе:'</span>, <span class="tok-api">Region</span>.<span class="tok-fn">isRegionObject</span>(parts[<span class="tok-number">0</span>][<span class="tok-number">0</span>]), <span class="tok-string">'| владелец теперь главный поток:'</span>, <span class="tok-api">Region</span>.<span class="tok-keyword">of</span>(parts[<span class="tok-number">0</span>]).<span class="tok-api">owner</span>);
 
-<span class="tok-comment">// До: обычный postMessage делает structured clone всего дерева.</span>
-<span class="tok-fn">print</span>(<span class="tok-string">`копия (structured clone): ${</span><span class="tok-fn">roundTrip</span>({ tree: plain }).<span class="tok-fn">toFixed</span>(<span class="tok-number">2</span>)<span class="tok-string">} ms`</span>);
+<span class="tok-comment">// То же на обычных воркерах: postMessage копирует каждый заказ обратно.</span>
+<span class="tok-keyword">const</span> workers = Array.<span class="tok-fn">from</span>({ length: TASKS }, () =&gt; <span class="tok-keyword">new</span> <span class="tok-api">Worker</span>(<span class="tok-string">`onmessage = ({ data: [from, to] }) =&gt; {
+  const orders = [];
+  for (let i = from; i &lt; to; i++) {
+    orders.push({ id: i, customer: { name: 'customer ' + (i % 1000) },
+                  items: [{ sku: 'sku ' + (i % 500), qty: 1 + (i % 3) }] });
+  }
+  postMessage(orders);
+}`</span>, { type: <span class="tok-string">'string'</span> }));
+start = performance.<span class="tok-fn">now</span>();
+workers.<span class="tok-fn">forEach</span>((w, t) =&gt; w.<span class="tok-api">postMessage</span>([t * ORDERS / TASKS, (t + <span class="tok-number">1</span>) * ORDERS / TASKS]));
+<span class="tok-keyword">const</span> copies = workers.<span class="tok-fn">map</span>((w) =&gt; w.<span class="tok-api">getMessage</span>());
+<span class="tok-fn">print</span>(<span class="tok-string">`postMessage: ${</span>copies.<span class="tok-fn">reduce</span>((n, p) =&gt; n + p.length, <span class="tok-number">0</span>)<span class="tok-string">} заказов, ${</span>(performance.<span class="tok-fn">now</span>() - start).<span class="tok-fn">toFixed</span>(<span class="tok-number">0</span>)<span class="tok-string">} мс`</span>);
+<span class="tok-keyword">for</span> (<span class="tok-keyword">const</span> w <span class="tok-keyword">of</span> workers) w.<span class="tok-api">terminate</span>();</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8 --module --harmony-region-literals; время у вас будет другим</span></div><pre class="out">spawn: 100000 заказов, qty 199999, 18 мс
+лежат в регионе: true | владелец теперь главный поток: 0
+postMessage: 100000 заказов, 290 мс</pre></figure>
 
-<span class="tok-comment">// После: дерево лежит в регионе, регион передаётся в transfer list.</span>
-<span class="tok-keyword">const</span> region = <span class="tok-keyword">new</span> <span class="tok-api">Region</span>();
-<span class="tok-keyword">const</span> tree = region.<span class="tok-api">run</span>(() =&gt; plain); <span class="tok-comment">// одна копия при создании региона</span>
-<span class="tok-fn">print</span>(<span class="tok-string">`переезд региона:          ${</span><span class="tok-fn">roundTrip</span>({ tree }, [region]).<span class="tok-fn">toFixed</span>(<span class="tok-number">2</span>)<span class="tok-string">} ms`</span>);
+<p>Разница больше чем на порядок, и она растёт вместе с данными: копия стоит пропорционально числу объектов, а переезд региона — нет. Дерево из миллиона узлов переезжает за 0,12 мс, копия такого дерева через <code>postMessage</code> идёт почти секунду (<a href="numbers.html#move">замер</a>).</p>
+<p>Код задачи — обычный JavaScript. <code>'use region'</code> — это строка-директива, как <code>'use strict'</code>, поэтому TypeScript, ESLint и Biome читают такой код без расширений. Переменные, которые нужны задаче, <code>spawn</code> находит и передаёт сам.</p>
 
-<span class="tok-keyword">try</span> {
-  tree.value;
-} <span class="tok-keyword">catch</span> (e) {
-  <span class="tok-fn">print</span>(<span class="tok-string">'главный поток после переезда:'</span>, e.message);
-}
-worker.<span class="tok-api">terminate</span>();</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8; время у вас будет другим</span></div><pre class="out">узлов в дереве: 131071
-копия (structured clone): 122.61 ms
-переезд региона:          0.07 ms
-<span class="err">главный поток после переезда: OwnershipError: region 0 is owned by isolate 1, not by isolate 0</span></pre></figure>
-
-<p>Копия заняла больше сотни миллисекунд, переезд — сотые доли миллисекунды. И время переезда почти не растёт с размером: для дерева из миллиона узлов оно около 0,12 мс, а копия такого дерева идёт почти секунду.</p>
-<p>Посмотрите на последнюю строку. После переезда главный поток больше не может читать дерево, и движок выдаёт <code>OwnershipError</code>. Так и задумано: данные никто не копировал, и два потока не должны трогать их одновременно. Владелец один, и проверяет это сам движок, а не договорённость в команде.</p>
+<h2 id="tokio">Против tokio и обычных воркеров</h2>
+<p>Три жизненных сценария с заказами, каждый тремя способами: <code>spawn</code> с регионами, обычные воркеры с <code>postMessage</code> (так это делают в JS сегодня) и Rust с tokio. У всех четыре рабочих потока. V8 здесь собран без внутренних проверок, как tokio в release (<code>tests/bench-real.js</code> и <code>tests/tokio-bench</code>, лучший из пяти прогонов).</p>
+<div class="table-wrap">
+<table>
+<thead><tr><th>Сценарий</th><th><code>spawn</code> + регионы</th><th>воркеры + <code>postMessage</code></th><th>tokio</th></tr></thead>
+<tbody>
+<tr><td>Собрать 200 000 заказов в четырёх потоках и прочитать в главном</td><td>28 мс</td><td>215 мс</td><td>17 мс</td></tr>
+<tr><td>200 пачек по 1000 заказов: отдать потокам, посчитать скидку, вернуть</td><td>11 мс</td><td>301 мс</td><td>0,8 мс</td></tr>
+<tr><td>Каталог из 100 000 товаров: раздать четырём потокам, по миллиону чтений в каждом</td><td>21 мс</td><td>57 мс</td><td>1,6 мс</td></tr>
+</tbody>
+</table>
+</div>
+<p>Против сегодняшних воркеров регионы выигрывают от 2,7 до 27 раз: данные не копируются ни туда, ни обратно. До tokio пока далеко, от 2 до 14 раз. Rust читает поле структуры одной инструкцией, а мы на каждом обращении проверяем владельца. Задача tokio — конечный автомат в памяти того же потока, а задача <code>spawn</code> — сообщение другому изоляту V8. Ближе всего мы там, где много создают: строки и объекты в куче дороги и в Rust. Разбор по сценариям и тысяча пустых задач против tokio — на странице <a href="numbers.html#real">«Цифры»</a>.</p>
 
 <h2>Главные цифры</h2>
 <div class="stats">
+  <div class="stat"><span class="label">Запуск задачи spawn</span><span class="value">≈1 мкс</span><span class="detail">без внутренних проверок V8; с ними ≈3 мкс</span></div>
+  <div class="stat"><span class="label">Круг через канал</span><span class="value">≈1,1 мкс</span><span class="detail">столько же, сколько обмен сообщениями с воркером</span></div>
   <div class="stat"><span class="label">Переезд дерева из 1 млн узлов</span><span class="value">0,12 мс</span><span class="detail">копия через postMessage — 928 мс</span></div>
-  <div class="stat"><span class="label">Чтение одного дерева в 8 потоках</span><span class="value">×5,9</span><span class="detail">быстрее одного потока; быстрых ядер 6</span></div>
-  <div class="stat"><span class="label">Объект в воркер и обратно</span><span class="value">≈11 мкс</span><span class="detail">возвращается тот же самый объект</span></div>
-  <div class="stat"><span class="label">Запуск задачи spawn</span><span class="value">≈3 мкс</span><span class="detail">пул воркеров; без пула было ≈2,5 мс</span></div>
+  <div class="stat"><span class="label">Чтение одних данных в 8 потоках</span><span class="value">×5,9</span><span class="detail">быстрее одного потока; быстрых ядер 6</span></div>
 </div>
-<p>Цифры сняты на сборке с включёнными внутренними проверками, на Apple Silicon. Абсолютные значения на другой машине будут другими, смотреть стоит на соотношения. Подробности и графики — на странице <a href="numbers.html">«Цифры»</a>. Там же честно сказано, что пока медленнее обычного JS: запись в поля объектов региона дольше примерно в 1,7 раза, доступ к массиву региона по индексу — примерно в 3,3 раза.</p>
+<p>Цифры сняты на Apple Silicon. Абсолютные значения на другой машине будут другими, смотреть стоит на соотношения. Подробности и графики — на странице <a href="numbers.html">«Цифры»</a>. Там же честно сказано, что пока медленнее обычного JS: запись в поля объектов региона дольше примерно в 1,7 раза, доступ к массиву региона по индексу — примерно в 3 раза.</p>
 
 <h2>Что умеет прототип</h2>
 <ul>
-  <li><strong>Регион</strong> (<code>new Region()</code>, <code>region.run(fn)</code>) — группа обычных объектов, массивов, строк, чисел и типизированных массивов в общей памяти. Читать и писать может только владелец. Данные попадают в регион копией готового графа через <code>run</code> или по ходу работы: <code>Region.object()</code> и <code>Region.array()</code> внутри <code>region.enter()</code>, а под флагом <code>--harmony-region-literals</code> — литералами <code>#{...}</code> и <code>#[...]</code>, которые создают объект сразу в регионе, без копии. Массивы региона растут через <code>push</code>, у объектов набор полей фиксирован.</li>
-  <li><strong>Переезд</strong> (<code>worker.postMessage(msg, [region])</code>) — отдать регион другому потоку без копирования. Отправитель теряет доступ. <code>spawn</code> и каналы перемещают регионы сами, без списка transfer.</li>
-  <li><strong>Заморозка</strong> (<code>region.freeze()</code>, <code>region.borrow()</code>) — регион только для чтения, зато его могут читать все потоки сразу, взяв билет <code>borrow()</code>. Разморозить может тот, кто заморозил, и это право можно передать.</li>
-  <li><strong><code>spawn(fn)</code></strong> — запустить функцию в отдельном потоке одной строкой. Задачи идут в пул долгоживущих воркеров. Нужные функции переменные <code>spawn</code> находит сам, результат возвращается через регион. Ручку задачи ждут как промис, вложенные задачи заканчиваются раньше внешней, ошибки не теряются.</li>
-  <li><strong>Каналы</strong> (<code>new Channel()</code>, <code>send</code>, <code>recv</code>, <code>select</code>) — очереди между потоками, как в Go. Регион, отправленный в канал, переезжает без копии. Если все потоки ждут друг друга, ожидания заканчиваются ошибкой <code>DeadlockError</code> (<a href="channels.html#deadlock">подробнее</a>).</li>
-  <li><strong><code>RwLock</code></strong> (<code>new RwLock(data)</code>, <code>await lock.write()</code>, <code>await lock.read()</code>) — общие данные, которые потоки пишут по очереди или читают вместе. Ссылка, сохранённая после отпуска лока, перестаёт работать (<a href="channels.html#rwlock">подробнее</a>).</li>
-  <li><strong>Освобождение</strong> (<code>region.free()</code>, <code>using</code>) — отдать регион сразу, не дожидаясь сборщика мусора. После этого его объекты недоступны никому (<a href="guide.html#free">подробнее</a>).</li>
+  <li><strong><code>spawn(fn, ...args)</code></strong> — функция в отдельном потоке одной строкой. Задачи идут в пул долгоживущих воркеров, нужные переменные <code>spawn</code> находит сам, регионы перемещает туда и обратно без копии. Ручку задачи ждут как промис. Вложенные задачи заканчиваются раньше внешней, ошибки не теряются, есть отмена: <code>abort</code>, <code>timeout</code>, <code>JoinSet</code> (<a href="spawn.html">подробнее</a>).</li>
+  <li><strong>Данные сразу в общей памяти</strong> — <code>'use region'</code> в начале функции или файла делает каждый <code>{}</code> и <code>[]</code> объектом региона, литералы <code>#{...}</code> и <code>#[...]</code> делают то же точечно. Объект создаётся прямо в машинном коде, без промежуточной копии (<a href="guide.html#literals">подробнее</a>).</li>
+  <li><strong>Каналы</strong> (<code>new Channel()</code>, <code>send</code>, <code>recv</code>, <code>select</code>) — очереди между потоками, как в Go. Регион, отправленный в канал, переезжает без копии. Если все потоки ждут друг друга, ожидания заканчиваются ошибкой <code>DeadlockError</code> (<a href="channels.html">подробнее</a>).</li>
+  <li><strong><code>RwLock</code></strong> (<code>new RwLock(data)</code>, <code>await lock.write()</code>, <code>await lock.read()</code>) — общие данные, которые потоки пишут по очереди или читают вместе (<a href="channels.html#rwlock">подробнее</a>).</li>
+  <li><strong>Общие данные только для чтения</strong> — <code>Region.share(data)</code>, как <code>Arc&lt;T&gt;</code> в Rust: все потоки читают одни и те же объекты без копий и без блокировок (<a href="guide.html#share">подробнее</a>). Есть и временная заморозка с правом разморозить: <code>freeze()</code>, <code>borrow()</code>, <code>thaw()</code> (<a href="guide.html#freeze">подробнее</a>).</li>
+  <li><strong>Регион</strong> — группа обычных объектов, массивов, строк, чисел и типизированных массивов в общей памяти с одним владельцем. Кроме литералов, данные попадают в него копией готового графа через <code>region.run(fn)</code>. Массивы растут через <code>push</code>, у объектов набор полей фиксирован.</li>
+  <li><strong>Воркеры напрямую</strong> — <code>worker.postMessage(msg, [region])</code> отдаёт регион воркеру без копии. Это нижний уровень: <code>spawn</code> и каналы делают то же самое сами (<a href="guide.html#move">подробнее</a>).</li>
+  <li><strong>Освобождение</strong> (<code>region.free()</code>, <code>using</code>) — отдать регион сразу, не дожидаясь сборщика мусора (<a href="guide.html#free">подробнее</a>).</li>
   <li><strong>Песочница для редактора</strong> — типы и правила Biome и ESLint, которые подсвечивают типичные ошибки до запуска.</li>
 </ul>
 
@@ -114,12 +137,13 @@ worker.<span class="tok-api">terminate</span>();</code></pre><div class="out-hea
 <ul class="cards">
   <li><a href="problem.html"><strong>Зачем это нужно</strong>Почему JS однопоточный, что дают воркеры сегодня и где они неудобны.</a></li>
   <li><a href="ideas.html"><strong>Идея владения</strong>Ключи от квартиры, музейный экспонат и почему так не бывает гонок данных.</a></li>
-  <li><a href="guide.html"><strong>API шаг за шагом</strong>Каждая функция с примером и настоящим выводом.</a></li>
-  <li><a href="spawn.html"><strong>spawn</strong>Функция в отдельном потоке без ручной возни с воркером.</a></li>
+  <li><a href="spawn.html"><strong>spawn</strong>Функция в отдельном потоке, результат без копии, отмена и вложенные задачи.</a></li>
+  <li><a href="guide.html"><strong>Данные в регионах</strong>Литералы и <code>'use region'</code>, правила чтения и записи, общие данные, воркеры напрямую.</a></li>
   <li><a href="channels.html"><strong>Каналы</strong>Конвейеры и обмен данными между потоками по ходу работы.</a></li>
   <li><a href="practices.html"><strong>Как делать и как не делать</strong>Двенадцать приёмов, у большинства замер «плохо» против «хорошо».</a></li>
   <li><a href="tooling.html"><strong>Редактор и линтеры</strong>Типы, Biome и ESLint: что из ошибок видно до запуска.</a></li>
   <li><a href="inside.html"><strong>Как это устроено</strong>Общая куча, таблица владельцев и inline caches, без лишних подробностей.</a></li>
+  <li><a href="numbers.html"><strong>Цифры</strong>Сравнение с tokio и обычными воркерами, стоимость каждой операции.</a></li>
   <li><a href="limits.html"><strong>Ограничения и запуск</strong>Чего нет, что в планах и как попробовать самому.</a></li>
 </ul>
 <nav class="pager" aria-label="Соседние страницы"><a class="next" href="problem.html"><span>Дальше →</span>Зачем это нужно</a></nav>

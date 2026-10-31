@@ -21,8 +21,8 @@
 <li><a href="index.html">Что это такое</a></li>
 <li><a href="problem.html">Зачем это нужно</a></li>
 <li><a href="ideas.html">Идея владения</a></li>
-<li><a href="guide.html">API шаг за шагом</a></li>
 <li><a href="spawn.html">spawn: задачи в потоках</a></li>
+<li><a href="guide.html">Данные в регионах</a></li>
 <li><a href="channels.html">Каналы</a></li>
 <li><a href="practices.html">Как делать и как не делать</a></li>
 <li><a href="tooling.html" aria-current="page">Редактор и линтеры</a></li>
@@ -86,7 +86,7 @@ state.total = <span class="tok-number">1</span>;</code></pre></figure>
 <pre class="shell wrap">error TS2322: Type 'Map&lt;any, any&gt;' is not assignable to type 'RegionData'.
 error TS2551: Property 'frezee' does not exist on type 'Region'. Did you mean 'freeze'?
 error TS2339: Property 'total' does not exist on type '{ count: number; }'.</pre>
-<p>Последняя ошибка — та же фиксированная форма, что и в d8 (<a href="guide.html#rules">раздел 2 про API</a>): тип результата <code>run</code> знает только поля, которые были при создании.</p>
+<p>Последняя ошибка — та же фиксированная форма, что и в d8 (<a href="guide.html#rules">чтение и запись</a>): тип результата <code>run</code> знает только поля, которые были при создании.</p>
 <p>Чего типы не знают. Типизированный массив поверх <code>SharedArrayBuffer</code> для них такой же, как любой другой, а d8 его отклонит. Что можно отправить в канал, типы не проверяют: у <code>Channel</code> без параметра тип значения <code>any</code>.</p>
 
 <h2 id="biome">Biome</h2>

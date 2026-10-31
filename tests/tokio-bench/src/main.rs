@@ -1,4 +1,5 @@
 // cargo run --release -- [workers]
+// cargo run --release -- real [workers]: the workloads of tests/bench-real.js.
 // The scenarios of tests/bench-tasks.js with tokio. The driving code runs in
 // block_on, outside the worker threads, like the main thread of d8 outside
 // the spawn() pool; the last line also measures ping-pong between two tasks.
@@ -6,6 +7,8 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Mutex, RwLock};
+
+mod real;
 
 const N: usize = 1000;
 
@@ -50,7 +53,13 @@ async fn ping_pong() {
 }
 
 fn main() {
-    let workers: usize = std::env::args().nth(1).map_or(4, |s| s.parse().unwrap());
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|a| a == "real") {
+        args.remove(0);
+        real::run(args.first().map_or(4, |s| s.parse().unwrap()));
+        return;
+    }
+    let workers: usize = args.first().map_or(4, |s| s.parse().unwrap());
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(workers)
         .build()

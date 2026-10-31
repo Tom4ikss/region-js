@@ -21,8 +21,8 @@
 <li><a href="index.html">Что это такое</a></li>
 <li><a href="problem.html">Зачем это нужно</a></li>
 <li><a href="ideas.html">Идея владения</a></li>
-<li><a href="guide.html">API шаг за шагом</a></li>
 <li><a href="spawn.html">spawn: задачи в потоках</a></li>
+<li><a href="guide.html">Данные в регионах</a></li>
 <li><a href="channels.html" aria-current="page">Каналы</a></li>
 <li><a href="practices.html">Как делать и как не делать</a></li>
 <li><a href="tooling.html">Редактор и линтеры</a></li>
@@ -329,7 +329,7 @@ worker.<span class="tok-api">terminate</span>();
 postMessage + getMessage, круг: 3.1 µs</pre></figure>
 
 <p>Это единицы микросекунд, а у горутин в Go — доли микросекунды. Если гонять через канал по одному числу, больше 200 000 значений в секунду не выйдет, и в горячем цикле пересылка легко займёт больше времени, чем сама работа. Каналы подходят, чтобы передавать порции работы: заказ, кусок файла, пачку строк. Объединяйте мелкие значения в пачки, как и для <code>spawn</code> (<a href="practices.html#batch">подробнее</a>).</p>
-<nav class="pager" aria-label="Соседние страницы"><a class="prev" href="spawn.html"><span>← Назад</span>spawn: задачи в потоках</a><a class="next" href="practices.html"><span>Дальше →</span>Как делать и как не делать</a></nav>
+<nav class="pager" aria-label="Соседние страницы"><a class="prev" href="guide.html"><span>← Назад</span>Данные в регионах</a><a class="next" href="practices.html"><span>Дальше →</span>Как делать и как не делать</a></nav>
 <p class="footer">Регионы владения в V8 — исследовательский прототип, не продукт. Цифры получены на сборке с включёнными проверками (dcheck), Apple Silicon.</p>
 </article>
 </main>
