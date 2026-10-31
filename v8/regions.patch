@@ -51,6 +51,76 @@ index 01685963..f962dd56 100644
      "src/d8/d8-test.cc",
      "src/d8/d8.cc",
      "src/d8/d8.h",
+diff --git a/src/ast/ast.cc b/src/ast/ast.cc
+index a0fc663f..493208f9 100644
+--- a/src/ast/ast.cc
++++ b/src/ast/ast.cc
+@@ -228,6 +228,10 @@ int FunctionLiteral::start_position() const {
+ 
+ int FunctionLiteral::end_position() const { return scope()->end_position(); }
+ 
++bool FunctionLiteral::region_literals() const {
++  return scope()->region_literals();
++}
++
+ bool FunctionLiteral::is_hoisted_in_context() const {
+   return scope_->is_hoisted_in_context();
+ }
+diff --git a/src/ast/ast.h b/src/ast/ast.h
+index 2762ad61..b103ce08 100644
+--- a/src/ast/ast.h
++++ b/src/ast/ast.h
+@@ -1127,8 +1127,19 @@ class AggregateLiteral : public MaterializedLiteral {
+     kNeedsInitialAllocationSite = 1 << 2,
+   };
+ 
++  // A {} or [] in 'use region' code, created like #{} or #[]. Only matters
++  // when the literal is evaluated: as a destructuring pattern it is a pattern.
++  bool is_region_literal() const {
++    return IsRegionLiteralField::decode(bit_field_);
++  }
++  void set_is_region_literal() {
++    bit_field_ = IsRegionLiteralField::update(bit_field_, true);
++  }
++
+  protected:
+   AggregateLiteral(int pos, NodeType type) : MaterializedLiteral(pos, type) {}
++
++  using IsRegionLiteralField = Expression::NextBitField<bool, 1>;
+ };
+ 
+ // Base class for build literal boilerplate, providing common code for handling
+@@ -2359,6 +2370,7 @@ class FunctionLiteral final : public Expression {
+   void set_raw_name(const AstConsString* name) { raw_name_ = name; }
+   DeclarationScope* scope() const { return scope_; }
+   bool is_hoisted_in_context() const;
++  bool region_literals() const;
+   ZonePtrList<Statement>* body() { return &body_; }
+   void set_function_token_position(int pos) { function_token_position_ = pos; }
+   int function_token_position() const { return function_token_position_; }
+diff --git a/src/ast/scopes.h b/src/ast/scopes.h
+index 9f4dd132..a5f40fb8 100644
+--- a/src/ast/scopes.h
++++ b/src/ast/scopes.h
+@@ -1057,6 +1057,9 @@ class V8_EXPORT_PRIVATE DeclarationScope : public Scope {
+     is_being_lazily_parsed_ = is_being_lazily_parsed;
+   }
+   bool is_being_lazily_parsed() const { return is_being_lazily_parsed_; }
++
++  bool region_literals() const { return region_literals_; }
++  void set_region_literals() { region_literals_ = true; }
+ #endif
+ 
+   void set_zone(Zone* zone) {
+@@ -1446,6 +1449,8 @@ class V8_EXPORT_PRIVATE DeclarationScope : public Scope {
+ 
+ #if DEBUG
+   bool is_being_lazily_parsed_;
++  // Whether {} and [] in this function are #{} and #[] ('use region').
++  bool region_literals_ = false;
+ #endif
+ 
+   // If the scope is a function scope, this is the function kind.
 diff --git a/src/builtins/array-flat.tq b/src/builtins/array-flat.tq
 index 659de786..d3df5b28 100644
 --- a/src/builtins/array-flat.tq
@@ -1074,10 +1144,10 @@ index 8226ac48..2ee2655b 100644
    V(address_of_double_neg_constant, "double_negate_constant")                  \
    V(address_of_enable_experimental_regexp_engine,                              \
 diff --git a/src/common/message-template.h b/src/common/message-template.h
-index ce7c8efa..13013895 100644
+index ce7c8efa..7a7df92c 100644
 --- a/src/common/message-template.h
 +++ b/src/common/message-template.h
-@@ -739,6 +739,33 @@ namespace internal {
+@@ -739,6 +739,36 @@ namespace internal {
    T(WasmSuspendJSFrames, "trying to suspend JS frames")                        \
    T(WasmExceptionError, "wasm exception")                                      \
    T(WasmObjectsAreOpaque, "WebAssembly objects are opaque")                    \
@@ -1097,6 +1167,9 @@ index ce7c8efa..13013895 100644
 +    "change it")                                                               \
 +  T(RegionLiteralNoRegion,                                                     \
 +    "#{} and #[] need a current region: use region.enter() or region.run()")  \
++  T(RegionLiteralUnsupported,                                                  \
++    "In 'use region' code {} and [] are #{} and #[], which allow no spread, "  \
++    "holes, methods, accessors, __proto__, computed or numeric keys")         \
 +  T(RegionLiteralPlainValue,                                                   \
 +    "#{} and #[] hold primitives and objects of their region; write nested "   \
 +    "objects as #{} and arrays as #[]")                                        \
@@ -8607,10 +8680,51 @@ index 8c98628e..742c778b 100644
          Cast<JSObject>(array_buffer_fun->instance_prototype()), isolate_);
      SimpleInstallGetter(isolate_, array_buffer_prototype,
 diff --git a/src/interpreter/bytecode-generator.cc b/src/interpreter/bytecode-generator.cc
-index 89ca37fc..f8a69583 100644
+index 89ca37fc..4a2ae44e 100644
 --- a/src/interpreter/bytecode-generator.cc
 +++ b/src/interpreter/bytecode-generator.cc
-@@ -7405,6 +7405,16 @@ void BytecodeGenerator::VisitCallRuntime(CallRuntime* expr) {
+@@ -4201,6 +4201,22 @@ void BytecodeGenerator::BuildCreateObjectLiteral(Register literal,
+ }
+ 
+ void BytecodeGenerator::VisitObjectLiteral(ObjectLiteral* expr) {
++  // A {} in 'use region' code is #{}: keys and values interleaved, for the
++  // same builtin. The parser allowed only `name: value` and `name`.
++  if (expr->is_region_literal()) {
++    RegisterAllocationScope register_scope(this);
++    RegisterList args = register_allocator()->NewGrowableRegisterList();
++    for (ObjectLiteralProperty* property : *expr->properties()) {
++      Register key = register_allocator()->GrowRegisterList(&args);
++      builder()
++          ->LoadLiteral(property->key()->AsLiteral()->AsRawPropertyName())
++          .StoreAccumulatorInRegister(key);
++      VisitAndPushIntoRegisterList(property->value(), &args);
++    }
++    builder()->SetExpressionPosition(expr);
++    builder()->CallJSRuntime(Context::REGION_OBJECT_LITERAL_INDEX, args);
++    return;
++  }
+   expr->builder()->InitDepthAndFlags();
+ 
+   // Fast path for the empty object literal which doesn't need an
+@@ -4677,6 +4693,17 @@ void BytecodeGenerator::BuildCreateArrayLiteral(
+ }
+ 
+ void BytecodeGenerator::VisitArrayLiteral(ArrayLiteral* expr) {
++  // A [] in 'use region' code is #[]. The parser allowed no holes or spread.
++  if (expr->is_region_literal()) {
++    RegisterAllocationScope register_scope(this);
++    RegisterList args = register_allocator()->NewGrowableRegisterList();
++    for (Expression* value : *expr->values()) {
++      VisitAndPushIntoRegisterList(value, &args);
++    }
++    builder()->SetExpressionPosition(expr);
++    builder()->CallJSRuntime(Context::REGION_ARRAY_LITERAL_INDEX, args);
++    return;
++  }
+   expr->builder()->InitDepthAndFlags();
+   BuildCreateArrayLiteral(expr->values(), expr);
+ }
+@@ -7405,6 +7432,16 @@ void BytecodeGenerator::VisitCallRuntime(CallRuntime* expr) {
    RegisterList args = register_allocator()->NewGrowableRegisterList();
    VisitArguments(expr->arguments(), &args);
    Runtime::FunctionId function_id = expr->function()->function_id;
@@ -12249,6 +12363,76 @@ index 7ddd3462..47a1044c 100644
        case LookupIterator::MODULE_NAMESPACE: {
          PropertyDescriptor desc;
          Maybe<bool> owned =
+diff --git a/src/objects/shared-function-info-inl.h b/src/objects/shared-function-info-inl.h
+index 6d48de46..97f8e63b 100644
+--- a/src/objects/shared-function-info-inl.h
++++ b/src/objects/shared-function-info-inl.h
+@@ -526,6 +526,8 @@ BIT_FIELD_ACCESSORS(
+     SharedFunctionInfo::Flags::PrivateNameLookupSkipsOuterClassBit)
+ BIT_FIELD_ACCESSORS(SharedFunctionInfo, relaxed_flags, is_hoisted_in_context,
+                     SharedFunctionInfo::Flags::IsHoistedInContextBit)
++BIT_FIELD_ACCESSORS(SharedFunctionInfo, relaxed_flags, region_literals,
++                    SharedFunctionInfo::Flags::RegionLiteralsBit)
+ BIT_FIELD_ACCESSORS(SharedFunctionInfo, relaxed_flags,
+                     class_initializer_allows_await,
+                     SharedFunctionInfo::Flags::ClassInitializerAllowsAwaitBit)
+diff --git a/src/objects/shared-function-info.cc b/src/objects/shared-function-info.cc
+index 51c1bdfe..b069e50e 100644
+--- a/src/objects/shared-function-info.cc
++++ b/src/objects/shared-function-info.cc
+@@ -579,6 +579,7 @@ void SharedFunctionInfo::InitFromFunctionLiteral(IsolateT* isolate,
+         lit->has_static_private_methods_or_accessors());
+ 
+     raw_sfi->set_is_hoisted_in_context(lit->scope()->is_hoisted_in_context());
++    raw_sfi->set_region_literals(lit->scope()->region_literals());
+     DCHECK_IMPLIES(lit->scope()->class_initializer_allows_await(),
+                    IsClassInitializerFunction(lit->kind()));
+     raw_sfi->set_class_initializer_allows_await(
+diff --git a/src/objects/shared-function-info.h b/src/objects/shared-function-info.h
+index 30270816..32b81965 100644
+--- a/src/objects/shared-function-info.h
++++ b/src/objects/shared-function-info.h
+@@ -295,6 +295,7 @@ V8_OBJECT class SharedFunctionInfo : public HeapObject {
+     using IsHoistedInContextBit =
+         PrivateNameLookupSkipsOuterClassBit::Next<bool, 1>;
+     using ClassInitializerAllowsAwaitBit = IsHoistedInContextBit::Next<bool, 1>;
++    using RegionLiteralsBit = ClassInitializerAllowsAwaitBit::Next<bool, 1>;
+ 
+     BIT_FIELD_GROUP_ACCESSORS(function_kind, FunctionKindBits)
+     BIT_FIELD_GROUP_ACCESSORS(is_native, IsNativeBit)
+@@ -321,6 +322,7 @@ V8_OBJECT class SharedFunctionInfo : public HeapObject {
+     BIT_FIELD_GROUP_ACCESSORS(is_hoisted_in_context, IsHoistedInContextBit)
+     BIT_FIELD_GROUP_ACCESSORS(class_initializer_allows_await,
+                               ClassInitializerAllowsAwaitBit)
++    BIT_FIELD_GROUP_ACCESSORS(region_literals, RegionLiteralsBit)
+   };
+ 
+   struct Flags2 : BitFieldGroup<Flags2, uint8_t> {
+@@ -767,6 +769,10 @@ V8_OBJECT class SharedFunctionInfo : public HeapObject {
+   // Indicates that a class initializer's enclosing scope allowed await.
+   DECL_BOOLEAN_ACCESSORS(class_initializer_allows_await)
+ 
++  // Indicates that {} and [] in the function are #{} and #[]: the function
++  // is in 'use region' code.
++  DECL_BOOLEAN_ACCESSORS(region_literals)
++
+   inline FunctionKind kind() const;
+ 
+   int UniqueIdInScript() const;
+diff --git a/src/objects/shared-function-info.tq b/src/objects/shared-function-info.tq
+index b53ecd4a..2272f487 100644
+--- a/src/objects/shared-function-info.tq
++++ b/src/objects/shared-function-info.tq
+@@ -43,6 +43,9 @@ bitfield struct SharedFunctionInfoFlags extends uint32 {
+   private_name_lookup_skips_outer_class: bool: 1 bit;
+   is_hoisted_in_context: bool: 1 bit;
+   class_initializer_allows_await: bool: 1 bit;
++  // Inside 'use region' code (--harmony-region-literals), from its own
++  // directive or an enclosing function's.
++  region_literals: bool: 1 bit;
+ }
+ 
+ @cppScope('SharedFunctionInfo::Flags2')
 diff --git a/src/objects/value-serializer.cc b/src/objects/value-serializer.cc
 index 3de06302..9e6a7db3 100644
 --- a/src/objects/value-serializer.cc
@@ -12272,11 +12456,47 @@ index 3de06302..9e6a7db3 100644
  #if V8_ENABLE_WEBASSEMBLY
      case WASM_MODULE_OBJECT_TYPE:
        return WriteWasmModule(Cast<WasmModuleObject>(receiver));
+diff --git a/src/parsing/parse-info.cc b/src/parsing/parse-info.cc
+index aa1647ec..5a5be6d0 100644
+--- a/src/parsing/parse-info.cc
++++ b/src/parsing/parse-info.cc
+@@ -129,6 +129,7 @@ void UnoptimizedCompileFlags::SetFlagsFromFunction(T function) {
+       function->private_name_lookup_skips_outer_class());
+   set_is_toplevel(function->is_toplevel());
+   set_is_hoisted_in_context(function->is_hoisted_in_context());
++  set_region_literals(function->region_literals());
+ }
+ 
+ void UnoptimizedCompileFlags::SetFlagsForToplevelCompile(
+diff --git a/src/parsing/parse-info.h b/src/parsing/parse-info.h
+index d62979f3..d8677967 100644
+--- a/src/parsing/parse-info.h
++++ b/src/parsing/parse-info.h
+@@ -67,6 +67,7 @@ class Zone;
+   V(compile_hints_per_function_magic_enabled, bool, 1, _)       \
+   V(is_hoisted_in_context, bool, 1, _)                          \
+   V(class_initializer_allows_await, bool, 1, _)                 \
++  V(region_literals, bool, 1, _)                                \
+   V(allow_heap_allocation, bool, 1, _)
+ 
+ class V8_EXPORT_PRIVATE UnoptimizedCompileFlags {
 diff --git a/src/parsing/parser-base.h b/src/parsing/parser-base.h
-index 0aa6bf06..49d2f0f0 100644
+index 0aa6bf06..b7e24b2e 100644
 --- a/src/parsing/parser-base.h
 +++ b/src/parsing/parser-base.h
-@@ -1357,6 +1357,7 @@ class ParserBase {
+@@ -895,6 +895,11 @@ class ParserBase {
+     // Record presence of an inner function scope
+     function_state_->RecordFunctionOrEvalCall();
+ 
++    // 'use region' covers the functions inside, as 'use strict' does.
++    if (function_state_->scope()->region_literals()) {
++      result->set_region_literals();
++    }
++
+     // TODO(verwaest): Move into the DeclarationScope constructor.
+     if (!IsArrowFunction(kind)) {
+       result->DeclareDefaultFunctionVariables(ast_value_factory());
+@@ -1357,6 +1362,7 @@ class ParserBase {
  
    ExpressionT ParseProperty(ParsePropertyInfo* prop_info);
    ExpressionT ParseObjectLiteral();
@@ -12284,7 +12504,7 @@ index 0aa6bf06..49d2f0f0 100644
    V8_INLINE bool VerifyCanHaveAutoAccessorOrThrow(ParsePropertyInfo* prop_info,
                                                    ExpressionT name_expression,
                                                    int name_token_position);
-@@ -2218,6 +2219,10 @@ ParserBase<Impl>::ParsePrimaryExpression() {
+@@ -2218,6 +2224,10 @@ ParserBase<Impl>::ParsePrimaryExpression() {
      case Token::kLeftBrace:
        return ParseObjectLiteral();
  
@@ -12295,7 +12515,7 @@ index 0aa6bf06..49d2f0f0 100644
      case Token::kLeftParen: {
        Consume(Token::kLeftParen);
  
-@@ -2412,6 +2417,64 @@ ParserBase<Impl>::ParseArrowParametersWithRest(
+@@ -2412,6 +2422,64 @@ ParserBase<Impl>::ParseArrowParametersWithRest(
    return impl()->ExpressionListToExpression(*list);
  }
  
@@ -12360,11 +12580,154 @@ index 0aa6bf06..49d2f0f0 100644
  template <typename Impl>
  typename ParserBase<Impl>::ExpressionT ParserBase<Impl>::ParseArrayLiteral() {
    // ArrayLiteral ::
+@@ -2420,12 +2488,20 @@ typename ParserBase<Impl>::ExpressionT ParserBase<Impl>::ParseArrayLiteral() {
+   int pos = peek_position();
+   ExpressionListT values(pointer_buffer());
+   int first_spread_index = -1;
++  bool region_literal = function_state_->scope()->region_literals();
+   Consume(Token::kLeftBracket);
+ 
+   AccumulationScope accumulation_scope(expression_scope());
+ 
+   while (!Check(Token::kRightBracket)) {
+     ExpressionT elem;
++    if (region_literal &&
++        (peek() == Token::kComma || peek() == Token::kEllipsis)) {
++      // As #[], a region literal has no holes and no spread; as a pattern it
++      // may.
++      expression_scope()->RecordExpressionError(
++          scanner()->peek_location(), MessageTemplate::kRegionLiteralUnsupported);
++    }
+     if (peek() == Token::kComma) {
+       elem = factory()->NewTheHoleLiteral();
+     } else if (Check(Token::kEllipsis)) {
+@@ -2467,7 +2543,9 @@ typename ParserBase<Impl>::ExpressionT ParserBase<Impl>::ParseArrayLiteral() {
+     }
+   }
+ 
+-  return factory()->NewArrayLiteral(values, first_spread_index, pos);
++  ExpressionT literal = factory()->NewArrayLiteral(values, first_spread_index, pos);
++  if (region_literal) impl()->MarkRegionLiteral(literal);
++  return literal;
+ }
+ 
+ template <class Impl>
+@@ -3100,6 +3178,7 @@ typename ParserBase<Impl>::ExpressionT ParserBase<Impl>::ParseObjectLiteral() {
+   bool has_computed_names = false;
+   bool has_rest_property = false;
+   bool has_seen_proto = false;
++  bool region_literal = function_state_->scope()->region_literals();
+ 
+   Consume(Token::kLeftBrace);
+   AccumulationScope accumulation_scope(expression_scope());
+@@ -3114,10 +3193,29 @@ typename ParserBase<Impl>::ExpressionT ParserBase<Impl>::ParseObjectLiteral() {
+ 
+     ParsePropertyInfo prop_info(this, &accumulation_scope);
+     prop_info.position = PropertyPosition::kObjectLiteral;
++    Token::Value first_token = peek();
++    int property_pos = peek_position();
++    bool had_proto = has_seen_proto;
+     ObjectLiteralPropertyT property =
+         ParseObjectPropertyDefinition(&prop_info, &has_seen_proto);
+     if (impl()->IsNull(property)) return impl()->FailureExpression();
+ 
++    // As #{}, a region literal takes only `name: value` and `name`. As a
++    // pattern, the literal may have anything a pattern may.
++    if (region_literal && !prop_info.is_computed_name &&
++        had_proto == has_seen_proto &&
++        (Token::IsPropertyName(first_token) || first_token == Token::kString) &&
++        (prop_info.kind == ParsePropertyKind::kValue ||
++         prop_info.kind == ParsePropertyKind::kShorthand ||
++         prop_info.kind == ParsePropertyKind::kShorthandOrClassField ||
++         prop_info.kind == ParsePropertyKind::kAssign)) {
++      // kAssign is an error as an expression anyway.
++    } else if (region_literal) {
++      expression_scope()->RecordExpressionError(
++          Scanner::Location(property_pos, end_position()),
++          MessageTemplate::kRegionLiteralUnsupported);
++    }
++
+     if (prop_info.is_computed_name) {
+       has_computed_names = true;
+     }
+@@ -3160,9 +3258,11 @@ typename ParserBase<Impl>::ExpressionT ParserBase<Impl>::ParseObjectLiteral() {
+                                            MessageTemplate::kTooManyArguments);
+   }
+ 
+-  return impl()->InitializeObjectLiteral(
++  ExpressionT literal = impl()->InitializeObjectLiteral(
+       factory()->NewObjectLiteral(properties, number_of_boilerplate_properties,
+                                   pos, has_rest_property, home_object));
++  if (region_literal) impl()->MarkRegionLiteral(literal);
++  return literal;
+ }
+ 
+ template <typename Impl>
+@@ -5719,11 +5819,15 @@ void ParserBase<Impl>::ParseStatementList(StatementListT* body,
+ 
+   while (peek() == Token::kString) {
+     bool use_strict = false;
++    bool use_region = false;
+ 
+     Scanner::Location token_loc = scanner()->peek_location();
+ 
+     if (scanner()->NextLiteralExactlyEquals("use strict")) {
+       use_strict = true;
++    } else if (v8_flags.harmony_region_literals &&
++               scanner()->NextLiteralExactlyEquals("use region")) {
++      use_region = true;
+     }
+ 
+     StatementT stat = ParseStatementListItem();
+@@ -5733,7 +5837,11 @@ void ParserBase<Impl>::ParseStatementList(StatementListT* body,
+ 
+     if (!impl()->IsStringLiteral(stat)) break;
+ 
+-    if (use_strict) {
++    if (use_region) {
++      // Directive "use region": {} and [] in the rest of the function, and in
++      // the functions inside it, are #{} and #[].
++      function_state_->scope()->set_region_literals();
++    } else if (use_strict) {
+       // Directive "use strict" (ES5 14.1).
+       RaiseLanguageMode(LanguageMode::kStrict);
+       if (!scope()->HasSimpleParameters()) {
+diff --git a/src/parsing/parser.cc b/src/parsing/parser.cc
+index f54e8056..b009af32 100644
+--- a/src/parsing/parser.cc
++++ b/src/parsing/parser.cc
+@@ -1182,6 +1182,10 @@ FunctionLiteral* Parser::DoParseFunction(Isolate* isolate, ParseInfo* info,
+     DCHECK(outer);
+     FunctionState function_state(&function_state_, &scope_, outer_function);
+     BlockState block_state(&scope_, outer);
++    // The outer scope comes from its ScopeInfo, which does not say whether
++    // it is 'use region' code; the function does. Only this parse sees the
++    // outer scope.
++    if (flags().region_literals()) outer_function->set_region_literals();
+     DCHECK(is_sloppy(outer->language_mode()) ||
+            is_strict(info->language_mode()));
+     FunctionKind kind = flags().function_kind();
 diff --git a/src/parsing/parser.h b/src/parsing/parser.h
-index f6c42cde..4a79c6c4 100644
+index f6c42cde..330ca06e 100644
 --- a/src/parsing/parser.h
 +++ b/src/parsing/parser.h
-@@ -898,6 +898,16 @@ class V8_EXPORT_PRIVATE Parser : public NON_EXPORTED_BASE(ParserBase<Parser>) {
+@@ -408,6 +408,15 @@ class V8_EXPORT_PRIVATE Parser : public NON_EXPORTED_BASE(ParserBase<Parser>) {
+       LanguageMode language_mode,
+       ZonePtrList<const AstRawString>* arguments_for_wrapped_function);
+ 
++  // A {} or [] in 'use region' code.
++  V8_INLINE void MarkRegionLiteral(Expression* literal) {
++    if (literal->IsObjectLiteral()) {
++      literal->AsObjectLiteral()->set_is_region_literal();
++    } else if (literal->IsArrayLiteral()) {
++      literal->AsArrayLiteral()->set_is_region_literal();
++    }
++  }
++
+   ObjectLiteral* InitializeObjectLiteral(ObjectLiteral* object_literal) {
+     object_literal->CalculateEmitStore(main_zone());
+     return object_literal;
+@@ -898,6 +907,16 @@ class V8_EXPORT_PRIVATE Parser : public NON_EXPORTED_BASE(ParserBase<Parser>) {
  
    Expression* ExpressionListToExpression(const ScopedPtrList<Expression>& args);
  
@@ -12382,10 +12745,19 @@ index f6c42cde..4a79c6c4 100644
                                         const AstRawString* name,
                                         const AstRawString* prefix = nullptr);
 diff --git a/src/parsing/preparser.h b/src/parsing/preparser.h
-index fc6d8003..1405a07f 100644
+index fc6d8003..d24ccdf6 100644
 --- a/src/parsing/preparser.h
 +++ b/src/parsing/preparser.h
-@@ -1602,6 +1602,12 @@ class PreParser : public ParserBase<PreParser> {
+@@ -974,6 +974,8 @@ class PreParser : public ParserBase<PreParser> {
+       LanguageMode language_mode,
+       ZonePtrList<const AstRawString>* arguments_for_wrapped_function);
+ 
++  V8_INLINE void MarkRegionLiteral(const PreParserExpression& literal) {}
++
+   PreParserExpression InitializeObjectLiteral(PreParserExpression literal) {
+     return literal;
+   }
+@@ -1602,6 +1604,12 @@ class PreParser : public ParserBase<PreParser> {
        const Scanner::Location& params_loc) {
    }
  

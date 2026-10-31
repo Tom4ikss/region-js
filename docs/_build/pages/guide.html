@@ -166,6 +166,18 @@
 <p>Литерал выделяет объект прямо в машинном коде, без копии и без рантайма, и стоит около 15–20 нс (<a href="inside.html#literals">как</a>). Это самый быстрый способ наполнить регион: 200 000 товаров литералами и <code>push</code> создаются за 86 мс, одним <code>run</code> — за 197 мс, через <code>Region.object()</code> — за 446 мс. <code>push</code> в массив региона тоже идёт без рантайма, около 25 нс на элемент. Замер — на странице <a href="numbers.html#create">«Цифры»</a>.</p>
 <p>В VS Code типы в файлах с литералами работают через расширение из <code>playground/</code>, Biome и ESLint синтаксис <code>#{}</code> пока не понимают (<a href="tooling.html#literals">подробнее</a>).</p>
 
+<h3 id="use-region">Директива <code>'use region'</code></h3>
+<p>Если почти все объекты функции должны лежать в регионе, решётку перед каждым <code>{</code> и <code>[</code> можно не писать. Директива <code>'use region'</code> в начале функции или файла, как <code>'use strict'</code>, делает каждый <code>{}</code> в этом коде литералом <code>#{}</code>, а каждый <code>[]</code> — <code>#[]</code>. Это обычный синтаксис JavaScript, поэтому TypeScript, ESLint, Biome и Prettier такой код понимают без расширений. Директива работает с флагом <code>--harmony-region-literals</code>, без него это просто строка.</p>
+
+<!--ex:42-use-region.js-->
+
+<ul>
+  <li><strong>Охват.</strong> Директива действует на тело функции и на все функции внутри неё, в том числе на колбэки вроде <code>rows.map((r) =&gt; ({ ... }))</code>, даже если их вызовут позже. Параметры самой функции разобраны раньше директивы и остаются обычными. Код в <code>eval</code> директиву не наследует.</li>
+  <li><strong>Текущий регион</strong> нужен так же, как для <code>#{}</code>: <code>using _ = region.enter()</code> или <code>run</code>.</li>
+  <li><strong>Деструктуризация</strong> не меняется: <code>const { a } = x</code>, <code>[a, b] = [b, a]</code>, <code>({ name }) =&gt; name</code>. Это шаблоны, а не литералы.</li>
+  <li><strong>Нельзя</strong> то же, что в <code>#{}</code>: spread, дырки, методы, геттеры и сеттеры, <code>__proto__</code>, вычисляемые и числовые ключи. Это синтаксическая ошибка с текстом «In 'use region' code {} and [] are #{} and #[], …». В шаблонах всё это по-прежнему можно.</li>
+</ul>
+
 <h2 id="reference">Всё API на одной странице</h2>
 <div class="table-wrap">
 <table>
@@ -190,6 +202,7 @@
 <tr><td><code>using _ = region.enter()</code></td><td>Сделать регион текущим до конца блока.</td></tr>
 <tr><td><code>Region.object(obj)</code>, <code>Region.array(...items)</code></td><td>Объект или массив в текущем регионе.</td></tr>
 <tr><td><code>#{ key: value }</code>, <code>#[a, b]</code></td><td>Объект или массив сразу в текущем регионе, без копии. Нужен флаг <code>--harmony-region-literals</code>.</td></tr>
+<tr><td><code>'use region'</code></td><td>Директива в начале функции или файла: каждый <code>{}</code> и <code>[]</code> в этом коде и во вложенных функциях — <code>#{}</code> и <code>#[]</code>. Нужен флаг <code>--harmony-region-literals</code>.</td></tr>
 <tr><td><code>region.object(obj)</code>, <code>region.array(...items)</code></td><td>То же в этом регионе, без <code>enter</code>.</td></tr>
 <tr><td><code>region.free()</code>, <code>using region = new Region()</code></td><td>Освободить регион: обращения к нему запрещены навсегда, память типизированных массивов отдаётся сразу, объекты опустошаются при сборке.</td></tr>
 <tr><td><code>region.freed</code>, <code>region.byteSize</code>, <code>Region.stats()</code></td><td>Освобождён ли регион, сколько байт в него скопировано, и сводка по всем регионам процесса.</td></tr>
@@ -226,6 +239,7 @@
 <tr><td><code>Region must be frozen to borrow it</code></td><td><code>borrow()</code> у незамороженного региона.</td></tr>
 <tr><td><code>#{} and #[] need a current region: use region.enter() or region.run()</code></td><td>Литерал вне <code>enter()</code> и <code>run()</code>.</td></tr>
 <tr><td><code>#{} and #[] hold primitives and objects of their region; write nested objects as #{} and arrays as #[]</code></td><td>Обычный объект или массив внутри литерала.</td></tr>
+<tr><td><code>In 'use region' code {} and [] are #{} and #[], which allow no spread, holes, methods, accessors, __proto__, computed or numeric keys</code></td><td>Синтаксическая ошибка: в коде с <code>'use region'</code> литерал, который не может быть <code>#{}</code> или <code>#[]</code>.</td></tr>
 <tr><td><code>Region.of() expects an object from a region</code></td><td><code>Region.of</code> для обычного объекта.</td></tr>
 </tbody>
 </table>
