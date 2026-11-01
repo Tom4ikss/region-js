@@ -1,6 +1,48 @@
-// Кнопки «Копировать» у примеров и подсказки у столбцов графиков. Больше скриптов на сайте нет.
+// Кнопки «Копировать» у примеров, подсказки у столбцов графиков, переключатель темы и
+// подсветка текущего раздела в оглавлении. Больше скриптов на сайте нет.
 (function () {
   'use strict';
+
+  var root = document.documentElement;
+  var toggle = document.querySelector('.theme-toggle');
+  if (toggle) {
+    toggle.addEventListener('click', function () {
+      var dark = root.classList.contains('dark') ||
+          (!root.classList.contains('light') && matchMedia('(prefers-color-scheme: dark)').matches);
+      var next = dark ? 'light' : 'dark';
+      root.classList.remove('dark', 'light');
+      root.classList.add(next);
+      try { localStorage.setItem('theme', next); } catch (e) { /* без хранилища тема живёт до перехода */ }
+    });
+  }
+
+  // На узком экране разделы — полоса, которая листается вбок: текущий должен быть виден.
+  var current = document.querySelector('.sidebar a[aria-current="page"]');
+  var sidebar = document.querySelector('.sidebar');
+  if (current && sidebar && sidebar.scrollWidth > sidebar.clientWidth) {
+    sidebar.scrollLeft = current.offsetLeft - (sidebar.clientWidth - current.offsetWidth) / 2;
+  }
+
+  var links = Array.prototype.slice.call(document.querySelectorAll('.toc a'));
+  if (links.length && 'IntersectionObserver' in window) {
+    var targets = links.map(function (a) { return document.getElementById(a.hash.slice(1)); });
+    var visible = new Set();
+    var mark = function () {
+      // Текущий раздел — первый видимый заголовок, а если не видно ни одного, последний выше экрана.
+      var current = -1;
+      for (var i = 0; i < targets.length; i++) {
+        if (visible.has(targets[i])) { current = i; break; }
+        if (targets[i] && targets[i].getBoundingClientRect().top < 120) current = i;
+      }
+      links.forEach(function (a, i) { a.classList.toggle('active', i === current); });
+    };
+    var observer = new IntersectionObserver(function (entries) {
+      entries.forEach(function (e) { e.isIntersecting ? visible.add(e.target) : visible.delete(e.target); });
+      mark();
+    }, { rootMargin: '-60px 0px -55% 0px' });
+    targets.forEach(function (t) { if (t) observer.observe(t); });
+    mark();
+  }
 
   function copyText(text) {
     if (navigator.clipboard && window.isSecureContext) {

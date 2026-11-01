@@ -6,7 +6,9 @@
 <meta name="color-scheme" content="light dark">
 <meta name="description" content="spawn(callback, ...args): функция в отдельном потоке, join и await, захват переменных, this и arguments, вложенные задачи, ошибки, заморозка и билеты внутри задач.">
 <title>spawn: задачи в потоках · Регионы владения в V8</title>
-<link rel="stylesheet" href="assets/style.css">
+<script>try{var t=localStorage.getItem('theme');if(t)document.documentElement.classList.add(t)}catch(e){}</script>
+<link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="assets/style.css?v=762f1ac439">
 </head>
 <body>
 <header class="topbar">
@@ -14,32 +16,38 @@
   <span class="badge">эксперимент · форк V8</span>
   <span class="spacer"></span>
   <span class="meta">работает только в d8</span>
+  <a class="icon-btn" href="https://github.com/Tom4ikss/region-js" aria-label="Код на GitHub"><svg viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg><span class="label">GitHub</span></a>
+  <button class="icon-btn theme-toggle" type="button" aria-label="Сменить тему"><svg class="sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg><svg class="moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg></button>
 </header>
 <div class="layout">
 <nav class="sidebar" aria-label="Разделы">
-<ol>
-<li><a href="index.html">Что это такое</a></li>
-<li><a href="problem.html">Зачем это нужно</a></li>
-<li><a href="ideas.html">Идея владения</a></li>
-<li><a href="spawn.html" aria-current="page">spawn: задачи в потоках</a></li>
-<li><a href="guide.html">Данные в регионах</a></li>
-<li><a href="channels.html">Каналы</a></li>
-<li><a href="practices.html">Как делать и как не делать</a></li>
-<li><a href="tooling.html">Редактор и линтеры</a></li>
-<li><a href="inside.html">Как это устроено</a></li>
-<li><a href="numbers.html">Цифры</a></li>
-<li><a href="limits.html">Ограничения и планы</a></li>
-</ol>
+<div class="group"><p class="group-title">Введение</p><ol>
+<li><a href="index.html"><span class="n">1</span>Что это такое</a></li>
+<li><a href="problem.html"><span class="n">2</span>Зачем это нужно</a></li>
+<li><a href="ideas.html"><span class="n">3</span>Идея владения</a></li>
+</ol></div>
+<div class="group"><p class="group-title">Руководство</p><ol>
+<li><a href="spawn.html" aria-current="page"><span class="n">4</span>spawn: задачи в потоках</a></li>
+<li><a href="guide.html"><span class="n">5</span>Данные в регионах</a></li>
+<li><a href="channels.html"><span class="n">6</span>Каналы</a></li>
+<li><a href="practices.html"><span class="n">7</span>Как делать и как не делать</a></li>
+<li><a href="tooling.html"><span class="n">8</span>Редактор и линтеры</a></li>
+</ol></div>
+<div class="group"><p class="group-title">Подробности</p><ol>
+<li><a href="inside.html"><span class="n">9</span>Как это устроено</a></li>
+<li><a href="numbers.html"><span class="n">10</span>Цифры</a></li>
+<li><a href="limits.html"><span class="n">11</span>Ограничения и планы</a></li>
+</ol></div>
 <p class="side-note">Исследовательский прототип. Все примеры на сайте запущены в собранном d8, вывод настоящий.</p>
 </nav>
 <main>
 <article class="content">
 <p class="eyebrow">Глава 3</p>
-<h1>spawn: функция в отдельном потоке</h1>
-<p class="lead">Чтобы вынести работу в воркер, обычно нужен отдельный файл или строка с кодом, обработчик сообщений и протокол «что отправить, что получить». <code>spawn</code> сводит это к одному вызову: передаёте функцию и аргументы, получаете результат. Данные между потоками переезжают в регионах, без копии, а если задача создаёт результат с директивой <code>'use region'</code>, он с самого начала лежит в общей памяти и не копируется ни разу.</p>
+<h1>spawn: функция в отдельном потоке</h1>
+<p class="lead">Чтобы вынести работу в воркер, обычно нужен отдельный файл или строка с кодом, обработчик сообщений и протокол «что отправить, что получить». <code>spawn</code> сводит это к одному вызову: передаёте функцию и аргументы, получаете результат. Данные между потоками переезжают в регионах, без копии, а если задача создаёт результат с директивой <code>'use region'</code>, он с самого начала лежит в общей памяти и не копируется ни разу.</p>
 
-<h2 id="basic">Запустить и дождаться</h2>
-<p><code>spawn(callback, ...args)</code> запускает <code>callback(...args)</code> в одном из воркеров пула и сразу возвращает ручку задачи. Главный поток в это время идёт дальше. <code>handle.join()</code> ждёт результат, останавливая поток.</p>
+<h2 id="basic"><a class="anchor" href="#basic" aria-hidden="true" tabindex="-1"></a>Запустить и дождаться</h2>
+<p><code>spawn(callback, ...args)</code> запускает <code>callback(...args)</code> в одном из воркеров пула и сразу возвращает ручку задачи. Главный поток в это время идёт дальше. <code>handle.join()</code> ждёт результат, останавливая поток.</p>
 
 <figure class="example"><div class="ex-head"><span class="file"><a href="examples/10-spawn-basic.js">examples/10-spawn-basic.js</a></span><button class="copy" type="button">Копировать</button></div><pre class="code"><code><span class="tok-comment">// spawn(callback, ...args): запустить функцию в отдельном потоке и дождаться результата.</span>
 <span class="tok-keyword">const</span> task = <span class="tok-api">spawn</span>((from, to) =&gt; {
@@ -66,11 +74,11 @@ result.primes += <span class="tok-number">1</span>;
 после записи: 17985
 6 * 7 = 42</pre></figure>
 
-<p>Аргументы и результат идут через регионы. Обычные данные в аргументах копируются в регион и переезжают в воркер вместе с ним. Объект региона в аргументе не копируется: он едет так же, как захваченный (об этом <a href="#captures">ниже</a>). Результат воркер кладёт в свой регион и отдаёт обратно. Когда <code>join()</code> вернул значение, его владелец — главный поток: результат можно читать и менять, но, как у любого объекта региона, нельзя добавлять новые поля.</p>
-<p>Обычный объект, который вернула задача, копируется в регион один раз, в воркере. Без этой копии можно обойтись: если задача войдёт в свой регион и создаст результат литералами <code>#{}</code> или в коде с <code>'use region'</code>, объекты сразу лежат в регионе, и обратно уезжает сам регион. Так собираются заказы в <a href="index.html">примере на главной</a>, подробнее о литералах — в разделе <a href="guide.html#literals">«Литералы»</a>.</p>
+<p>Аргументы и результат идут через регионы. Обычные данные в аргументах копируются в регион и переезжают в воркер вместе с ним. Объект региона в аргументе не копируется: он едет так же, как захваченный (об этом <a href="#captures">ниже</a>). Результат воркер кладёт в свой регион и отдаёт обратно. Когда <code>join()</code> вернул значение, его владелец — главный поток: результат можно читать и менять, но, как у любого объекта региона, нельзя добавлять новые поля.</p>
+<p>Обычный объект, который вернула задача, копируется в регион один раз, в воркере. Без этой копии можно обойтись: если задача войдёт в свой регион и создаст результат литералами <code>#{}</code> или в коде с <code>'use region'</code>, объекты сразу лежат в регионе, и обратно уезжает сам регион. Так собираются заказы в <a href="index.html">примере на главной</a>, подробнее о литералах — в разделе <a href="guide.html#literals">«Литералы»</a>.</p>
 
-<h2 id="await">Ждать без блокировки: <code>await</code></h2>
-<p><code>join()</code> останавливает поток, и в браузере в главном потоке так делать не стоит (Biome в <a href="tooling.html#biome">песочнице</a> предупреждает об этом). Ручку задачи можно ждать через <code>await</code>: она ведёт себя как промис, и поток в это время свободен. Работает и <code>Promise.all</code>. Сама функция-задача тоже может быть <code>async</code>: воркер дождётся её промиса и только потом ответит.</p>
+<h2 id="await"><a class="anchor" href="#await" aria-hidden="true" tabindex="-1"></a>Ждать без блокировки: <code>await</code></h2>
+<p><code>join()</code> останавливает поток, и в браузере в главном потоке так делать не стоит (Biome в <a href="tooling.html#biome">песочнице</a> предупреждает об этом). Ручку задачи можно ждать через <code>await</code>: она ведёт себя как промис, и поток в это время свободен. Работает и <code>Promise.all</code>. Сама функция-задача тоже может быть <code>async</code>: воркер дождётся её промиса и только потом ответит.</p>
 
 <figure class="example"><div class="ex-head"><span class="file"><a href="examples/11-spawn-await.js">examples/11-spawn-await.js</a></span><button class="copy" type="button">Копировать</button></div><pre class="code"><code><span class="tok-comment">// await handle не блокирует главный поток. Колбэк может быть async.</span>
 (<span class="tok-keyword">async</span> () =&gt; {
@@ -104,11 +112,11 @@ result.primes += <span class="tok-number">1</span>;
 async-колбэк: page-7 3 строки
 <span class="err">ошибка из потока: RangeError: слишком далеко</span></pre></figure>
 
-<p>Ошибка, выброшенная в потоке, приходит обратно с тем же типом (<code>RangeError</code> остаётся <code>RangeError</code>) и тем же текстом. Ручку можно ждать сколько угодно раз и как угодно: <code>join()</code>, <code>await</code>, снова <code>join()</code>. Задача заканчивается один раз, и каждый раз приходит тот же результат (тот же объект) или та же ошибка.</p>
-<p>В примере есть <code>setTimeout(resolve, 10)</code>. В d8 <code>setTimeout</code> не ждёт указанную задержку: колбэки выполняются по очереди, как только поток свободен. В примерах таймер нужен только для того, чтобы работа стала асинхронной.</p>
+<p>Ошибка, выброшенная в потоке, приходит обратно с тем же типом (<code>RangeError</code> остаётся <code>RangeError</code>) и тем же текстом. Ручку можно ждать сколько угодно раз и как угодно: <code>join()</code>, <code>await</code>, снова <code>join()</code>. Задача заканчивается один раз, и каждый раз приходит тот же результат (тот же объект) или та же ошибка.</p>
+<p>В примере есть <code>setTimeout(resolve, 10)</code>. В d8 <code>setTimeout</code> не ждёт указанную задержку: колбэки выполняются по очереди, как только поток свободен. В примерах таймер нужен только для того, чтобы работа стала асинхронной.</p>
 
-<h3 id="module">Модули: <code>await</code> на верхнем уровне</h3>
-<p>Обычный скрипт d8 не разрешает <code>await</code> вне функции, поэтому примеры выше оборачивают код в <code>(async () =&gt; { ... })()</code>. С флагом <code>--module</code> файл выполняется как модуль, и <code>await spawn(...)</code> можно писать прямо на верхнем уровне. Перед выходом d8 дожидается задач, которые ещё идут, даже тех, которые никто не ждёт.</p>
+<h3 id="module"><a class="anchor" href="#module" aria-hidden="true" tabindex="-1"></a>Модули: <code>await</code> на верхнем уровне</h3>
+<p>Обычный скрипт d8 не разрешает <code>await</code> вне функции, поэтому примеры выше оборачивают код в <code>(async () =&gt; { ... })()</code>. С флагом <code>--module</code> файл выполняется как модуль, и <code>await spawn(...)</code> можно писать прямо на верхнем уровне. Перед выходом d8 дожидается задач, которые ещё идут, даже тех, которые никто не ждёт.</p>
 
 <figure class="example"><div class="ex-head"><span class="file"><a href="examples/26-module-await.js">examples/26-module-await.js</a></span><button class="copy" type="button">Копировать</button></div><pre class="code"><code><span class="tok-comment">// d8-flags: --module</span>
 <span class="tok-comment">// С флагом --module await работает прямо на верхнем уровне файла.</span>
@@ -129,8 +137,8 @@ async-колбэк: page-7 3 строки
 файл выполнен до конца
 задача без await закончилась</pre></figure>
 
-<h2 id="captures">Захват переменных</h2>
-<p>Функция в воркере не видит переменных главного потока: у воркера свой мир. <code>spawn</code> сам смотрит, какими внешними именами пользуется ваша функция, и отправляет их вместе с ней. Аргументы подчиняются тем же правилам, что и захваченные переменные.</p>
+<h2 id="captures"><a class="anchor" href="#captures" aria-hidden="true" tabindex="-1"></a>Захват переменных</h2>
+<p>Функция в воркере не видит переменных главного потока: у воркера свой мир. <code>spawn</code> сам смотрит, какими внешними именами пользуется ваша функция, и отправляет их вместе с ней. Аргументы подчиняются тем же правилам, что и захваченные переменные.</p>
 
 <figure class="example"><div class="ex-head"><span class="file"><a href="examples/12-spawn-captures.js">examples/12-spawn-captures.js</a></span><button class="copy" type="button">Копировать</button></div><pre class="code"><code><span class="tok-comment">// Захват переменных: spawn сам находит, что нужно колбэку.</span>
 <span class="tok-keyword">const</span> words = [<span class="tok-string">'арбуз'</span>, <span class="tok-string">'банан'</span>, <span class="tok-string">'вишня'</span>, <span class="tok-string">'груша'</span>, <span class="tok-string">'дыня'</span>, <span class="tok-string">'ежевика'</span>];
@@ -164,35 +172,35 @@ dictRegion.<span class="tok-api">freeze</span>();
 аргументом, runs = 12
 замороженный регион: привет / пока | главный поток читает: привет</pre></figure>
 
-<p>Что происходит с захваченным значением, зависит от его вида:</p>
+<p>Что происходит с захваченным значением, зависит от его вида:</p>
 <div class="table-wrap">
 <table>
-<thead><tr><th>Что захвачено или передано аргументом</th><th>Что с ним происходит</th></tr></thead>
+<thead><tr><th>Что захвачено или передано аргументом</th><th>Что с ним происходит</th></tr></thead>
 <tbody>
-<tr><td>Обычные данные: числа, строки, простые объекты, массивы, типизированные массивы</td><td>Копируются, и в каждую задачу заново. Изменения в потоке назад не возвращаются.</td></tr>
-<tr><td>Объект из региона</td><td>Регион переезжает в задачу и возвращается к вам после неё, даже если задача упала с ошибкой. Типизированные массивы в нём едут вместе с регионом, без копии; ваши старые view на время задачи <a href="guide.html#typed-detach">отсоединяются</a>.</td></tr>
-<tr><td>Объект из замороженного региона</td><td>Остаётся общим: его читают и задача, и главный поток одновременно.</td></tr>
-<tr><td>Ваша функция, стрелочная или обычная (только захватом)</td><td>Передаётся исходным текстом и разбирается так же, вместе с её собственными захватами.</td></tr>
-<tr><td>Встроенные <code>Math</code>, <code>JSON</code>, <code>Array</code> и т. п.</td><td>Не передаются: в воркере есть свои.</td></tr>
+<tr><td>Обычные данные: числа, строки, простые объекты, массивы, типизированные массивы</td><td>Копируются, и в каждую задачу заново. Изменения в потоке назад не возвращаются.</td></tr>
+<tr><td>Объект из региона</td><td>Регион переезжает в задачу и возвращается к вам после неё, даже если задача упала с ошибкой. Типизированные массивы в нём едут вместе с регионом, без копии; ваши старые view на время задачи <a href="guide.html#typed-detach">отсоединяются</a>.</td></tr>
+<tr><td>Объект из замороженного региона</td><td>Остаётся общим: его читают и задача, и главный поток одновременно.</td></tr>
+<tr><td>Ваша функция, стрелочная или обычная (только захватом)</td><td>Передаётся исходным текстом и разбирается так же, вместе с её собственными захватами.</td></tr>
+<tr><td>Встроенные <code>Math</code>, <code>JSON</code>, <code>Array</code> и т. п.</td><td>Не передаются: в воркере есть свои.</td></tr>
 </tbody>
 </table>
 </div>
 
 <div class="callout analogy">
 <span class="callout-title">Аналогия</span>
-<p>Вы отправляете помощника в командировку и собираете ему чемодан. <code>spawn</code> смотрит в инструкцию (код функции) и кладёт в чемодан всё, что там упомянуто. Справочные данные — ксерокопией. Рабочие папки (регионы) — оригиналами, с возвратом по окончании. Общую библиотеку (замороженный регион) — просто адресом, туда можно ходить всем. Ручку и бумагу (<code>Math</code>, <code>JSON</code>) брать не нужно: на месте есть свои.</p>
+<p>Вы отправляете помощника в командировку и собираете ему чемодан. <code>spawn</code> смотрит в инструкцию (код функции) и кладёт в чемодан всё, что там упомянуто. Справочные данные — ксерокопией. Рабочие папки (регионы) — оригиналами, с возвратом по окончании. Общую библиотеку (замороженный регион) — просто адресом, туда можно ходить всем. Ручку и бумагу (<code>Math</code>, <code>JSON</code>) брать не нужно: на месте есть свои.</p>
 </div>
 
-<h3>Возврат регионов похож на заём</h3>
-<p>Регион, захваченный задачей или переданный ей аргументом, ведёт себя так, будто вы одолжили его на время задачи. Пока задача идёт, главный поток к нему не притронется: он в воркере. Как только задача закончилась (ответом или ошибкой), регион вернулся, и можно снова писать.</p>
+<h3 id="vozvrat-regionov-pohozh-na-zaem"><a class="anchor" href="#vozvrat-regionov-pohozh-na-zaem" aria-hidden="true" tabindex="-1"></a>Возврат регионов похож на заём</h3>
+<p>Регион, захваченный задачей или переданный ей аргументом, ведёт себя так, будто вы одолжили его на время задачи. Пока задача идёт, главный поток к нему не притронется: он в воркере. Как только задача закончилась (ответом или ошибкой), регион вернулся, и можно снова писать.</p>
 
 <div class="callout aside">
-<span class="callout-title">Если вы знаете Rust</span>
-<p>Это похоже на <code>std::thread::scope</code>: заимствованное возвращается, когда поток завершён. Сходство полное и для вложенных задач, об этом <a href="#nested">ниже</a>.</p>
+<span class="callout-title">Если вы знаете Rust</span>
+<p>Это похоже на <code>std::thread::scope</code>: заимствованное возвращается, когда поток завершён. Сходство полное и для вложенных задач, об этом <a href="#nested">ниже</a>.</p>
 </div>
 
-<h2 id="this">this и arguments</h2>
-<p>У стрелочной функции нет своих <code>this</code> и <code>arguments</code>: она берёт их у внешней функции. <code>spawn</code> захватывает и их. Если <code>this</code> на верхнем уровне скрипта — это глобальный объект, в воркере будет свой глобальный объект.</p>
+<h2 id="this"><a class="anchor" href="#this" aria-hidden="true" tabindex="-1"></a>this и arguments</h2>
+<p>У стрелочной функции нет своих <code>this</code> и <code>arguments</code>: она берёт их у внешней функции. <code>spawn</code> захватывает и их. Если <code>this</code> на верхнем уровне скрипта — это глобальный объект, в воркере будет свой глобальный объект.</p>
 
 <figure class="example"><div class="ex-head"><span class="file"><a href="examples/13-spawn-this.js">examples/13-spawn-this.js</a></span><button class="copy" type="button">Копировать</button></div><pre class="code"><code><span class="tok-comment">// Стрелочная функция видит this и arguments внешней функции. spawn их тоже захватывает.</span>
 <span class="tok-keyword">function</span> <span class="tok-fn">report</span>(prefix) {
@@ -214,9 +222,9 @@ dictRegion.<span class="tok-api">freeze</span>();
 }</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8</span></div><pre class="out">&gt;&gt; неделя: 3 строки, аргументов 2
 <span class="err">TypeError: spawn() cannot send this: it contains a function, a class instance or another value that cannot be moved into a region</span></pre></figure>
 
-<p>Во втором случае <code>this</code> — объект <code>store</code> с методом <code>count</code>. Функции в регион не попадают, поэтому отправить такой <code>this</code> нельзя. Решение — вынести нужное в переменную: <code>const items = this.items</code>, а в задаче использовать <code>items</code>.</p>
+<p>Во втором случае <code>this</code> — объект <code>store</code> с методом <code>count</code>. Функции в регион не попадают, поэтому отправить такой <code>this</code> нельзя. Решение — вынести нужное в переменную: <code>const items = this.items</code>, а в задаче использовать <code>items</code>.</p>
 
-<h2 id="gotchas">Три вещи, о которых легко забыть</h2>
+<h2 id="gotchas"><a class="anchor" href="#gotchas" aria-hidden="true" tabindex="-1"></a>Три вещи, о которых легко забыть</h2>
 
 <figure class="example"><div class="ex-head"><span class="file"><a href="examples/18-spawn-gotchas.js">examples/18-spawn-gotchas.js</a></span><button class="copy" type="button">Копировать</button></div><pre class="code"><code><span class="tok-comment">// Три вещи, о которых легко забыть.</span>
 <span class="tok-keyword">const</span> tryIt = (label, fn) =&gt; {
@@ -256,13 +264,13 @@ result.total += <span class="tok-number">1</span>;
 обычная копия: {"total":11,"items":[1,2],"extra":1}</pre></figure>
 
 <ol>
-  <li><strong>Обычные данные — копия</strong>, и захваченные, и переданные аргументом. Изменения в потоке назад не приходят.</li>
-  <li><strong>Чтобы изменения вернулись, данные должны лежать в регионе.</strong> Регион уезжает в задачу и возвращается после неё, как бы вы его ни передали: захватом или аргументом. Другой путь — вернуть новые данные результатом.</li>
-  <li><strong>Результат лежит в регионе.</strong> Форма у него фиксирована, новое поле не добавить, а массивы в нём растут и укорачиваются как обычно. Нужен изменяемый объект — сделайте копию через spread: <code>{ ...result }</code>. Копия поверхностная: вложенные объекты и массивы остаются в регионе.</li>
+  <li><strong>Обычные данные — копия</strong>, и захваченные, и переданные аргументом. Изменения в потоке назад не приходят.</li>
+  <li><strong>Чтобы изменения вернулись, данные должны лежать в регионе.</strong> Регион уезжает в задачу и возвращается после неё, как бы вы его ни передали: захватом или аргументом. Другой путь — вернуть новые данные результатом.</li>
+  <li><strong>Результат лежит в регионе.</strong> Форма у него фиксирована, новое поле не добавить, а массивы в нём растут и укорачиваются как обычно. Нужен изменяемый объект — сделайте копию через spread: <code>{ ...result }</code>. Копия поверхностная: вложенные объекты и массивы остаются в регионе.</li>
 </ol>
 
-<h2 id="errors">Что spawn отклоняет сразу</h2>
-<p>Если функцию нельзя отправить, <code>spawn</code> бросает ошибку в месте вызова, до запуска воркера. Ошибки задачи, наоборот, приходят при <code>join()</code> или <code>await</code> (а если задачу никто не ждёт, смотрите <a href="#unhandled">следующий раздел</a>).</p>
+<h2 id="errors"><a class="anchor" href="#errors" aria-hidden="true" tabindex="-1"></a>Что spawn отклоняет сразу</h2>
+<p>Если функцию нельзя отправить, <code>spawn</code> бросает ошибку в месте вызова, до запуска воркера. Ошибки задачи, наоборот, приходят при <code>join()</code> или <code>await</code> (а если задачу никто не ждёт, смотрите <a href="#unhandled">следующий раздел</a>).</p>
 
 <figure class="example"><div class="ex-head"><span class="file"><a href="examples/14-spawn-errors.js">examples/14-spawn-errors.js</a></span><button class="copy" type="button">Копировать</button></div><pre class="code"><code><span class="tok-comment">// Что spawn отклоняет сразу, в месте вызова, и какие ошибки приходят из потока.</span>
 <span class="tok-keyword">const</span> tryIt = (label, fn) =&gt; {
@@ -316,19 +324,19 @@ result.total += <span class="tok-number">1</span>;
 <table>
 <thead><tr><th>Что</th><th>Почему нельзя</th></tr></thead>
 <tbody>
-<tr><td><code>eval</code> и <code>with</code></td><td>С ними нельзя заранее понять, какие имена использует функция.</td></tr>
-<tr><td>Классы (объявленные внутри или захваченные)</td><td>Пока не поддерживаются. Экземпляр класса к тому же нельзя положить в регион (см. <a href="guide.html#not-allowed">что нельзя положить в регион</a>), а значит, и вернуть результатом.</td></tr>
-<tr><td>Встроенные, привязанные (<code>bind</code>) функции и методы объектов</td><td>Их исходный текст нельзя выполнить как отдельную функцию. Колбэком должна быть стрелочная функция или function expression.</td></tr>
-<tr><td>Переменная, объявленная позже вызова</td><td>На момент вызова у неё ещё нет значения (temporal dead zone).</td></tr>
-<tr><td>Одно имя с разными значениями</td><td>Две захваченные функции видят под одним именем разные значения, а в воркере у каждого имени одно значение.</td></tr>
-<tr><td><code>this</code> или аргумент с функциями, <code>Map</code>, экземплярами классов и т. п.</td><td>В регион такое не кладётся.</td></tr>
+<tr><td><code>eval</code> и <code>with</code></td><td>С ними нельзя заранее понять, какие имена использует функция.</td></tr>
+<tr><td>Классы (объявленные внутри или захваченные)</td><td>Пока не поддерживаются. Экземпляр класса к тому же нельзя положить в регион (см. <a href="guide.html#not-allowed">что нельзя положить в регион</a>), а значит, и вернуть результатом.</td></tr>
+<tr><td>Встроенные, привязанные (<code>bind</code>) функции и методы объектов</td><td>Их исходный текст нельзя выполнить как отдельную функцию. Колбэком должна быть стрелочная функция или function expression.</td></tr>
+<tr><td>Переменная, объявленная позже вызова</td><td>На момент вызова у неё ещё нет значения (temporal dead zone).</td></tr>
+<tr><td>Одно имя с разными значениями</td><td>Две захваченные функции видят под одним именем разные значения, а в воркере у каждого имени одно значение.</td></tr>
+<tr><td><code>this</code> или аргумент с функциями, <code>Map</code>, экземплярами классов и т. п.</td><td>В регион такое не кладётся.</td></tr>
 </tbody>
 </table>
 </div>
-<p>В самих колбэках нельзя использовать <code>super</code>, <code>new.target</code> и <code>import</code>: функция выполняется в воркере как отдельный кусок кода, без своего класса и модуля.</p>
+<p>В самих колбэках нельзя использовать <code>super</code>, <code>new.target</code> и <code>import</code>: функция выполняется в воркере как отдельный кусок кода, без своего класса и модуля.</p>
 
-<h2 id="unhandled">Ошибки не теряются</h2>
-<p>Ручка задачи похожа на промис, и с ошибками она ведёт себя так же. Если задача упала, а её ручку никто не ждёт через <code>join()</code> или <code>await</code>, ошибка не пропадает молча: d8 сообщает о ней как о необработанном отклонении промиса (unhandled rejection) и завершается с кодом 1.</p>
+<h2 id="unhandled"><a class="anchor" href="#unhandled" aria-hidden="true" tabindex="-1"></a>Ошибки не теряются</h2>
+<p>Ручка задачи похожа на промис, и с ошибками она ведёт себя так же. Если задача упала, а её ручку никто не ждёт через <code>join()</code> или <code>await</code>, ошибка не пропадает молча: d8 сообщает о ней как о необработанном отклонении промиса (unhandled rejection) и завершается с кодом 1.</p>
 
 <figure class="example"><div class="ex-head"><span class="file"><a href="examples/24-spawn-unhandled.js">examples/24-spawn-unhandled.js</a></span><button class="copy" type="button">Копировать</button></div><pre class="code"><code><span class="tok-comment">// d8-exit: 1</span>
 <span class="tok-comment">// Задачу, которая упала, никто не ждёт. Ошибка не пропадает: d8 сообщает</span>
@@ -347,10 +355,10 @@ result.total += <span class="tok-number">1</span>;
 
 1 pending unhandled Promise rejection(s) detected.</pre></figure>
 
-<p>Строки стека указывают внутрь самого <code>spawn</code>, а не на место вызова: найти задачу можно по тексту ошибки. Чтобы ошибка не была необработанной, дождитесь задачи и поймайте её: <code>try { await task } catch (e) { ... }</code>. Задачи, которые никто не ждёт, ловит и линтер, правило <a href="tooling.html#no-floating-spawn"><code>no-floating-spawn</code></a>.</p>
+<p>Строки стека указывают внутрь самого <code>spawn</code>, а не на место вызова: найти задачу можно по тексту ошибки. Чтобы ошибка не была необработанной, дождитесь задачи и поймайте её: <code>try { await task } catch (e) { ... }</code>. Задачи, которые никто не ждёт, ловит и линтер, правило <a href="tooling.html#no-floating-spawn"><code>no-floating-spawn</code></a>.</p>
 
-<h2 id="parallel">Несколько задач сразу</h2>
-<p>Задачи выполняются в пуле воркеров, по умолчанию их четыре. Если сначала запустить все задачи, а потом ждать, до четырёх из них работают параллельно, остальные ждут в очереди свободного воркера.</p>
+<h2 id="parallel"><a class="anchor" href="#parallel" aria-hidden="true" tabindex="-1"></a>Несколько задач сразу</h2>
+<p>Задачи выполняются в пуле воркеров, по умолчанию их четыре. Если сначала запустить все задачи, а потом ждать, до четырёх из них работают параллельно, остальные ждут в очереди свободного воркера.</p>
 
 <figure class="example"><div class="ex-head"><span class="file"><a href="examples/15-spawn-parallel.js">examples/15-spawn-parallel.js</a></span><button class="copy" type="button">Копировать</button></div><pre class="code"><code><span class="tok-comment">// Четыре тяжёлые задачи: по очереди и все сразу.</span>
 <span class="tok-keyword">const</span> heavy = (n) =&gt; {
@@ -381,19 +389,19 @@ start = performance.<span class="tok-fn">now</span>();
 };
 <span class="tok-fn">six</span>(<span class="tok-string">'пул из 4'</span>);
 <span class="tok-api">spawn</span>.<span class="tok-api">poolSize</span> = <span class="tok-number">6</span>;
-<span class="tok-fn">six</span>(<span class="tok-string">'пул из 6'</span>);</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8; время у вас будет другим</span></div><pre class="out">результаты совпадают: true
+<span class="tok-fn">six</span>(<span class="tok-string">'пул из 6'</span>);</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8; время у вас будет другим</span></div><pre class="out">результаты совпадают: true
 по очереди: 493 ms
 все сразу:  139 ms (x3.5)
 6 задач, пул из 4: 259 ms
 6 задач, пул из 6: 139 ms</pre></figure>
 
-<p>Четыре задачи сразу идут примерно в 3,5 раза быстрее, чем по очереди. Ровно в 4 раза не выходит, и дело не в запуске: он стоит несколько микросекунд, а задача считается больше ста миллисекунд. Причину мы отдельно не разбирали.</p>
-<p>Все воркеры пула берут задачи из одной очереди, как рабочие потоки tokio: задача ждёт, только пока заняты все воркеры, и никогда не стоит за долгой задачей, если рядом есть свободный воркер. Воркер, который ждёт в <code>await</code>, тоже свободен: пока одна его задача ждёт канал или таймер, он выполняет другие. Если задач больше, чем воркеров, лишние ждут очереди: шесть задач с пулом из четырёх идут почти вдвое дольше одной. Пул можно увеличить, например под 6 быстрых ядер этой машины: <code>spawn.poolSize = 6</code>. Больше, чем ядер, ставить нет смысла: потоки начнут делить одни и те же ядра. Значения меньше 1 и не числа <code>spawn</code> считает за 1.</p>
-<p>Если задачи запускаются в <code>map</code>, колбэк должен вернуть ручку: <code>tasks.map((t) =&gt; spawn(work, t))</code>. Тогда <code>Promise.all</code> ждёт сами задачи. Если колбэк вызывает <code>spawn</code> и возвращает что-то другое, <code>Promise.all</code> получит это значение сразу и задач ждать не будет. Подробнее в <a href="practices.html#map">практике 10</a>.</p>
+<p>Четыре задачи сразу идут примерно в 3,5 раза быстрее, чем по очереди. Ровно в 4 раза не выходит, и дело не в запуске: он стоит несколько микросекунд, а задача считается больше ста миллисекунд. Причину мы отдельно не разбирали.</p>
+<p>Все воркеры пула берут задачи из одной очереди, как рабочие потоки tokio: задача ждёт, только пока заняты все воркеры, и никогда не стоит за долгой задачей, если рядом есть свободный воркер. Воркер, который ждёт в <code>await</code>, тоже свободен: пока одна его задача ждёт канал или таймер, он выполняет другие. Если задач больше, чем воркеров, лишние ждут очереди: шесть задач с пулом из четырёх идут почти вдвое дольше одной. Пул можно увеличить, например под 6 быстрых ядер этой машины: <code>spawn.poolSize = 6</code>. Больше, чем ядер, ставить нет смысла: потоки начнут делить одни и те же ядра. Значения меньше 1 и не числа <code>spawn</code> считает за 1.</p>
+<p>Если задачи запускаются в <code>map</code>, колбэк должен вернуть ручку: <code>tasks.map((t) =&gt; spawn(work, t))</code>. Тогда <code>Promise.all</code> ждёт сами задачи. Если колбэк вызывает <code>spawn</code> и возвращает что-то другое, <code>Promise.all</code> получит это значение сразу и задач ждать не будет. Подробнее в <a href="practices.html#map">практике 10</a>.</p>
 
-<h2 id="nested">Задачи внутри задач</h2>
-<p>Задача сама может вызывать <code>spawn</code>. Такие задачи вложены в неё, как в <code>std::thread::scope</code> из Rust: задача отвечает только после того, как закончились все задачи, которые она запустила, даже те, которые она не ждала. Поэтому, когда вы дождались внешней задачи, внутри неё уже ничего не идёт.</p>
-<p><code>spawn.idle()</code> возвращает промис, который выполнится, когда закончатся все задачи, запущенные текущим потоком. Это удобно для задач, результат которых не нужен. У каждого потока свой пул: <code>spawn.poolSize</code> главного потока на задачи внутри воркеров не влияет.</p>
+<h2 id="nested"><a class="anchor" href="#nested" aria-hidden="true" tabindex="-1"></a>Задачи внутри задач</h2>
+<p>Задача сама может вызывать <code>spawn</code>. Такие задачи вложены в неё, как в <code>std::thread::scope</code> из Rust: задача отвечает только после того, как закончились все задачи, которые она запустила, даже те, которые она не ждала. Поэтому, когда вы дождались внешней задачи, внутри неё уже ничего не идёт.</p>
+<p><code>spawn.idle()</code> возвращает промис, который выполнится, когда закончатся все задачи, запущенные текущим потоком. Это удобно для задач, результат которых не нужен. У каждого потока свой пул: <code>spawn.poolSize</code> главного потока на задачи внутри воркеров не влияет.</p>
 
 <figure class="example"><div class="ex-head"><span class="file"><a href="examples/23-spawn-nested.js">examples/23-spawn-nested.js</a></span><button class="copy" type="button">Копировать</button></div><pre class="code"><code><span class="tok-comment">// d8-flags: --module</span>
 <span class="tok-comment">// Задача отвечает только после всех задач, которые запустила сама.</span>
@@ -422,9 +430,9 @@ spawn.<span class="tok-api">poolSize</span> = <span class="tok-number">6</span>;
 spawn.idle() выполнен
 poolSize здесь: 6 | в задаче: 4</pre></figure>
 
-<h2 id="abort">Отмена: <code>abort</code>, <code>timeout</code>, <code>JoinSet</code></h2>
-<p><code>handle.abort()</code> отменяет задачу, и её <code>await</code> и <code>join()</code> заканчиваются ошибкой <code>AbortError</code>. Задача, которую ещё не взял воркер, просто не запустится, а регионы, которые она захватила, вернутся тому, кто её запустил. У запущенной задачи ожидания каналов и локов, в том числе блокирующие <code>recvSync</code> и <code>writeSync</code>, заканчиваются той же ошибкой, а новые ожидания падают сразу. Так в tokio задача отменяется на ближайшем <code>.await</code>. Код, который ничего не ждёт, например долгий цикл, остановить снаружи нельзя: JS не прерывает функцию посреди работы. Такой цикл проверяет <code>spawn.aborted()</code> сам.</p>
-<p><code>handle.timeout(ms)</code> отменяет задачу с ошибкой <code>TimeoutError</code>, если она не закончилась за <code>ms</code> миллисекунд. Таймер работает в отдельном потоке, поэтому срабатывает, даже если главный поток стоит в <code>join()</code>. <code>JoinSet</code>, как одноимённый тип в tokio, отдаёт результаты задач в порядке завершения: <code>await set.next()</code> или <code>for await</code> дают объекты вида <code>Promise.allSettled</code>, а выход из блока <code>using</code> отменяет задачи, которые ещё работают.</p>
+<h2 id="abort"><a class="anchor" href="#abort" aria-hidden="true" tabindex="-1"></a>Отмена: <code>abort</code>, <code>timeout</code>, <code>JoinSet</code></h2>
+<p><code>handle.abort()</code> отменяет задачу, и её <code>await</code> и <code>join()</code> заканчиваются ошибкой <code>AbortError</code>. Задача, которую ещё не взял воркер, просто не запустится, а регионы, которые она захватила, вернутся тому, кто её запустил. У запущенной задачи ожидания каналов и локов, в том числе блокирующие <code>recvSync</code> и <code>writeSync</code>, заканчиваются той же ошибкой, а новые ожидания падают сразу. Так в tokio задача отменяется на ближайшем <code>.await</code>. Код, который ничего не ждёт, например долгий цикл, остановить снаружи нельзя: JS не прерывает функцию посреди работы. Такой цикл проверяет <code>spawn.aborted()</code> сам.</p>
+<p><code>handle.timeout(ms)</code> отменяет задачу с ошибкой <code>TimeoutError</code>, если она не закончилась за <code>ms</code> миллисекунд. Таймер работает в отдельном потоке, поэтому срабатывает, даже если главный поток стоит в <code>join()</code>. <code>JoinSet</code>, как одноимённый тип в tokio, отдаёт результаты задач в порядке завершения: <code>await set.next()</code> или <code>for await</code> дают объекты вида <code>Promise.allSettled</code>, а выход из блока <code>using</code> отменяет задачи, которые ещё работают.</p>
 
 <figure class="example"><div class="ex-head"><span class="file"><a href="examples/39-spawn-abort.js">examples/39-spawn-abort.js</a></span><button class="copy" type="button">Копировать</button></div><pre class="code"><code><span class="tok-comment">// d8-flags: --module</span>
 <span class="tok-comment">// Отмена задач: abort(), timeout(ms) и JoinSet.</span>
@@ -483,11 +491,11 @@ loop.<span class="tok-fn">timeout</span>(<span class="tok-number">20</span>);
 готово: 80 мс
 осталось задач: 1</pre></figure>
 
-<p>Задача, которая поймала <code>AbortError</code> и вернула значение, всё равно закончится отменой. Guard'ы <code>RwLock</code>, взятые через <code>using</code>, при этом отпускаются как обычно. Вместе с задачей отменяются задачи, которые она запустила, и их задачи тоже, а новые она запустить уже не может: они отменяются сразу. Отменённая задача, как и раньше, заканчивается только после своих вложенных.</p>
+<p>Задача, которая поймала <code>AbortError</code> и вернула значение, всё равно закончится отменой. Guard'ы <code>RwLock</code>, взятые через <code>using</code>, при этом отпускаются как обычно. Вместе с задачей отменяются задачи, которые она запустила, и их задачи тоже, а новые она запустить уже не может: они отменяются сразу. Отменённая задача, как и раньше, заканчивается только после своих вложенных.</p>
 
-<h2 id="how">Как это работает и сколько стоит</h2>
-<p>При первом вызове движок разбирает исходный текст функции, находит её внешние имена и ищет их значения в замыкании. Захваченные функции разбираются так же, по цепочке. Из всего этого собирается код задачи: объявления захваченных переменных, тексты функций и сама функция. Разбор запоминается для этого места в коде, и в следующий раз остаётся только прочитать текущие значения переменных. Данные упаковываются в регион и через очередь задач уходят в свободный воркер пула, без <code>postMessage</code>. Код задачи воркер получает один раз, а потом ему хватает её номера.</p>
-<p>Воркеры пула живут долго: они создаются при первых вызовах <code>spawn</code> и потом не завершаются, так что следующие задачи идут в уже готовые потоки. Когда задач нет, пул не мешает d8 завершиться. Размер пула — <code>spawn.poolSize</code>, по умолчанию 4. Поэтому запуск задачи стоит несколько микросекунд, а не миллисекунды, как было, когда каждый <code>spawn</code> создавал новый воркер:</p>
+<h2 id="how"><a class="anchor" href="#how" aria-hidden="true" tabindex="-1"></a>Как это работает и сколько стоит</h2>
+<p>При первом вызове движок разбирает исходный текст функции, находит её внешние имена и ищет их значения в замыкании. Захваченные функции разбираются так же, по цепочке. Из всего этого собирается код задачи: объявления захваченных переменных, тексты функций и сама функция. Разбор запоминается для этого места в коде, и в следующий раз остаётся только прочитать текущие значения переменных. Данные упаковываются в регион и через очередь задач уходят в свободный воркер пула, без <code>postMessage</code>. Код задачи воркер получает один раз, а потом ему хватает её номера.</p>
+<p>Воркеры пула живут долго: они создаются при первых вызовах <code>spawn</code> и потом не завершаются, так что следующие задачи идут в уже готовые потоки. Когда задач нет, пул не мешает d8 завершиться. Размер пула — <code>spawn.poolSize</code>, по умолчанию 4. Поэтому запуск задачи стоит несколько микросекунд, а не миллисекунды, как было, когда каждый <code>spawn</code> создавал новый воркер:</p>
 
 <figure class="example"><div class="ex-head"><span class="file"><a href="examples/19-spawn-overhead.js">examples/19-spawn-overhead.js</a></span><button class="copy" type="button">Копировать</button></div><pre class="code"><code><span class="tok-comment">// Сколько стоит сам запуск spawn: задача почти ничего не делает.</span>
 <span class="tok-fn">print</span>(<span class="tok-string">'воркеров в пуле:'</span>, <span class="tok-api">spawn</span>.<span class="tok-api">poolSize</span>);
@@ -505,16 +513,16 @@ loop.<span class="tok-fn">timeout</span>(<span class="tok-number">20</span>);
   <span class="tok-keyword">const</span> results = <span class="tok-keyword">await</span> Promise.<span class="tok-fn">all</span>(Array.<span class="tok-fn">from</span>({ length: M }, (_, i) =&gt; <span class="tok-api">spawn</span>((x) =&gt; x + <span class="tok-number">1</span>, i)));
   ms = performance.<span class="tok-fn">now</span>() - start;
   <span class="tok-fn">print</span>(<span class="tok-string">`${</span>M<span class="tok-string">} задач сразу (await): ${</span>ms.<span class="tok-fn">toFixed</span>(<span class="tok-number">0</span>)<span class="tok-string">} ms, последний результат ${</span>results[M - <span class="tok-number">1</span>]<span class="tok-string">}`</span>);
-})();</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8; время у вас будет другим</span></div><pre class="out">воркеров в пуле: 4
+})();</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8; время у вас будет другим</span></div><pre class="out">воркеров в пуле: 4
 100000 задач по очереди (join): 355 ms, 4 µs на задачу
 20000 задач сразу (await): 73 ms, последний результат 20000</pre></figure>
 
-<p>Задачи, запущенные все сразу, стоят примерно столько же, около 4 мкс на штуку. Почему запуск вообще стал таким дешёвым, рассказано на странице <a href="inside.html#fast-spawn">«Как это устроено»</a>.</p>
-<p>Для задач от миллисекунды и дольше эти накладные расходы почти не видны. Для мелких задач они могут оказаться больше самой работы. Как с этим быть, показано на странице <a href="practices.html#batch">«Как делать и как не делать»</a>.</p>
+<p>Задачи, запущенные все сразу, стоят примерно столько же, около 4 мкс на штуку. Почему запуск вообще стал таким дешёвым, рассказано на странице <a href="inside.html#fast-spawn">«Как это устроено»</a>.</p>
+<p>Для задач от миллисекунды и дольше эти накладные расходы почти не видны. Для мелких задач они могут оказаться больше самой работы. Как с этим быть, показано на странице <a href="practices.html#batch">«Как делать и как не делать»</a>.</p>
 
-<h2 id="frozen">Заморозка в задачах</h2>
-<p>Замороженный регион задача получает общим, без переезда. Право разморозить при этом остаётся у вызывающего потока (<a href="guide.html#thaw-right">подробнее о праве</a>), и задача разморозить такой регион не может. Зато на всё время работы задача держит на него билет, как <code>borrow()</code>, поэтому может его читать, включая типизированные массивы (<a href="guide.html#borrow">без билета замороженный регион не читают</a>). Билет выдаётся на регионы, которые задача захватила или получила аргументом. Замороженный объект, который пришёл в задачу иначе, например через <code>recv()</code> из канала, читают под своим билетом: <code>using b = Region.of(x).borrow()</code>. Если задача спрячет view типизированного массива, например в <code>globalThis</code>, после её конца он окажется пустым. Запечатанный регион (<a href="guide.html#share"><code>Region.share</code></a>) билетов не требует: его читают как угодно и откуда угодно, а его view не пустеют.</p>
-<p>Если задача сама заморозила регион, право разморозить вернётся к вызывающему вместе с результатом. Так удобно строить справочник в задаче: построить, заморозить, вернуть, а потом раздать другим задачам без копий.</p>
+<h2 id="frozen"><a class="anchor" href="#frozen" aria-hidden="true" tabindex="-1"></a>Заморозка в задачах</h2>
+<p>Замороженный регион задача получает общим, без переезда. Право разморозить при этом остаётся у вызывающего потока (<a href="guide.html#thaw-right">подробнее о праве</a>), и задача разморозить такой регион не может. Зато на всё время работы задача держит на него билет, как <code>borrow()</code>, поэтому может его читать, включая типизированные массивы (<a href="guide.html#borrow">без билета замороженный регион не читают</a>). Билет выдаётся на регионы, которые задача захватила или получила аргументом. Замороженный объект, который пришёл в задачу иначе, например через <code>recv()</code> из канала, читают под своим билетом: <code>using b = Region.of(x).borrow()</code>. Если задача спрячет view типизированного массива, например в <code>globalThis</code>, после её конца он окажется пустым. Запечатанный регион (<a href="guide.html#share"><code>Region.share</code></a>) билетов не требует: его читают как угодно и откуда угодно, а его view не пустеют.</p>
+<p>Если задача сама заморозила регион, право разморозить вернётся к вызывающему вместе с результатом. Так удобно строить справочник в задаче: построить, заморозить, вернуть, а потом раздать другим задачам без копий.</p>
 
 <figure class="example"><div class="ex-head"><span class="file"><a href="examples/27-spawn-freeze.js">examples/27-spawn-freeze.js</a></span><button class="copy" type="button">Копировать</button></div><pre class="code"><code><span class="tok-comment">// d8-flags: --module</span>
 <span class="tok-comment">// Задача заморозила регион: право разморозить возвращается вместе с результатом.</span>
@@ -542,9 +550,9 @@ spawn.aborted = () =&gt; {
 <span class="err">ReferenceError: spawn is not defined</span>
     at unnamed:129:1</pre></figure>
 
-<h3 id="borrow">Билеты в задачах: <code>borrowWhile</code></h3>
-<p>Обычный билет <code>region.borrow()</code>, взятый в задаче, не должен её пережить. Когда задача закончилась, оставшиеся билеты сдаются сами, а в воркере печатается предупреждение <code>console.warn</code>. Иначе вызывающий поток не смог бы разморозить регион: билет остался бы в воркере навсегда.</p>
-<p>Проблема в асинхронной работе. Если задача взяла билет и отложила чтение (<code>setTimeout</code>, <code>await</code> без возврата промиса), задача уже закончилась, билет сдан, и отложенное чтение получит <code>OwnershipError</code>: без билета замороженный регион читать нельзя, а его к тому же могли разморозить. Для такой работы есть <code>region.borrowWhile(fn)</code>: он держит билет, пока не выполнится промис, который вернула <code>fn</code>, и возвращает этот промис. Верните его из задачи или дождитесь через <code>await</code>, тогда задача закончится только после работы.</p>
+<h3 id="borrow"><a class="anchor" href="#borrow" aria-hidden="true" tabindex="-1"></a>Билеты в задачах: <code>borrowWhile</code></h3>
+<p>Обычный билет <code>region.borrow()</code>, взятый в задаче, не должен её пережить. Когда задача закончилась, оставшиеся билеты сдаются сами, а в воркере печатается предупреждение <code>console.warn</code>. Иначе вызывающий поток не смог бы разморозить регион: билет остался бы в воркере навсегда.</p>
+<p>Проблема в асинхронной работе. Если задача взяла билет и отложила чтение (<code>setTimeout</code>, <code>await</code> без возврата промиса), задача уже закончилась, билет сдан, и отложенное чтение получит <code>OwnershipError</code>: без билета замороженный регион читать нельзя, а его к тому же могли разморозить. Для такой работы есть <code>region.borrowWhile(fn)</code>: он держит билет, пока не выполнится промис, который вернула <code>fn</code>, и возвращает этот промис. Верните его из задачи или дождитесь через <code>await</code>, тогда задача закончится только после работы.</p>
 
 <figure class="example"><div class="ex-head"><span class="file"><a href="examples/25-spawn-borrow.js">examples/25-spawn-borrow.js</a></span><button class="copy" type="button">Копировать</button></div><pre class="code"><code><span class="tok-comment">// d8-flags: --module</span>
 <span class="tok-comment">// Билет borrow() в задаче живёт не дольше самой задачи.</span>
@@ -589,26 +597,43 @@ readers после задачи: 0
 <span class="err">задача читает позже: OwnershipError: region 0 is owned by isolate 0, not by isolate 1</span>
 borrowWhile: 55 (readers: 2) | readers после задачи: 0</pre></figure>
 
-<p>В первой задаче билет сдан вместе с концом задачи, <code>readers</code> равен 0, и главный поток спокойно размораживает регион. Отложенное чтение в воркере после этого падает. Во второй задаче билет держится до конца асинхронной работы: внутри видно <code>readers: 2</code>, один билет держит сама задача, второй <code>borrowWhile</code>. Если вызвать <code>borrowWhile</code> с асинхронной функцией и не вернуть промис, получится та же ошибка, что с голым билетом. Это ловит правило ESLint <a href="tooling.html#no-floating-borrow-while"><code>no-floating-borrow-while</code></a>. Билет, объявленный через <code>using</code>, сдаётся в конце блока и предупреждения не вызывает.</p>
+<p>В первой задаче билет сдан вместе с концом задачи, <code>readers</code> равен 0, и главный поток спокойно размораживает регион. Отложенное чтение в воркере после этого падает. Во второй задаче билет держится до конца асинхронной работы: внутри видно <code>readers: 2</code>, один билет держит сама задача, второй <code>borrowWhile</code>. Если вызвать <code>borrowWhile</code> с асинхронной функцией и не вернуть промис, получится та же ошибка, что с голым билетом. Это ловит правило ESLint <a href="tooling.html#no-floating-borrow-while"><code>no-floating-borrow-while</code></a>. Билет, объявленный через <code>using</code>, сдаётся в конце блока и предупреждения не вызывает.</p>
 
 <div class="callout limit">
 <span class="callout-title">Ограничения spawn</span>
 <ul>
-  <li>Классы не поддерживаются, <code>super</code>, <code>new.target</code> и <code>import</code> в колбэке не работают.</li>
-  <li>Если воркер пула умер посреди задачи, её <code>join()</code> и <code>await</code> заканчиваются ошибкой <code>spawn() worker exited without a result</code>. Это касается только задач, которые он успел взять: остальные выполнят другие воркеры, а если умерли все, следующий <code>spawn</code> заводит новый пул. Тайм-аута у задач нет: задача, которая работает бесконечно, ждётся бесконечно.</li>
-  <li>Как и всё остальное, <code>spawn</code> есть только в d8 с флагом <code>--harmony-regions</code>.</li>
+  <li>Классы не поддерживаются, <code>super</code>, <code>new.target</code> и <code>import</code> в колбэке не работают.</li>
+  <li>Если воркер пула умер посреди задачи, её <code>join()</code> и <code>await</code> заканчиваются ошибкой <code>spawn() worker exited without a result</code>. Это касается только задач, которые он успел взять: остальные выполнят другие воркеры, а если умерли все, следующий <code>spawn</code> заводит новый пул. Тайм-аута у задач нет: задача, которая работает бесконечно, ждётся бесконечно.</li>
+  <li>Как и всё остальное, <code>spawn</code> есть только в d8 с флагом <code>--harmony-regions</code>.</li>
 </ul>
 </div>
 
 <div class="callout aside">
-<span class="callout-title">Если вы знаете Go</span>
-<p><code>spawn</code> похож на <code>go f()</code> с каналом для результата. Только запуск горутины стоит доли микросекунды, а запуск задачи <code>spawn</code> — около 3 микросекунд: аргументы и результат копируются в буфер и переходят в другой поток, а воркер выполняет задачу через JS-обёртку. Сравнение с tokio на тысяче задач — на странице <a href="numbers.html#tokio">«Цифры»</a>.</p>
+<span class="callout-title">Если вы знаете Go</span>
+<p><code>spawn</code> похож на <code>go f()</code> с каналом для результата. Только запуск горутины стоит доли микросекунды, а запуск задачи <code>spawn</code> — около 3 микросекунд: аргументы и результат копируются в буфер и переходят в другой поток, а воркер выполняет задачу через JS-обёртку. Сравнение с tokio на тысяче задач — на странице <a href="numbers.html#tokio">«Цифры»</a>.</p>
 </div>
 <nav class="pager" aria-label="Соседние страницы"><a class="prev" href="ideas.html"><span>← Назад</span>Идея владения</a><a class="next" href="guide.html"><span>Дальше →</span>Данные в регионах</a></nav>
-<p class="footer">Регионы владения в V8 — исследовательский прототип, не продукт. Цифры получены на сборке с включёнными проверками (dcheck), Apple Silicon.</p>
+<p class="footer">Регионы владения в V8 — исследовательский прототип, не продукт. Цифры получены на сборке с включёнными проверками (dcheck), Apple Silicon, если на странице не сказано иное.</p>
 </article>
 </main>
+<aside class="toc" aria-label="На этой странице"><p class="toc-title">На этой странице</p><ol>
+<li class="h2"><a href="#basic">Запустить и дождаться</a></li>
+<li class="h2"><a href="#await">Ждать без блокировки: await</a></li>
+<li class="h3"><a href="#module">Модули: await на верхнем уровне</a></li>
+<li class="h2"><a href="#captures">Захват переменных</a></li>
+<li class="h3"><a href="#vozvrat-regionov-pohozh-na-zaem">Возврат регионов похож на заём</a></li>
+<li class="h2"><a href="#this">this и arguments</a></li>
+<li class="h2"><a href="#gotchas">Три вещи, о которых легко забыть</a></li>
+<li class="h2"><a href="#errors">Что spawn отклоняет сразу</a></li>
+<li class="h2"><a href="#unhandled">Ошибки не теряются</a></li>
+<li class="h2"><a href="#parallel">Несколько задач сразу</a></li>
+<li class="h2"><a href="#nested">Задачи внутри задач</a></li>
+<li class="h2"><a href="#abort">Отмена: abort, timeout, JoinSet</a></li>
+<li class="h2"><a href="#how">Как это работает и сколько стоит</a></li>
+<li class="h2"><a href="#frozen">Заморозка в задачах</a></li>
+<li class="h3"><a href="#borrow">Билеты в задачах: borrowWhile</a></li>
+</ol></aside>
 </div>
-<script src="assets/site.js"></script>
+<script src="assets/site.js?v=1c0ea72c51"></script>
 </body>
 </html>

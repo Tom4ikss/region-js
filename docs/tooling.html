@@ -6,7 +6,9 @@
 <meta name="color-scheme" content="light dark">
 <meta name="description" content="Песочница playground: типы для Region и spawn, правила Biome и ESLint. Что ловит каждый слой, как настроить VS Code и что видно только при запуске.">
 <title>Редактор и линтеры · Регионы владения в V8</title>
-<link rel="stylesheet" href="assets/style.css">
+<script>try{var t=localStorage.getItem('theme');if(t)document.documentElement.classList.add(t)}catch(e){}</script>
+<link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="assets/style.css?v=762f1ac439">
 </head>
 <body>
 <header class="topbar">
@@ -14,69 +16,75 @@
   <span class="badge">эксперимент · форк V8</span>
   <span class="spacer"></span>
   <span class="meta">работает только в d8</span>
+  <a class="icon-btn" href="https://github.com/Tom4ikss/region-js" aria-label="Код на GitHub"><svg viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg><span class="label">GitHub</span></a>
+  <button class="icon-btn theme-toggle" type="button" aria-label="Сменить тему"><svg class="sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg><svg class="moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg></button>
 </header>
 <div class="layout">
 <nav class="sidebar" aria-label="Разделы">
-<ol>
-<li><a href="index.html">Что это такое</a></li>
-<li><a href="problem.html">Зачем это нужно</a></li>
-<li><a href="ideas.html">Идея владения</a></li>
-<li><a href="spawn.html">spawn: задачи в потоках</a></li>
-<li><a href="guide.html">Данные в регионах</a></li>
-<li><a href="channels.html">Каналы</a></li>
-<li><a href="practices.html">Как делать и как не делать</a></li>
-<li><a href="tooling.html" aria-current="page">Редактор и линтеры</a></li>
-<li><a href="inside.html">Как это устроено</a></li>
-<li><a href="numbers.html">Цифры</a></li>
-<li><a href="limits.html">Ограничения и планы</a></li>
-</ol>
+<div class="group"><p class="group-title">Введение</p><ol>
+<li><a href="index.html"><span class="n">1</span>Что это такое</a></li>
+<li><a href="problem.html"><span class="n">2</span>Зачем это нужно</a></li>
+<li><a href="ideas.html"><span class="n">3</span>Идея владения</a></li>
+</ol></div>
+<div class="group"><p class="group-title">Руководство</p><ol>
+<li><a href="spawn.html"><span class="n">4</span>spawn: задачи в потоках</a></li>
+<li><a href="guide.html"><span class="n">5</span>Данные в регионах</a></li>
+<li><a href="channels.html"><span class="n">6</span>Каналы</a></li>
+<li><a href="practices.html"><span class="n">7</span>Как делать и как не делать</a></li>
+<li><a href="tooling.html" aria-current="page"><span class="n">8</span>Редактор и линтеры</a></li>
+</ol></div>
+<div class="group"><p class="group-title">Подробности</p><ol>
+<li><a href="inside.html"><span class="n">9</span>Как это устроено</a></li>
+<li><a href="numbers.html"><span class="n">10</span>Цифры</a></li>
+<li><a href="limits.html"><span class="n">11</span>Ограничения и планы</a></li>
+</ol></div>
 <p class="side-note">Исследовательский прототип. Все примеры на сайте запущены в собранном d8, вывод настоящий.</p>
 </nav>
 <main>
 <article class="content">
 <p class="eyebrow">Глава 7</p>
-<h1>Редактор и линтеры</h1>
-<p class="lead">Большую часть ошибок с регионами и <code>spawn</code> d8 покажет только при запуске. Часть из них можно увидеть раньше, прямо в редакторе. Для этого есть песочница <code>playground/</code>: типы, правила Biome и небольшой плагин ESLint. На этой странице — что ловит каждый из них и как их подключить.</p>
+<h1>Редактор и линтеры</h1>
+<p class="lead">Большую часть ошибок с регионами и <code>spawn</code> d8 покажет только при запуске. Часть из них можно увидеть раньше, прямо в редакторе. Для этого есть песочница <code>playground/</code>: типы, правила Biome и небольшой плагин ESLint. На этой странице — что ловит каждый из них и как их подключить.</p>
 
-<h2 id="layers">Кто что ловит</h2>
-<p>Проверок три слоя, и у каждого свои возможности. Типы знают, что можно положить в регион и какие у него методы. Biome находит шаблоны в коде, например <code>class</code> внутри колбэка <code>spawn</code>. ESLint умеет следить за порядком выполнения: что задача запущена, а регион трогают до её конца. Остальное видно только при запуске.</p>
+<h2 id="layers"><a class="anchor" href="#layers" aria-hidden="true" tabindex="-1"></a>Кто что ловит</h2>
+<p>Проверок три слоя, и у каждого свои возможности. Типы знают, что можно положить в регион и какие у него методы. Biome находит шаблоны в коде, например <code>class</code> внутри колбэка <code>spawn</code>. ESLint умеет следить за порядком выполнения: что задача запущена, а регион трогают до её конца. Остальное видно только при запуске.</p>
 <div class="table-wrap">
 <table>
 <thead><tr><th>Ошибка</th><th>Чем ловится</th></tr></thead>
 <tbody>
-<tr><td>Функция, <code>Map</code>, экземпляр класса, <code>DataView</code> в <code>region.run</code>, <code>Region.object()</code> или в аргументе <code>spawn</code></td><td>типы</td></tr>
-<tr><td>Опечатка в методе региона, новое поле у объекта региона</td><td>типы</td></tr>
-<tr><td><code>class</code>, <code>eval</code> или <code>with</code> в колбэке <code>spawn</code></td><td>Biome, ошибка</td></tr>
+<tr><td>Функция, <code>Map</code>, экземпляр класса, <code>DataView</code> в <code>region.run</code>, <code>Region.object()</code> или в аргументе <code>spawn</code></td><td>типы</td></tr>
+<tr><td>Опечатка в методе региона, новое поле у объекта региона</td><td>типы</td></tr>
+<tr><td><code>class</code>, <code>eval</code> или <code>with</code> в колбэке <code>spawn</code></td><td>Biome, ошибка</td></tr>
 <tr><td>Метод объекта как колбэк: <code>spawn(Math.max)</code></td><td>Biome, ошибка</td></tr>
 <tr><td><code>spawn(...).join()</code></td><td>Biome, предупреждение</td></tr>
-<tr><td>Ручку задачи никто не ждёт, в том числе в колбэке <code>map</code></td><td>ESLint, <a href="#no-floating-spawn"><code>no-floating-spawn</code></a>, предупреждение</td></tr>
-<tr><td>Захваченный регион трогают, пока задача идёт; задачи в цикле хотят один регион; задача пишет в замороженный регион</td><td>ESLint, <a href="#no-region-use-while-spawned"><code>no-region-use-while-spawned</code></a></td></tr>
-<tr><td><code>borrowWhile(async ...)</code>, промис которого никто не ждёт</td><td>ESLint, <a href="#no-floating-borrow-while"><code>no-floating-borrow-while</code></a></td></tr>
-<tr><td>Захваченная переменная с <code>Map</code> или функцией внутри, захваченный <code>this</code> с методами, захват до инициализации, чужой регион, голый <code>borrow()</code> в асинхронной задаче, массив поверх <code>SharedArrayBuffer</code></td><td>только при запуске</td></tr>
+<tr><td>Ручку задачи никто не ждёт, в том числе в колбэке <code>map</code></td><td>ESLint, <a href="#no-floating-spawn"><code>no-floating-spawn</code></a>, предупреждение</td></tr>
+<tr><td>Захваченный регион трогают, пока задача идёт; задачи в цикле хотят один регион; задача пишет в замороженный регион</td><td>ESLint, <a href="#no-region-use-while-spawned"><code>no-region-use-while-spawned</code></a></td></tr>
+<tr><td><code>borrowWhile(async ...)</code>, промис которого никто не ждёт</td><td>ESLint, <a href="#no-floating-borrow-while"><code>no-floating-borrow-while</code></a></td></tr>
+<tr><td>Захваченная переменная с <code>Map</code> или функцией внутри, захваченный <code>this</code> с методами, захват до инициализации, чужой регион, голый <code>borrow()</code> в асинхронной задаче, массив поверх <code>SharedArrayBuffer</code></td><td>только при запуске</td></tr>
 </tbody>
 </table>
 </div>
 
-<h2 id="setup">Как подключить</h2>
+<h2 id="setup"><a class="anchor" href="#setup" aria-hidden="true" tabindex="-1"></a>Как подключить</h2>
 <ol>
-  <li>Откройте папку <code>playground</code> в VS Code целиком (File → Open Folder). Типы и правила подключаются из её настроек, отдельный файл они не увидят.</li>
-  <li>Выполните <code>npm install</code>: он ставит Biome, ESLint и TypeScript.</li>
-  <li>Поставьте расширения Biome и ESLint. VS Code сам предложит их, они записаны в <code>.vscode/extensions.json</code>.</li>
-  <li>Укажите путь к своему d8 в <code>.vscode/settings.json</code>, настройка <code>regions.d8Path</code>. Тогда Cmd+Shift+B запускает открытый файл командой <code>d8 --harmony-regions --module --expose-gc --max-serializer-memory=4000 файл.js</code>.</li>
+  <li>Откройте папку <code>playground</code> в VS Code целиком (File → Open Folder). Типы и правила подключаются из её настроек, отдельный файл они не увидят.</li>
+  <li>Выполните <code>npm install</code>: он ставит Biome, ESLint и TypeScript.</li>
+  <li>Поставьте расширения Biome и ESLint. VS Code сам предложит их, они записаны в <code>.vscode/extensions.json</code>.</li>
+  <li>Укажите путь к своему d8 в <code>.vscode/settings.json</code>, настройка <code>regions.d8Path</code>. Тогда Cmd+Shift+B запускает открытый файл командой <code>d8 --harmony-regions --module --expose-gc --max-serializer-memory=4000 файл.js</code>.</li>
 </ol>
-<p>То же можно проверить из терминала, в папке песочницы:</p>
+<p>То же можно проверить из терминала, в папке песочницы:</p>
 <pre class="shell"><span class="prompt">$ </span>npm run typecheck      # типы, tsc
 <span class="prompt">$ </span>npm run lint           # правила Biome
 <span class="prompt">$ </span>npm run lint:regions   # правила ESLint для папки examples
 <span class="prompt">$ </span>npm run test:rules     # тесты самих правил ESLint</pre>
-<p>В <code>examples/mistakes.js</code> собраны типичные ошибки, и каждая должна подсветиться. Если подсветки нет, начните с этого файла.</p>
+<p>В <code>examples/mistakes.js</code> собраны типичные ошибки, и каждая должна подсветиться. Если подсветки нет, начните с этого файла.</p>
 <div class="callout aside">
 <span class="callout-title">Если поменяли плагин</span>
-<p>Сервер ESLint в VS Code загружает плагин один раз. После правки файлов в <code>eslint-plugin-regions/</code> перезапустите его: палитра команд → «ESLint: Restart ESLint Server». Иначе редактор будет показывать старые сообщения или не покажет новые.</p>
+<p>Сервер ESLint в VS Code загружает плагин один раз. После правки файлов в <code>eslint-plugin-regions/</code> перезапустите его: палитра команд → «ESLint: Restart ESLint Server». Иначе редактор будет показывать старые сообщения или не покажет новые.</p>
 </div>
 
-<h2 id="types">Типы</h2>
-<p>Файл <code>types/regions.d.ts</code> описывает <code>Region</code>, <code>spawn</code>, <code>Channel</code> и глобальные функции d8 (<code>print</code>, <code>Worker</code> с его <code>getMessage</code>). Встроенный в VS Code TypeScript читает его через <code>jsconfig.json</code>, ставить ничего не нужно. Это даёт автодополнение и проверку того, что кладётся в регион: результат <code>run</code>, аргументы <code>Region.object()</code>, <code>Region.array()</code> и <code>spawn</code> должны быть данными (примитивы, простые объекты, массивы, типизированные массивы).</p>
+<h2 id="types"><a class="anchor" href="#types" aria-hidden="true" tabindex="-1"></a>Типы</h2>
+<p>Файл <code>types/regions.d.ts</code> описывает <code>Region</code>, <code>spawn</code>, <code>Channel</code> и глобальные функции d8 (<code>print</code>, <code>Worker</code> с его <code>getMessage</code>). Встроенный в VS Code TypeScript читает его через <code>jsconfig.json</code>, ставить ничего не нужно. Это даёт автодополнение и проверку того, что кладётся в регион: результат <code>run</code>, аргументы <code>Region.object()</code>, <code>Region.array()</code> и <code>spawn</code> должны быть данными (примитивы, простые объекты, массивы, типизированные массивы).</p>
 <div class="versus">
 <figure class="snippet bad"><div class="snippet-head"><span class="mark" aria-hidden="true"></span>Плохо</div><pre class="code"><code>region.<span class="tok-api">run</span>(() =&gt; <span class="tok-keyword">new</span> <span class="tok-fn">Map</span>());
 region.<span class="tok-fn">frezee</span>();
@@ -86,11 +94,11 @@ state.total = <span class="tok-number">1</span>;</code></pre></figure>
 <pre class="shell wrap">error TS2322: Type 'Map&lt;any, any&gt;' is not assignable to type 'RegionData'.
 error TS2551: Property 'frezee' does not exist on type 'Region'. Did you mean 'freeze'?
 error TS2339: Property 'total' does not exist on type '{ count: number; }'.</pre>
-<p>Последняя ошибка — та же фиксированная форма, что и в d8 (<a href="guide.html#rules">чтение и запись</a>): тип результата <code>run</code> знает только поля, которые были при создании.</p>
-<p>Чего типы не знают. Типизированный массив поверх <code>SharedArrayBuffer</code> для них такой же, как любой другой, а d8 его отклонит. Что можно отправить в канал, типы не проверяют: у <code>Channel</code> без параметра тип значения <code>any</code>.</p>
+<p>Последняя ошибка — та же фиксированная форма, что и в d8 (<a href="guide.html#rules">чтение и запись</a>): тип результата <code>run</code> знает только поля, которые были при создании.</p>
+<p>Чего типы не знают. Типизированный массив поверх <code>SharedArrayBuffer</code> для них такой же, как любой другой, а d8 его отклонит. Что можно отправить в канал, типы не проверяют: у <code>Channel</code> без параметра тип значения <code>any</code>.</p>
 
-<h2 id="biome">Biome</h2>
-<p>Правила Biome лежат в <code>rules/*.grit</code> и подключены в <code>biome.json</code>. Они ищут шаблоны в коде и не следят за порядком выполнения. Четыре правила повторяют проверки, которые <code>spawn</code> делает при вызове, только раньше, в редакторе.</p>
+<h2 id="biome"><a class="anchor" href="#biome" aria-hidden="true" tabindex="-1"></a>Biome</h2>
+<p>Правила Biome лежат в <code>rules/*.grit</code> и подключены в <code>biome.json</code>. Они ищут шаблоны в коде и не следят за порядком выполнения. Четыре правила повторяют проверки, которые <code>spawn</code> делает при вызове, только раньше, в редакторе.</p>
 <div class="versus">
 <figure class="snippet bad"><div class="snippet-head"><span class="mark" aria-hidden="true"></span>Плохо</div><pre class="code"><code><span class="tok-api">spawn</span>(() =&gt; { <span class="tok-keyword">class</span> Local {} <span class="tok-keyword">return</span> Local.name; });
 <span class="tok-api">spawn</span>(() =&gt; <span class="tok-fn">eval</span>(<span class="tok-string">'1 + 1'</span>));
@@ -101,13 +109,13 @@ error TS2339: Property 'total' does not exist on type '{ count: number; }'.</pre
 × spawn() callbacks cannot use eval or with: the variables they need cannot be known in advance.
 × spawn() needs an arrow function or a function expression; methods cannot be sent to a worker. Wrap it: spawn(() => ...).
 ! join() blocks this thread until the task ends; on the main thread prefer `await spawn(...)`.</pre>
-<p>Правило про <code>join()</code> срабатывает только на цепочку <code>spawn(...).join()</code> и не знает, в каком потоке код. В воркере или в коротком скрипте d8 <code>join()</code> уместен, и предупреждение можно игнорировать. Почему в главном потоке лучше <code>await</code>, показано в <a href="practices.html#await">практике 7</a>.</p>
+<p>Правило про <code>join()</code> срабатывает только на цепочку <code>spawn(...).join()</code> и не знает, в каком потоке код. В воркере или в коротком скрипте d8 <code>join()</code> уместен, и предупреждение можно игнорировать. Почему в главном потоке лучше <code>await</code>, показано в <a href="practices.html#await">практике 7</a>.</p>
 
-<h2 id="eslint">ESLint</h2>
-<p>Плагин <code>eslint-plugin-regions/</code> подключён в <code>eslint.config.mjs</code> набором <code>recommended</code>. В нём три правила. ESLint видит области видимости переменных и порядок выражений, поэтому может сказать «регион уехал в задачу на строке 3, а на строке 4 его читают».</p>
+<h2 id="eslint"><a class="anchor" href="#eslint" aria-hidden="true" tabindex="-1"></a>ESLint</h2>
+<p>Плагин <code>eslint-plugin-regions/</code> подключён в <code>eslint.config.mjs</code> набором <code>recommended</code>. В нём три правила. ESLint видит области видимости переменных и порядок выражений, поэтому может сказать «регион уехал в задачу на строке 3, а на строке 4 его читают».</p>
 
-<h3 id="no-floating-spawn"><code>regions/no-floating-spawn</code></h3>
-<p>Ручку задачи никто не ждёт: ни <code>await</code>, ни <code>join()</code>, ни возврата из функции. Результат и ошибка такой задачи теряются (ошибку d8 всё же покажет, см. <a href="spawn.html#unhandled">«Ошибки не теряются»</a>). Это предупреждение, а не ошибка.</p>
+<h3 id="no-floating-spawn"><a class="anchor" href="#no-floating-spawn" aria-hidden="true" tabindex="-1"></a><code>regions/no-floating-spawn</code></h3>
+<p>Ручку задачи никто не ждёт: ни <code>await</code>, ни <code>join()</code>, ни возврата из функции. Результат и ошибка такой задачи теряются (ошибку d8 всё же покажет, см. <a href="spawn.html#unhandled">«Ошибки не теряются»</a>). Это предупреждение, а не ошибка.</p>
 <div class="versus">
 <figure class="snippet bad"><div class="snippet-head"><span class="mark" aria-hidden="true"></span>Плохо</div><pre class="code"><code><span class="tok-api">spawn</span>(() =&gt; <span class="tok-number">1</span>);
 
@@ -118,10 +126,10 @@ error TS2339: Property 'total' does not exist on type '{ count: number; }'.</pre
 </div>
 <pre class="shell wrap">warning  The result of spawn() is neither awaited nor joined, so its value and errors are lost. Use `await spawn(...)`, `.join()`, or return the handle, e.g. to Promise.all()
 warning  This callback returns `i`, not the handle of this spawn(), so whoever waits for the callback (e.g. Promise.all over map()) does not wait for the task. Return the handle: `return spawn(...)`, or `return spawn(...).then(() =&gt; i)` to keep the value</pre>
-<p>Второй случай — колбэк <code>map</code>, который запускает задачу, но возвращает другое значение. <code>Promise.all</code> тогда ждёт это значение, а не задачу (<a href="practices.html#map">практика 10</a>). Задачи, запущенные внутри другой задачи без <code>await</code>, правило тоже отметит, хотя внешняя задача их дождётся (<a href="spawn.html#nested">задачи внутри задач</a>).</p>
+<p>Второй случай — колбэк <code>map</code>, который запускает задачу, но возвращает другое значение. <code>Promise.all</code> тогда ждёт это значение, а не задачу (<a href="practices.html#map">практика 10</a>). Задачи, запущенные внутри другой задачи без <code>await</code>, правило тоже отметит, хотя внешняя задача их дождётся (<a href="spawn.html#nested">задачи внутри задач</a>).</p>
 
-<h3 id="no-region-use-while-spawned"><code>regions/no-region-use-while-spawned</code></h3>
-<p>Регион, захваченный задачей или переданный ей аргументом, уезжает в воркер и возвращается, когда задача закончилась. Правило находит три ошибки вокруг этого. Все три в d8 закончились бы <code>OwnershipError</code>.</p>
+<h3 id="no-region-use-while-spawned"><a class="anchor" href="#no-region-use-while-spawned" aria-hidden="true" tabindex="-1"></a><code>regions/no-region-use-while-spawned</code></h3>
+<p>Регион, захваченный задачей или переданный ей аргументом, уезжает в воркер и возвращается, когда задача закончилась. Правило находит три ошибки вокруг этого. Все три в d8 закончились бы <code>OwnershipError</code>.</p>
 <div class="versus">
 <figure class="snippet bad"><div class="snippet-head"><span class="mark" aria-hidden="true"></span>Плохо</div><pre class="code"><code><span class="tok-comment">// 1. Регион трогают, пока задача идёт.</span>
 <span class="tok-keyword">const</span> cart = <span class="tok-keyword">new</span> <span class="tok-api">Region</span>().<span class="tok-api">run</span>(() =&gt; ({ total: <span class="tok-number">0</span> }));
@@ -142,11 +150,11 @@ cfgRegion.<span class="tok-api">freeze</span>();
 <pre class="shell wrap">error  'cart' was moved into the spawn() task on line 3 and comes back only when it finishes: using it here throws OwnershipError. Wait for the task first (await it or call join())
 error  This spawn() runs repeatedly and every task wants to move 'counter': only the first one gets it, the next ones throw OwnershipError. Await each task, freeze the region to share it read-only, or give every task its own data
 error  'config' is in a frozen region: tasks can read it but writing throws OwnershipError. Thaw it first, or let one task own it instead of freezing</pre>
-<p>Правило понимает, что задача закончилась, если её ждут через <code>await</code> (в том числе в <code>Promise.all</code>) или <code>join()</code>, и что замороженный регион не уезжает, а становится общим. Заморозку оно отслеживает по вызовам <code>freeze()</code> и <code>thaw()</code> до <code>spawn</code>.</p>
-<p>Анализ простой, и у него есть границы. Регионом правило считает переменную, созданную через <code>что-то.run(...)</code>. Объекты региона, полученные иначе (результат задачи, поле другого объекта, <code>Region.object()</code>), оно не отслеживает. С опцией <code>checkAllCaptures</code> оно проверяет все захваченные переменные, но тогда будет ругаться и на обычные данные, которые просто копируются. Обращения из колбэков, которые выполнятся позже (таймеры, обработчики), правило не отмечает: оно не знает, закончится ли задача к тому времени.</p>
+<p>Правило понимает, что задача закончилась, если её ждут через <code>await</code> (в том числе в <code>Promise.all</code>) или <code>join()</code>, и что замороженный регион не уезжает, а становится общим. Заморозку оно отслеживает по вызовам <code>freeze()</code> и <code>thaw()</code> до <code>spawn</code>.</p>
+<p>Анализ простой, и у него есть границы. Регионом правило считает переменную, созданную через <code>что-то.run(...)</code>. Объекты региона, полученные иначе (результат задачи, поле другого объекта, <code>Region.object()</code>), оно не отслеживает. С опцией <code>checkAllCaptures</code> оно проверяет все захваченные переменные, но тогда будет ругаться и на обычные данные, которые просто копируются. Обращения из колбэков, которые выполнятся позже (таймеры, обработчики), правило не отмечает: оно не знает, закончится ли задача к тому времени.</p>
 
-<h3 id="no-floating-borrow-while"><code>regions/no-floating-borrow-while</code></h3>
-<p><code>borrowWhile</code> с асинхронной функцией держит билет, пока не выполнится её промис. Если этот промис не вернуть из задачи и не дождаться, задача закончится раньше, и билет сдадут посреди работы (<a href="spawn.html#borrow">подробнее</a>).</p>
+<h3 id="no-floating-borrow-while"><a class="anchor" href="#no-floating-borrow-while" aria-hidden="true" tabindex="-1"></a><code>regions/no-floating-borrow-while</code></h3>
+<p><code>borrowWhile</code> с асинхронной функцией держит билет, пока не выполнится её промис. Если этот промис не вернуть из задачи и не дождаться, задача закончится раньше, и билет сдадут посреди работы (<a href="spawn.html#borrow">подробнее</a>).</p>
 <div class="versus">
 <figure class="snippet bad"><div class="snippet-head"><span class="mark" aria-hidden="true"></span>Плохо</div><pre class="code"><code><span class="tok-keyword">await</span> <span class="tok-api">spawn</span>(() =&gt; {
   <span class="tok-api">Region</span>.<span class="tok-keyword">of</span>(config).<span class="tok-api">borrowWhile</span>(<span class="tok-keyword">async</span> () =&gt; {
@@ -161,29 +169,41 @@ error  'config' is in a frozen region: tasks can read it but writing throws Owne
   }));</code></pre></figure>
 </div>
 <pre class="shell wrap">error  borrowWhile() returns a promise here and nobody waits for it: a spawn() task ends without waiting, and its borrow is released before this work is done. Return or await it</pre>
-<p>Голый <code>borrow()</code> с отложенным чтением правило не видит. Такой билет d8 сдаёт в конце задачи сам и печатает предупреждение в воркере.</p>
+<p>Голый <code>borrow()</code> с отложенным чтением правило не видит. Такой билет d8 сдаёт в конце задачи сам и печатает предупреждение в воркере.</p>
 
-<h2 id="literals">Литералы <code>#{}</code> в редакторе</h2>
-<p>Синтаксиса <code>#{...}</code> и <code>#[...]</code> (<a href="guide.html#literals">литералы регионов</a>) нет в JavaScript, поэтому сами по себе инструменты его не знают. Для VS Code в <code>playground/vscode-region-literals</code> лежит расширение. Оно подсвечивает <code>#</code> как оператор и подключает к TypeScript плагин: тот заменяет <code>#</code> перед <code>{</code> и <code>[</code> пробелом до разбора файла. Длина текста не меняется, поэтому ошибки, подсказки и автодополнение стоят на своих местах, а литерал получает тип такого же обычного литерала. Ставится оно символической ссылкой (команда в README расширения), после чего нужен «Developer: Reload Window».</p>
-<p>Одна особенность от самого TypeScript: пустой <code>#[]</code> для него — пустой <code>[]</code>, то есть <code>never[]</code>, и <code>push</code> в него подсвечивается как ошибка. Подскажите тип: <code>/** @type {Order[]} */ (#[])</code>.</p>
-<p>Biome и ESLint литералы не разбирают. В <code>playground/</code> файлы с литералами лежат в <code>experimental/</code>, который оба пропускают, а TypeScript проверяет. Запускайте их в d8 с флагом <code>--harmony-region-literals</code>.</p>
-<p>Без всего этого обходится директива <code>'use region'</code> (<a href="guide.html#use-region">подробнее</a>): с ней обычные <code>{}</code> и <code>[]</code> в функции создаются как <code>#{}</code> и <code>#[]</code>, а для инструментов это обычный JavaScript со строкой-директивой.</p>
+<h2 id="literals"><a class="anchor" href="#literals" aria-hidden="true" tabindex="-1"></a>Литералы <code>#{}</code> в редакторе</h2>
+<p>Синтаксиса <code>#{...}</code> и <code>#[...]</code> (<a href="guide.html#literals">литералы регионов</a>) нет в JavaScript, поэтому сами по себе инструменты его не знают. Для VS Code в <code>playground/vscode-region-literals</code> лежит расширение. Оно подсвечивает <code>#</code> как оператор и подключает к TypeScript плагин: тот заменяет <code>#</code> перед <code>{</code> и <code>[</code> пробелом до разбора файла. Длина текста не меняется, поэтому ошибки, подсказки и автодополнение стоят на своих местах, а литерал получает тип такого же обычного литерала. Ставится оно символической ссылкой (команда в README расширения), после чего нужен «Developer: Reload Window».</p>
+<p>Одна особенность от самого TypeScript: пустой <code>#[]</code> для него — пустой <code>[]</code>, то есть <code>never[]</code>, и <code>push</code> в него подсвечивается как ошибка. Подскажите тип: <code>/** @type {Order[]} */ (#[])</code>.</p>
+<p>Biome и ESLint литералы не разбирают. В <code>playground/</code> файлы с литералами лежат в <code>experimental/</code>, который оба пропускают, а TypeScript проверяет. Запускайте их в d8 с флагом <code>--harmony-region-literals</code>.</p>
+<p>Без всего этого обходится директива <code>'use region'</code> (<a href="guide.html#use-region">подробнее</a>): с ней обычные <code>{}</code> и <code>[]</code> в функции создаются как <code>#{}</code> и <code>#[]</code>, а для инструментов это обычный JavaScript со строкой-директивой.</p>
 
-<h2 id="runtime">Что видно только при запуске</h2>
-<p>Некоторые ошибки нельзя найти, не выполняя код:</p>
+<h2 id="runtime"><a class="anchor" href="#runtime" aria-hidden="true" tabindex="-1"></a>Что видно только при запуске</h2>
+<p>Некоторые ошибки нельзя найти, не выполняя код:</p>
 <ul>
-  <li>захваченная переменная, в которой лежит <code>Map</code>, функция или экземпляр класса: типы проверяют аргументы <code>spawn</code>, но не захваты. Сюда же захваченный <code>this</code> с методами (<a href="spawn.html#this">this и arguments</a>);</li>
-  <li>переменная, захваченная до инициализации, и одно имя с разными значениями в разных функциях (<a href="spawn.html#errors">что spawn отклоняет сразу</a>);</li>
-  <li>обращение к региону, которым сейчас владеет другой поток, если регион пришёл не из <code>run</code> в этой же функции;</li>
+  <li>захваченная переменная, в которой лежит <code>Map</code>, функция или экземпляр класса: типы проверяют аргументы <code>spawn</code>, но не захваты. Сюда же захваченный <code>this</code> с методами (<a href="spawn.html#this">this и arguments</a>);</li>
+  <li>переменная, захваченная до инициализации, и одно имя с разными значениями в разных функциях (<a href="spawn.html#errors">что spawn отклоняет сразу</a>);</li>
+  <li>обращение к региону, которым сейчас владеет другой поток, если регион пришёл не из <code>run</code> в этой же функции;</li>
   <li>чтение замороженного региона без билета, например объекта, который пришёл через <code>postMessage</code> или канал;</li>
-  <li>голый <code>borrow()</code>, переживший задачу, и view типизированного массива, прочитанный до переезда или заморозки.</li>
+  <li>голый <code>borrow()</code>, переживший задачу, и view типизированного массива, прочитанный до переезда или заморозки.</li>
 </ul>
-<p>Линтер здесь только помогает. Защищает от гонок данных сам движок: он проверяет владельца при каждом обращении, сработало правило в редакторе или нет.</p>
+<p>Линтер здесь только помогает. Защищает от гонок данных сам движок: он проверяет владельца при каждом обращении, сработало правило в редакторе или нет.</p>
 <nav class="pager" aria-label="Соседние страницы"><a class="prev" href="practices.html"><span>← Назад</span>Как делать и как не делать</a><a class="next" href="inside.html"><span>Дальше →</span>Как это устроено</a></nav>
-<p class="footer">Регионы владения в V8 — исследовательский прототип, не продукт. Цифры получены на сборке с включёнными проверками (dcheck), Apple Silicon.</p>
+<p class="footer">Регионы владения в V8 — исследовательский прототип, не продукт. Цифры получены на сборке с включёнными проверками (dcheck), Apple Silicon, если на странице не сказано иное.</p>
 </article>
 </main>
+<aside class="toc" aria-label="На этой странице"><p class="toc-title">На этой странице</p><ol>
+<li class="h2"><a href="#layers">Кто что ловит</a></li>
+<li class="h2"><a href="#setup">Как подключить</a></li>
+<li class="h2"><a href="#types">Типы</a></li>
+<li class="h2"><a href="#biome">Biome</a></li>
+<li class="h2"><a href="#eslint">ESLint</a></li>
+<li class="h3"><a href="#no-floating-spawn">regions/no-floating-spawn</a></li>
+<li class="h3"><a href="#no-region-use-while-spawned">regions/no-region-use-while-spawned</a></li>
+<li class="h3"><a href="#no-floating-borrow-while">regions/no-floating-borrow-while</a></li>
+<li class="h2"><a href="#literals">Литералы #{} в редакторе</a></li>
+<li class="h2"><a href="#runtime">Что видно только при запуске</a></li>
+</ol></aside>
 </div>
-<script src="assets/site.js"></script>
+<script src="assets/site.js?v=1c0ea72c51"></script>
 </body>
 </html>

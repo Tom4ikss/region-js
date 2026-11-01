@@ -11,6 +11,7 @@
 `// d8-exit: 1` говорит, что пример должен завершиться с этим кодом.
 """
 
+import hashlib
 import html
 import math
 import os
@@ -686,6 +687,33 @@ LOGO = ('<svg width="26" height="26" viewBox="0 0 26 26" aria-hidden="true">'
         '<rect x="6" y="6" width="14" height="14" rx="4" fill="none" stroke="#fff" stroke-width="2"/>'
         '<circle cx="13" cy="13" r="2.6" fill="#fff"/></svg>')
 
+GROUPS = [
+    ('Введение', ['index', 'problem', 'ideas']),
+    ('Руководство', ['spawn', 'guide', 'channels', 'practices', 'tooling']),
+    ('Подробности', ['inside', 'numbers', 'limits']),
+]
+
+REPO = 'https://github.com/Tom4ikss/region-js'
+
+GITHUB_ICON = ('<svg viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 '
+               '3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23'
+               '-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87'
+               '.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64'
+               '-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 '
+               '2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 '
+               '8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>')
+
+THEME_ICONS = ('<svg class="sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" '
+               'stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2'
+               'M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>'
+               '<svg class="moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" '
+               'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 '
+               '11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>')
+
+# Тема выбирается до первой отрисовки, чтобы страница не мигала.
+THEME_SCRIPT = ("<script>try{var t=localStorage.getItem('theme');"
+                "if(t)document.documentElement.classList.add(t)}catch(e){}</script>")
+
 LAYOUT = '''<!doctype html>
 <html lang="ru">
 <head>
@@ -694,7 +722,9 @@ LAYOUT = '''<!doctype html>
 <meta name="color-scheme" content="light dark">
 <meta name="description" content="{description}">
 <title>{title} · Регионы владения в V8</title>
-<link rel="stylesheet" href="assets/style.css">
+{theme_script}
+<link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="assets/style.css?v={css_v}">
 </head>
 <body>
 <header class="topbar">
@@ -702,26 +732,104 @@ LAYOUT = '''<!doctype html>
   <span class="badge">эксперимент · форк V8</span>
   <span class="spacer"></span>
   <span class="meta">работает только в d8</span>
+  <a class="icon-btn" href="{repo}" aria-label="Код на GitHub">{github}<span class="label">GitHub</span></a>
+  <button class="icon-btn theme-toggle" type="button" aria-label="Сменить тему">{theme_icons}</button>
 </header>
 <div class="layout">
 <nav class="sidebar" aria-label="Разделы">
-<ol>
 {nav}
-</ol>
 <p class="side-note">Исследовательский прототип. Все примеры на сайте запущены в собранном d8, вывод настоящий.</p>
 </nav>
 <main>
 <article class="content">
 {body}
 <nav class="pager" aria-label="Соседние страницы">{pager}</nav>
-<p class="footer">Регионы владения в V8 — исследовательский прототип, не продукт. Цифры получены на сборке с включёнными проверками (dcheck), Apple Silicon.</p>
+<p class="footer">Регионы владения в V8 — исследовательский прототип, не продукт. Цифры получены на сборке с включёнными проверками (dcheck), Apple Silicon, если на странице не сказано иное.</p>
 </article>
 </main>
+{toc}
 </div>
-<script src="assets/site.js"></script>
+<script src="assets/site.js?v={js_v}"></script>
 </body>
 </html>
 '''
+
+# ---------------------------------------------------------------- заголовки и типографика
+
+TRANSLIT = dict(zip('абвгдеёжзийклмнопрстуфхцчшщъыьэюя',
+                    ['a', 'b', 'v', 'g', 'd', 'e', 'e', 'zh', 'z', 'i', 'y', 'k', 'l', 'm', 'n', 'o', 'p', 'r',
+                     's', 't', 'u', 'f', 'h', 'ts', 'ch', 'sh', 'sch', '', 'y', '', 'e', 'yu', 'ya']))
+
+
+def slugify(text):
+    text = ''.join(TRANSLIT.get(c, c) for c in text.lower())
+    return re.sub(r'[^a-z0-9]+', '-', text).strip('-')[:48] or 'section'
+
+
+HEADING = re.compile(r'<(h[23])((?:\s+[\w-]+="[^"]*")*)>(.*?)</\1>', re.S)
+
+
+def headings(body):
+    """Даёт каждому h2 и h3 id и якорь и возвращает список для оглавления."""
+    toc, seen = [], set(re.findall(r'\bid="([^"]+)"', body))
+
+    def fix(m):
+        tag, attrs, inner = m.group(1), m.group(2), m.group(3)
+        text = html.unescape(re.sub(r'<[^>]+>', '', inner)).strip()
+        mid = re.search(r'\bid="([^"]+)"', attrs)
+        if mid:
+            hid = mid.group(1)
+        else:
+            base = hid = slugify(text)
+            n = 2
+            while hid in seen:
+                hid = '%s-%d' % (base, n)
+                n += 1
+            seen.add(hid)
+            attrs += ' id="%s"' % hid
+        toc.append((tag, hid, text))
+        anchor = '<a class="anchor" href="#%s" aria-hidden="true" tabindex="-1"></a>' % hid
+        return '<%s%s>%s%s</%s>' % (tag, attrs, anchor, inner, tag)
+
+    return HEADING.sub(fix, body), toc
+
+
+def toc_block(toc):
+    if len(toc) < 2:
+        return '<aside class="toc" aria-hidden="true"></aside>'
+    items = '\n'.join('<li class="%s"><a href="#%s">%s</a></li>' % (tag, hid, html.escape(text))
+                      for tag, hid, text in toc)
+    return ('<aside class="toc" aria-label="На этой странице"><p class="toc-title">На этой странице</p>'
+            '<ol>\n%s\n</ol></aside>' % items)
+
+
+# Тексты не трогаются внутри этих тегов.
+RAW_TAGS = {'pre', 'code', 'svg', 'script', 'style', 'title'}
+SHORT_WORD = re.compile(r'(?<![\w-])([А-Яа-яЁё]{1,2}|[0-9]+) (?=\S)')
+DASH = re.compile(r' (—|–) ')
+
+
+def typograph(body):
+    """Неразрывный пробел после коротких слов и чисел и перед тире, как в книгах."""
+    out, raw = [], 0
+    for part in re.split(r'(<[^>]+>)', body):
+        if part.startswith('<'):
+            m = re.match(r'<(/?)([a-zA-Z0-9]+)', part)
+            if m and m.group(2).lower() in RAW_TAGS and not part.endswith('/>'):
+                raw += -1 if m.group(1) else 1
+            out.append(part)
+        elif raw > 0 or part.startswith('<!--'):
+            out.append(part)
+        else:
+            part = SHORT_WORD.sub('\\1\u00a0', part)
+            out.append(DASH.sub('\u00a0\\1 ', part))
+    return ''.join(out)
+
+
+def asset_version(name):
+    """Хэш файла в ссылке, чтобы браузер не держал старую версию из кэша."""
+    with open(os.path.join(ROOT, 'assets', name), 'rb') as f:
+        return hashlib.sha1(f.read()).hexdigest()[:10]
 
 
 def build(run=True):
@@ -741,10 +849,18 @@ def build(run=True):
         body = re.sub(r'<!--\s*ex:([\w.-]+\.js)((?:\s+\w+)*)\s*-->', ex, body)
         body = re.sub(r'<!--\s*chart:([\w-]+)\s*-->', lambda m: hbar_chart(CHARTS[m.group(1)]), body)
         body = SNIPPET.sub(snippet_block, body)
+        body, toc = headings(body)
+        body = typograph(body)
 
-        nav = '\n'.join('<li><a href="%s.html"%s>%s</a></li>'
-                        % (s, ' aria-current="page"' if s == slug else '', html.escape(t))
-                        for s, t in PAGES)
+        titles = dict(PAGES)
+        number = {s: n + 1 for n, (s, _) in enumerate(PAGES)}
+        nav = '\n'.join(
+            '<div class="group"><p class="group-title">%s</p><ol>\n%s\n</ol></div>' % (
+                group, '\n'.join('<li><a href="%s.html"%s><span class="n">%d</span>%s</a></li>'
+                                 % (s, ' aria-current="page"' if s == slug else '', number[s],
+                                    html.escape(titles[s]))
+                                 for s in slugs))
+            for group, slugs in GROUPS)
         pager = ''
         if i > 0:
             ps, pt = PAGES[i - 1]
@@ -754,7 +870,10 @@ def build(run=True):
             pager += '<a class="next" href="%s.html"><span>Дальше →</span>%s</a>' % (ns, html.escape(nt))
         page = LAYOUT.format(title=html.escape(meta.get('title', nav_title)),
                              description=html.escape(meta.get('description', '')),
-                             logo=LOGO, nav=nav, body=body.strip(), pager=pager)
+                             logo=LOGO, nav=nav, body=body.strip(), pager=pager,
+                             toc=toc_block(toc), repo=REPO, github=GITHUB_ICON,
+                             theme_icons=THEME_ICONS, theme_script=THEME_SCRIPT,
+                             css_v=asset_version('style.css'), js_v=asset_version('site.js'))
         with open(os.path.join(ROOT, slug + '.html'), 'w', encoding='utf-8') as f:
             f.write(page)
         print('built %s.html' % slug)

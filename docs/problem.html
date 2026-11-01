@@ -6,7 +6,9 @@
 <meta name="color-scheme" content="light dark">
 <meta name="description" content="Почему JS однопоточный, почему долгая задача замораживает интерфейс, что дают Web Workers и почему postMessage копирует данные.">
 <title>Зачем это нужно · Регионы владения в V8</title>
-<link rel="stylesheet" href="assets/style.css">
+<script>try{var t=localStorage.getItem('theme');if(t)document.documentElement.classList.add(t)}catch(e){}</script>
+<link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="assets/style.css?v=762f1ac439">
 </head>
 <body>
 <header class="topbar">
@@ -14,39 +16,45 @@
   <span class="badge">эксперимент · форк V8</span>
   <span class="spacer"></span>
   <span class="meta">работает только в d8</span>
+  <a class="icon-btn" href="https://github.com/Tom4ikss/region-js" aria-label="Код на GitHub"><svg viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg><span class="label">GitHub</span></a>
+  <button class="icon-btn theme-toggle" type="button" aria-label="Сменить тему"><svg class="sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg><svg class="moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg></button>
 </header>
 <div class="layout">
 <nav class="sidebar" aria-label="Разделы">
-<ol>
-<li><a href="index.html">Что это такое</a></li>
-<li><a href="problem.html" aria-current="page">Зачем это нужно</a></li>
-<li><a href="ideas.html">Идея владения</a></li>
-<li><a href="spawn.html">spawn: задачи в потоках</a></li>
-<li><a href="guide.html">Данные в регионах</a></li>
-<li><a href="channels.html">Каналы</a></li>
-<li><a href="practices.html">Как делать и как не делать</a></li>
-<li><a href="tooling.html">Редактор и линтеры</a></li>
-<li><a href="inside.html">Как это устроено</a></li>
-<li><a href="numbers.html">Цифры</a></li>
-<li><a href="limits.html">Ограничения и планы</a></li>
-</ol>
+<div class="group"><p class="group-title">Введение</p><ol>
+<li><a href="index.html"><span class="n">1</span>Что это такое</a></li>
+<li><a href="problem.html" aria-current="page"><span class="n">2</span>Зачем это нужно</a></li>
+<li><a href="ideas.html"><span class="n">3</span>Идея владения</a></li>
+</ol></div>
+<div class="group"><p class="group-title">Руководство</p><ol>
+<li><a href="spawn.html"><span class="n">4</span>spawn: задачи в потоках</a></li>
+<li><a href="guide.html"><span class="n">5</span>Данные в регионах</a></li>
+<li><a href="channels.html"><span class="n">6</span>Каналы</a></li>
+<li><a href="practices.html"><span class="n">7</span>Как делать и как не делать</a></li>
+<li><a href="tooling.html"><span class="n">8</span>Редактор и линтеры</a></li>
+</ol></div>
+<div class="group"><p class="group-title">Подробности</p><ol>
+<li><a href="inside.html"><span class="n">9</span>Как это устроено</a></li>
+<li><a href="numbers.html"><span class="n">10</span>Цифры</a></li>
+<li><a href="limits.html"><span class="n">11</span>Ограничения и планы</a></li>
+</ol></div>
 <p class="side-note">Исследовательский прототип. Все примеры на сайте запущены в собранном d8, вывод настоящий.</p>
 </nav>
 <main>
 <article class="content">
 <p class="eyebrow">Глава 1</p>
 <h1>Зачем это нужно</h1>
-<p class="lead">JavaScript выполняет ваш код в одном потоке. Пока он занят, страница не отвечает. Воркеры дают второй поток, но общаться с ним приходится через копии данных. На этой странице — почему так устроено и чем это неудобно.</p>
+<p class="lead">JavaScript выполняет ваш код в одном потоке. Пока он занят, страница не отвечает. Воркеры дают второй поток, но общаться с ним приходится через копии данных. На этой странице — почему так устроено и чем это неудобно.</p>
 
-<h2>Один поток и очередь задач</h2>
-<p>У страницы есть главный поток. В нём выполняется ваш JS, в нём же браузер обрабатывает клики и рисует кадры. Всё это стоит в одной очереди: задача за задачей, по одной.</p>
+<h2 id="odin-potok-i-ochered-zadach"><a class="anchor" href="#odin-potok-i-ochered-zadach" aria-hidden="true" tabindex="-1"></a>Один поток и очередь задач</h2>
+<p>У страницы есть главный поток. В нём выполняется ваш JS, в нём же браузер обрабатывает клики и рисует кадры. Всё это стоит в одной очереди: задача за задачей, по одной.</p>
 
 <div class="callout analogy">
 <span class="callout-title">Аналогия</span>
-<p>Представьте магазин с одной кассой. Кассир обслуживает покупателей по очереди. Если один покупатель выкладывает на ленту тележку на полчаса, остальные ждут, даже если у них в руках одна бутылка воды. Кассир не может отвлечься на них посреди чужой покупки.</p>
+<p>Представьте магазин с одной кассой. Кассир обслуживает покупателей по очереди. Если один покупатель выкладывает на ленту тележку на полчаса, остальные ждут, даже если у них в руках одна бутылка воды. Кассир не может отвлечься на них посреди чужой покупки.</p>
 </div>
 
-<p>Чтобы анимация была плавной, браузеру нужно рисовать кадр примерно каждые 16 мс. Если ваша функция считает 800 мс (разбирает большой JSON, строит индекс для поиска, считает раскладку графа), всё это время кадры не рисуются и клики ждут. Пользователь видит, что страница зависла.</p>
+<p>Чтобы анимация была плавной, браузеру нужно рисовать кадр примерно каждые 16 мс. Если ваша функция считает 800 мс (разбирает большой JSON, строит индекс для поиска, считает раскладку графа), всё это время кадры не рисуются и клики ждут. Пользователь видит, что страница зависла.</p>
 
 <figure class="diagram">
 <svg viewBox="0 0 680 190" role="img" aria-labelledby="p1t">
@@ -82,15 +90,15 @@
 <rect class="d-fill-b" x="380" y="14" width="12" height="12" rx="3"/>
 <text class="d-t-s" x="398" y="24">одна долгая задача</text>
 </svg>
-<figcaption>Пока идёт долгая задача, кадры не рисуются, а клики копятся в очереди и будут обработаны только после неё.</figcaption>
+<figcaption>Пока идёт долгая задача, кадры не рисуются, а клики копятся в очереди и будут обработаны только после неё.</figcaption>
 </figure>
 
-<h2>Web Workers: второй поток, но свой мир</h2>
-<p>Тяжёлую работу можно вынести в <a href="https://developer.mozilla.org/ru/docs/Web/API/Web_Workers_API">Web Worker</a>. Это отдельный поток со своим JS. Главный поток в это время свободен и рисует кадры.</p>
-<p>Но у воркера своя память. Он не видит ваших переменных и объектов: в движке у каждого потока своя куча (место, где лежат объекты) и свои глобальные объекты. Связь одна — сообщения через <code>postMessage</code>.</p>
+<h2 id="web-workers-vtoroy-potok-no-svoy-mir"><a class="anchor" href="#web-workers-vtoroy-potok-no-svoy-mir" aria-hidden="true" tabindex="-1"></a>Web Workers: второй поток, но свой мир</h2>
+<p>Тяжёлую работу можно вынести в <a href="https://developer.mozilla.org/ru/docs/Web/API/Web_Workers_API">Web Worker</a>. Это отдельный поток со своим JS. Главный поток в это время свободен и рисует кадры.</p>
+<p>Но у воркера своя память. Он не видит ваших переменных и объектов: в движке у каждого потока своя куча (место, где лежат объекты) и свои глобальные объекты. Связь одна — сообщения через <code>postMessage</code>.</p>
 
-<h3>postMessage копирует</h3>
-<p>Когда вы пишете <code>worker.postMessage(data)</code>, браузер делает structured clone: обходит весь граф объектов, записывает его в байты, а на стороне воркера собирает заново. Получатель держит в руках копию. Если он что-то в ней поменяет, у отправителя ничего не изменится.</p>
+<h3 id="postmessage-kopiruet"><a class="anchor" href="#postmessage-kopiruet" aria-hidden="true" tabindex="-1"></a>postMessage копирует</h3>
+<p>Когда вы пишете <code>worker.postMessage(data)</code>, браузер делает structured clone: обходит весь граф объектов, записывает его в байты, а на стороне воркера собирает заново. Получатель держит в руках копию. Если он что-то в ней поменяет, у отправителя ничего не изменится.</p>
 
 <figure class="diagram">
 <svg viewBox="0 0 680 210" role="img" aria-labelledby="p2t">
@@ -112,22 +120,22 @@
 <text class="d-t-s" x="340" y="145" text-anchor="middle">записать в байты,</text>
 <text class="d-t-s" x="340" y="162" text-anchor="middle">собрать заново</text>
 </svg>
-<figcaption>Сколько узлов в дереве, столько работы. Платят оба потока: отправитель — за запись, получатель — за сборку.</figcaption>
+<figcaption>Сколько узлов в дереве, столько работы. Платят оба потока: отправитель — за запись, получатель — за сборку.</figcaption>
 </figure>
 
-<p>Копия — это безопасно: у каждого потока свои данные, мешать друг другу им нечем. Но это долго. Дерево из миллиона узлов копируется почти секунду (928 мс в наших замерах). Если нужно отправить данные в воркер, обработать и вернуть, вы платите дважды. А часть этой работы выполняет главный поток, то есть та самая касса, которую мы хотели разгрузить.</p>
+<p>Копия — это безопасно: у каждого потока свои данные, мешать друг другу им нечем. Но это долго. Дерево из миллиона узлов копируется почти секунду (928 мс в наших замерах). Если нужно отправить данные в воркер, обработать и вернуть, вы платите дважды. А часть этой работы выполняет главный поток, то есть та самая касса, которую мы хотели разгрузить.</p>
 
 <div class="callout analogy">
 <span class="callout-title">Аналогия</span>
-<p>Вы отправляете коллеге в другой офис папку документов. Курьер не может взять оригинал, поэтому папку целиком ксерокопируют. Чем толще папка, тем дольше ждать. И пометки коллеги останутся на его копии: ваш экземпляр они не изменят.</p>
+<p>Вы отправляете коллеге в другой офис папку документов. Курьер не может взять оригинал, поэтому папку целиком ксерокопируют. Чем толще папка, тем дольше ждать. И пометки коллеги останутся на его копии: ваш экземпляр они не изменят.</p>
 </div>
 
-<h3>Transferable: без копии, но только байты</h3>
-<p>Для <code>ArrayBuffer</code> есть исключение: его можно передать в списке transfer, <code>postMessage(buf, [buf])</code>. Тогда копии нет, буфер просто меняет хозяина, а у отправителя он становится пустым. Это быстро, но работает только с сырыми байтами. Объекты, массивы объектов и строки так не передать: их сначала нужно самому закодировать в байты.</p>
+<h3 id="transferable-bez-kopii-no-tolko-bayty"><a class="anchor" href="#transferable-bez-kopii-no-tolko-bayty" aria-hidden="true" tabindex="-1"></a>Transferable: без копии, но только байты</h3>
+<p>Для <code>ArrayBuffer</code> есть исключение: его можно передать в списке transfer, <code>postMessage(buf, [buf])</code>. Тогда копии нет, буфер просто меняет хозяина, а у отправителя он становится пустым. Это быстро, но работает только с сырыми байтами. Объекты, массивы объектов и строки так не передать: их сначала нужно самому закодировать в байты.</p>
 
-<h3>SharedArrayBuffer: общая память и гонки</h3>
-<p><code>SharedArrayBuffer</code> идёт дальше. Это кусок памяти, который видят сразу несколько потоков. Копировать ничего не нужно, но опять только байты. Объектов в нём нет, раскладывать данные по смещениям вы будете сами. В браузере он к тому же доступен только на страницах со специальными заголовками (cross-origin isolation).</p>
-<p>Главная проблема в другом. Когда два потока одновременно пишут в одну и ту же память, получается <strong>гонка данных</strong> (data race). Вот два воркера, которые по миллиону раз увеличивают один и тот же счётчик:</p>
+<h3 id="sharedarraybuffer-obschaya-pamyat-i-gonki"><a class="anchor" href="#sharedarraybuffer-obschaya-pamyat-i-gonki" aria-hidden="true" tabindex="-1"></a>SharedArrayBuffer: общая память и гонки</h3>
+<p><code>SharedArrayBuffer</code> идёт дальше. Это кусок памяти, который видят сразу несколько потоков. Копировать ничего не нужно, но опять только байты. Объектов в нём нет, раскладывать данные по смещениям вы будете сами. В браузере он к тому же доступен только на страницах со специальными заголовками (cross-origin isolation).</p>
+<p>Главная проблема в другом. Когда два потока одновременно пишут в одну и ту же память, получается <strong>гонка данных</strong> (data race). Вот два воркера, которые по миллиону раз увеличивают один и тот же счётчик:</p>
 
 <figure class="example"><div class="ex-head"><span class="file"><a href="examples/16-race-sab.js">examples/16-race-sab.js</a></span><button class="copy" type="button">Копировать</button></div><pre class="code"><code><span class="tok-comment">// Гонка данных на SharedArrayBuffer: два воркера увеличивают один счётчик.</span>
 <span class="tok-keyword">const</span> counter = <span class="tok-keyword">new</span> <span class="tok-fn">Int32Array</span>(<span class="tok-keyword">new</span> <span class="tok-api">SharedArrayBuffer</span>(<span class="tok-number">4</span>));
@@ -148,37 +156,45 @@
   <span class="tok-keyword">for</span> (<span class="tok-keyword">const</span> w <span class="tok-keyword">of</span> workers) w.<span class="tok-api">getMessage</span>();
   <span class="tok-fn">print</span>(atomic ? <span class="tok-string">'с Atomics.add:'</span> : <span class="tok-string">'без Atomics:  '</span>, counter[<span class="tok-number">0</span>], <span class="tok-string">'из 2000000'</span>);
   <span class="tok-keyword">for</span> (<span class="tok-keyword">const</span> w <span class="tok-keyword">of</span> workers) w.<span class="tok-api">terminate</span>();
-}</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8; числа меняются от запуска к запуску</span></div><pre class="out">без Atomics:   1707069 из 2000000
+}</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8; числа меняются от запуска к запуску</span></div><pre class="out">без Atomics:   1707069 из 2000000
 с Atomics.add: 2000000 из 2000000</pre></figure>
 
-<p>Без <code>Atomics</code> счётчик не дошёл до двух миллионов: часть прибавлений потерялась. Сколько именно, каждый раз по-разному. Дело в том, что <code>c[0] = c[0] + 1</code> — это три шага: прочитать, прибавить, записать. Оба потока читают, скажем, 10, оба прибавляют единицу и оба записывают 11. Одно прибавление потерялось.</p>
+<p>Без <code>Atomics</code> счётчик не дошёл до двух миллионов: часть прибавлений потерялась. Сколько именно, каждый раз по-разному. Дело в том, что <code>c[0] = c[0] + 1</code> — это три шага: прочитать, прибавить, записать. Оба потока читают, скажем, 10, оба прибавляют единицу и оба записывают 11. Одно прибавление потерялось.</p>
 
 <div class="callout analogy">
 <span class="callout-title">Аналогия</span>
-<p>Два кассира ведут общий счёт в одной тетради. Оба одновременно смотрят: «в тетради 10». Оба добавляют по одному и оба записывают «11». Продано два товара, а в тетради плюс один. Ни один кассир не ошибся, ошибка в том, что они работали с тетрадью одновременно.</p>
+<p>Два кассира ведут общий счёт в одной тетради. Оба одновременно смотрят: «в тетради 10». Оба добавляют по одному и оба записывают «11». Продано два товара, а в тетради плюс один. Ни один кассир не ошибся, ошибка в том, что они работали с тетрадью одновременно.</p>
 </div>
 
-<p><code>Atomics.add</code> делает прибавление неделимым, и счёт сходится. Но это работает для одного числа. Для сложной структуры (дерева, списка, объекта с полями) нужны блокировки, а с ними легко ошибиться: забыть взять замок, взять два замка в разном порядке и зависнуть навсегда. Такие ошибки проявляются редко, случайно и почти не воспроизводятся.</p>
+<p><code>Atomics.add</code> делает прибавление неделимым, и счёт сходится. Но это работает для одного числа. Для сложной структуры (дерева, списка, объекта с полями) нужны блокировки, а с ними легко ошибиться: забыть взять замок, взять два замка в разном порядке и зависнуть навсегда. Такие ошибки проявляются редко, случайно и почти не воспроизводятся.</p>
 
-<h2>Что получается сегодня</h2>
+<h2 id="chto-poluchaetsya-segodnya"><a class="anchor" href="#chto-poluchaetsya-segodnya" aria-hidden="true" tabindex="-1"></a>Что получается сегодня</h2>
 <div class="table-wrap">
 <table>
 <thead><tr><th>Способ</th><th>Что можно передать</th><th>Цена передачи</th><th>Безопасность</th></tr></thead>
 <tbody>
-<tr><td><code>postMessage(data)</code></td><td>почти любые данные</td><td>копия, растёт с размером</td><td>безопасно: у каждого своя копия</td></tr>
+<tr><td><code>postMessage(data)</code></td><td>почти любые данные</td><td>копия, растёт с размером</td><td>безопасно: у каждого своя копия</td></tr>
 <tr><td>transfer <code>ArrayBuffer</code></td><td>только байты</td><td>почти ноль</td><td>безопасно: отправитель теряет буфер</td></tr>
-<tr><td><code>SharedArrayBuffer</code></td><td>только байты</td><td>ноль, память общая</td><td>гонки возможны, нужны <code>Atomics</code> и замки</td></tr>
-<tr><td><strong>Регионы (этот эксперимент)</strong></td><td>объекты, массивы, строки, числа, типизированные массивы</td><td>почти ноль, не зависит от размера</td><td>движок пускает к данным только владельца</td></tr>
+<tr><td><code>SharedArrayBuffer</code></td><td>только байты</td><td>ноль, память общая</td><td>гонки возможны, нужны <code>Atomics</code> и замки</td></tr>
+<tr><td><strong>Регионы (этот эксперимент)</strong></td><td>объекты, массивы, строки, числа, типизированные массивы</td><td>почти ноль, не зависит от размера</td><td>движок пускает к данным только владельца</td></tr>
 </tbody>
 </table>
 </div>
 
-<p>Регионы пытаются совместить удобство первого способа и скорость второго. Объекты остаются обычными объектами JS: с полями, вложенностью и строками. Передаются они как <code>ArrayBuffer</code> в transfer list, то есть меняют хозяина без копии. А <code>spawn</code> и каналы передают их так сами, без списка transfer. А гонок не бывает, потому что движок не даёт двум потокам одновременно трогать данные, если хотя бы один из них пишет. Как именно — на следующей странице.</p>
+<p>Регионы пытаются совместить удобство первого способа и скорость второго. Объекты остаются обычными объектами JS: с полями, вложенностью и строками. Передаются они как <code>ArrayBuffer</code> в transfer list, то есть меняют хозяина без копии. А <code>spawn</code> и каналы передают их так сами, без списка transfer. А гонок не бывает, потому что движок не даёт двум потокам одновременно трогать данные, если хотя бы один из них пишет. Как именно — на следующей странице.</p>
 <nav class="pager" aria-label="Соседние страницы"><a class="prev" href="index.html"><span>← Назад</span>Что это такое</a><a class="next" href="ideas.html"><span>Дальше →</span>Идея владения</a></nav>
-<p class="footer">Регионы владения в V8 — исследовательский прототип, не продукт. Цифры получены на сборке с включёнными проверками (dcheck), Apple Silicon.</p>
+<p class="footer">Регионы владения в V8 — исследовательский прототип, не продукт. Цифры получены на сборке с включёнными проверками (dcheck), Apple Silicon, если на странице не сказано иное.</p>
 </article>
 </main>
+<aside class="toc" aria-label="На этой странице"><p class="toc-title">На этой странице</p><ol>
+<li class="h2"><a href="#odin-potok-i-ochered-zadach">Один поток и очередь задач</a></li>
+<li class="h2"><a href="#web-workers-vtoroy-potok-no-svoy-mir">Web Workers: второй поток, но свой мир</a></li>
+<li class="h3"><a href="#postmessage-kopiruet">postMessage копирует</a></li>
+<li class="h3"><a href="#transferable-bez-kopii-no-tolko-bayty">Transferable: без копии, но только байты</a></li>
+<li class="h3"><a href="#sharedarraybuffer-obschaya-pamyat-i-gonki">SharedArrayBuffer: общая память и гонки</a></li>
+<li class="h2"><a href="#chto-poluchaetsya-segodnya">Что получается сегодня</a></li>
+</ol></aside>
 </div>
-<script src="assets/site.js"></script>
+<script src="assets/site.js?v=1c0ea72c51"></script>
 </body>
 </html>
