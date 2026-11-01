@@ -8621,7 +8621,7 @@ index e98604b7..f204e252 100644
    // Since there are no other threads left, we can lock this mutex without any
    // ceremony. This signals to the tear down code that we are in a safepoint.
 diff --git a/src/execution/isolate.h b/src/execution/isolate.h
-index 793be1a7..fe2c7c25 100644
+index 793be1a7..b00ea27a 100644
 --- a/src/execution/isolate.h
 +++ b/src/execution/isolate.h
 @@ -1796,6 +1796,56 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
@@ -8672,10 +8672,10 @@ index 793be1a7..fe2c7c25 100644
 +    region_holder_slot_.store(slot, std::memory_order_release);
 +  }
 +
-+  // Region pages this isolate took from the memory allocator since it last
-+  // looked for regions to collect. Maintained by RegionAllocator.
-+  int& region_pages_since_collection() {
-+    return region_pages_since_collection_;
++  // Region memory this isolate took since it last looked for regions to
++  // collect. Maintained by RegionAllocator.
++  size_t& region_bytes_since_collection() {
++    return region_bytes_since_collection_;
 +  }
 +
    bool jitless() const { return jitless_; }
@@ -8691,15 +8691,15 @@ index 793be1a7..fe2c7c25 100644
 +  LinearAllocationArea region_allocation_info_;
 +  intptr_t region_allocation_region_ = -1;
 +  std::atomic<int> region_holder_slot_{-1};
-+  int region_pages_since_collection_ = 0;
++  size_t region_bytes_since_collection_ = 0;
  
    // Certain objects may be allocated in RO space if suitable for the snapshot.
    bool enable_ro_allocation_for_snapshot_ = false;
 diff --git a/src/flags/flag-definitions.h b/src/flags/flag-definitions.h
-index f47b7006..8354e97a 100644
+index f47b7006..5cc9752d 100644
 --- a/src/flags/flag-definitions.h
 +++ b/src/flags/flag-definitions.h
-@@ -1306,6 +1306,31 @@ DEFINE_WEAK_IMPLICATION(trace_baseline, trace_baseline_batch_compilation)
+@@ -1306,6 +1306,35 @@ DEFINE_WEAK_IMPLICATION(trace_baseline, trace_baseline_batch_compilation)
  // Internalize into a shared string table in the shared isolate
  DEFINE_BOOL(shared_strings, false, "allow sharing of strings")
  DEFINE_IMPLICATION(shared_strings, shared_heap)
@@ -8725,9 +8725,13 @@ index f47b7006..8354e97a 100644
 +DEFINE_BOOL(region_gc, true,
 +            "let the owner of a region collect it, without stopping other "
 +            "isolates, once nothing points into it")
++DEFINE_BOOL(region_gc_marking, true,
++            "let the owner of a region that it points into mark and sweep "
++            "it in a young generation GC that region_gc_pages asks for")
 +DEFINE_INT(region_gc_pages, 64,
-+           "region pages an isolate takes before it looks for regions to "
-+           "collect in a young generation GC; 0 to look only in full GCs")
++           "region memory, in pages, that an isolate takes before it looks "
++           "for regions to collect in a young generation GC; 0 to look only "
++           "in full GCs")
  DEFINE_BOOL_READONLY(
      harmony_struct, false,
      "DEPRECATED. harmony structs, shared structs, and shared arrays")
@@ -8965,7 +8969,7 @@ index cead3955..2dc18143 100644
  
      shared_trusted_space_allocator_.emplace(
 diff --git a/src/heap/heap.cc b/src/heap/heap.cc
-index edb398ee..de7cbbf9 100644
+index edb398ee..b324775e 100644
 --- a/src/heap/heap.cc
 +++ b/src/heap/heap.cc
 @@ -119,6 +119,7 @@
@@ -9031,7 +9035,7 @@ index edb398ee..de7cbbf9 100644
 +  if (v8_flags.harmony_regions && IsYoungGenerationCollector(collector) &&
 +      gc_reason == GarbageCollectionReason::kRegions &&
 +      !sweeping_in_progress()) {
-+    RegionRegistry::ReportHolders(isolate(), true);
++    RegionRegistry::ReportHolders(isolate(), true, true);
 +  }
  
    if (!incremental_marking_->IsMarking()) {
@@ -9133,10 +9137,10 @@ index a39ccf5e..95e27bd8 100644
    heap()->safepoint()->IterateLocalHeaps([](LocalHeap* local_heap) {
      if (v8_flags.black_allocated_pages) {
 diff --git a/src/heap/mark-compact.cc b/src/heap/mark-compact.cc
-index 4ca7cd53..1826fd6f 100644
+index 4ca7cd53..1af07834 100644
 --- a/src/heap/mark-compact.cc
 +++ b/src/heap/mark-compact.cc
-@@ -2139,6 +2139,129 @@ void MarkCompactCollector::MarkObjectsFromClientHeap(Isolate* client) {
+@@ -2139,6 +2139,137 @@ void MarkCompactCollector::MarkObjectsFromClientHeap(Isolate* client) {
  #endif  // V8_ENABLE_SANDBOX
  }
  
@@ -9197,6 +9201,14 @@ index 4ca7cd53..1826fd6f 100644
 +};
 +
 +}  // namespace
++
++// static
++void MarkCompactCollector::VisitSharedPointersOf(
++    Isolate* isolate, Tagged<HeapObject> host,
++    base::FunctionRef<void(Tagged<HeapObject>)> visit) {
++  SharedHeapReferenceVisitor visitor(isolate, visit);
++  visitor.Visit(host);
++}
 +
 +// static
 +void MarkCompactCollector::VisitPointersToSharedHeap(
@@ -9266,7 +9278,7 @@ index 4ca7cd53..1826fd6f 100644
  bool MarkCompactCollector::MarkTransitiveClosureFixpoint() {
    int iterations = 0;
  
-@@ -6214,8 +6337,9 @@ void MarkCompactCollector::StartSweepSpace(PagedSpace* space) {
+@@ -6214,8 +6345,9 @@ void MarkCompactCollector::StartSweepSpace(PagedSpace* space) {
      }
  
      // One unused page is kept, all further are released before sweeping them.
@@ -9278,7 +9290,7 @@ index 4ca7cd53..1826fd6f 100644
          continue;
        }
 diff --git a/src/heap/mark-compact.h b/src/heap/mark-compact.h
-index 8b1de531..36af5e4c 100644
+index 8b1de531..dbb44925 100644
 --- a/src/heap/mark-compact.h
 +++ b/src/heap/mark-compact.h
 @@ -9,6 +9,7 @@
@@ -9289,7 +9301,7 @@ index 8b1de531..36af5e4c 100644
  #include "src/common/globals.h"
  #include "src/heap/marking-state.h"
  #include "src/heap/marking-visitor.h"
-@@ -190,6 +191,14 @@ class MarkCompactCollector final {
+@@ -190,6 +191,20 @@ class MarkCompactCollector final {
    explicit MarkCompactCollector(Heap* heap);
    ~MarkCompactCollector();
  
@@ -9299,6 +9311,12 @@ index 8b1de531..36af5e4c 100644
 +  // of its heap. The isolate is stopped, and its sweeping is done.
 +  static void VisitPointersToSharedHeap(
 +      Isolate* isolate, bool whole_heap,
++      base::FunctionRef<void(Tagged<HeapObject>)> visit);
++
++  // Calls `visit` with every object in writable shared space that a field of
++  // `host` points to, weak references included.
++  static void VisitSharedPointersOf(
++      Isolate* isolate, Tagged<HeapObject> host,
 +      base::FunctionRef<void(Tagged<HeapObject>)> visit);
 +
   private:
@@ -9334,10 +9352,10 @@ index b5280854..d4e09fc0 100644
    // bitmap offset from generated code and assume that it's stable across 64-bit
    // platforms. In theory, there could be a difference between Linux and Android
 diff --git a/src/heap/paged-spaces.cc b/src/heap/paged-spaces.cc
-index 233ce511..399a3d42 100644
+index 233ce511..6f6c3d25 100644
 --- a/src/heap/paged-spaces.cc
 +++ b/src/heap/paged-spaces.cc
-@@ -302,6 +302,68 @@ bool PagedSpaceBase::TryExpand(LocalHeap* local_heap, AllocationOrigin origin) {
+@@ -302,6 +302,87 @@ bool PagedSpaceBase::TryExpand(LocalHeap* local_heap, AllocationOrigin origin) {
    return true;
  }
  
@@ -9403,14 +9421,41 @@ index 233ce511..399a3d42 100644
 +  DecreaseAllocatedBytes(bytes, page);
 +}
 +
++void SharedSpace::FreeRegionBytes(NormalPage* page, size_t bytes) {
++  DCHECK_GE(page->region_id(), 0);
++  if (bytes == 0) return;
++  base::MutexGuard guard(mutex());
++  page->DecreaseAllocatedBytes(bytes);
++  DecreaseAllocatedBytes(bytes, page);
++}
++
++void SharedSpace::FreeRanges(
++    const std::vector<std::pair<Address, Address>>& ranges) {
++  if (ranges.empty()) return;
++  base::MutexGuard guard(mutex());
++  for (auto [start, end] : ranges) {
++    DCHECK_EQ(NormalPage::FromAddress(start)->region_id(),
++              MutablePage::kNoRegion);
++    Free(start, end - start);
++  }
++}
++
  int PagedSpaceBase::CountTotalPages() const {
    return base::checked_cast<int>(std::distance(begin(), end()));
  }
 diff --git a/src/heap/paged-spaces.h b/src/heap/paged-spaces.h
-index cc81fe9c..7d55db85 100644
+index cc81fe9c..d7618aaf 100644
 --- a/src/heap/paged-spaces.h
 +++ b/src/heap/paged-spaces.h
-@@ -521,6 +521,20 @@ class SharedSpace final : public PagedSpace {
+@@ -11,6 +11,7 @@
+ #include <optional>
+ #include <utility>
+ #include <variant>
++#include <vector>
+ 
+ #include "src/base/bounds.h"
+ #include "src/base/macros.h"
+@@ -521,6 +522,24 @@ class SharedSpace final : public PagedSpace {
    explicit SharedSpace(Heap* heap)
        : PagedSpace(heap, SHARED_SPACE, NOT_EXECUTABLE,
                     FreeList::CreateFreeList(), CompactionSpaceKind::kNone) {}
@@ -9428,6 +9473,10 @@ index cc81fe9c..7d55db85 100644
 +  void SetRegionAreaAllocated(Address top, Address limit, bool allocated);
 +  // A region page that its owner emptied stops counting as allocated.
 +  void SetRegionPageEmpty(NormalPage* page);
++  // Stops counting `bytes` of dead objects on a region page as allocated.
++  void FreeRegionBytes(NormalPage* page, size_t bytes);
++  // Returns ranges of common pages to the free list.
++  void FreeRanges(const std::vector<std::pair<Address, Address>>& ranges);
  };
  
  // -----------------------------------------------------------------------------
@@ -11224,10 +11273,10 @@ index 00000000..844041ef
 +#endif  // V8_OBJECTS_JS_REGION_INL_H_
 diff --git a/src/objects/js-region.cc b/src/objects/js-region.cc
 new file mode 100644
-index 00000000..5030d773
+index 00000000..6ad21bce
 --- /dev/null
 +++ b/src/objects/js-region.cc
-@@ -0,0 +1,2396 @@
+@@ -0,0 +1,2770 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -11238,6 +11287,7 @@ index 00000000..5030d773
 +#include <bitset>
 +#include <limits>
 +#include <unordered_map>
++#include <unordered_set>
 +#include <vector>
 +
 +#include "src/base/lazy-instance.h"
@@ -11249,6 +11299,8 @@ index 00000000..5030d773
 +#include "src/heap/incremental-marking.h"
 +#include "src/heap/large-page-inl.h"
 +#include "src/heap/mark-compact.h"
++#include "src/heap/marking-inl.h"
++#include "src/heap/memory-chunk-layout.h"
 +#include "src/heap/mutable-page-inl.h"
 +#include "src/heap/paged-spaces-inl.h"
 +#include "src/heap/zapping.h"
@@ -11566,19 +11618,50 @@ index 00000000..5030d773
 +}
 +
 +// static
-+void RegionRegistry::ReportHolders(Isolate* isolate, bool collect) {
++void RegionRegistry::ReportHolders(Isolate* isolate, bool collect,
++                                   bool mark) {
 +  int slot = isolate->region_holder_slot();
 +  if (slot < 0 || slot == kSharedHolderSlot) return;
 +  int count = next_region_.load(std::memory_order_acquire);
 +  if (count == 0) return;
 +  uint64_t bit = uint64_t{1} << slot;
++  uintptr_t key = OwnerKey(isolate);
++  // Marking of the shared heap would see objects of the regions; it can
++  // only start in a global safepoint, which waits for this GC. Pointers on a
++  // conservative stack are not reported.
++  collect = collect && v8_flags.region_gc &&
++            !v8_flags.conservative_stack_scanning &&
++            !isolate->shared_space_isolate()
++                 ->heap()
++                 ->incremental_marking()
++                 ->IsMajorMarking();
++  // Nobody else holds such a region, and nobody can start to: the isolate
++  // would have to give it away first.
++  auto collectable = [&](int region) {
++    return in_use_[region].load(std::memory_order_relaxed) &&
++           owners_[region].load(std::memory_order_acquire) == key &&
++           !locked_[region].load(std::memory_order_acquire) &&
++           holders_[region].load(std::memory_order_acquire) == bit;
++  };
++  // Pointers into regions to mark, which are all their roots.
++  std::unordered_map<int, std::vector<Tagged<HeapObject>>> roots;
++  if (collect && mark && v8_flags.region_gc_marking) {
++    for (int region = 0; region < count; region++) {
++      if (collectable(region) && RegionAllocator::ShouldMark(region)) {
++        roots[region];
++      }
++    }
++  }
 +  std::vector<bool> referenced(count);
 +  MarkCompactCollector::VisitPointersToSharedHeap(
 +      isolate, false, [&](Tagged<HeapObject> object) {
 +        int region = RegionOf(isolate, object);
-+        if (region >= 0 && region < count) referenced[region] = true;
++        if (region < 0 || region >= count) return;
++        referenced[region] = true;
++        if (roots.empty()) return;
++        auto it = roots.find(region);
++        if (it != roots.end()) it->second.push_back(object);
 +      });
-+  uintptr_t key = OwnerKey(isolate);
 +  for (int region = 0; region < count; region++) {
 +    if (referenced[region] ||
 +        (holders_[region].load(std::memory_order_relaxed) & bit) == 0) {
@@ -11593,32 +11676,29 @@ index 00000000..5030d773
 +    holders_[region].fetch_and(~bit, std::memory_order_acq_rel);
 +  }
 +  if (collect) {
-+    // Marking of the shared heap would see objects of the regions; it can
-+    // only start in a global safepoint, which waits for this GC.
-+    if (v8_flags.region_gc && !isolate->shared_space_isolate()
-+                                   ->heap()
-+                                   ->incremental_marking()
-+                                   ->IsMajorMarking()) {
-+      // Nobody else holds such a region, and nobody can start to: the
-+      // isolate would have to give it away first.
-+      std::vector<int> unreferenced;
-+      for (int region = 0; region < count; region++) {
-+        if (!referenced[region] && in_use_[region].load(std::memory_order_relaxed) &&
-+            owners_[region].load(std::memory_order_acquire) == key &&
-+            !locked_[region].load(std::memory_order_acquire) &&
-+            holders_[region].load(std::memory_order_acquire) == bit) {
-+          unreferenced.push_back(region);
-+        }
++    std::vector<int> unreferenced;
++    for (int region = 0; region < count; region++) {
++      if (!referenced[region] && collectable(region)) {
++        unreferenced.push_back(region);
 +      }
-+      if (!unreferenced.empty()) RegionAllocator::Collect(isolate, unreferenced);
++    }
++    if (!unreferenced.empty()) RegionAllocator::Collect(isolate, unreferenced);
++    for (auto& [region, region_roots] : roots) {
++      if (referenced[region] && collectable(region)) {
++        RegionAllocator::Mark(isolate, region, region_roots);
++      }
 +    }
 +  }
 +  if (v8_flags.verify_heap) {
++    // No pointer of the isolate is left to memory that a collection or a
++    // marking freed: the pattern there does not start with a filler map, but
++    // reading the map of an object that is not there fails.
 +    MarkCompactCollector::VisitPointersToSharedHeap(
 +        isolate, true, [&](Tagged<HeapObject> object) {
 +          int region = RegionOf(isolate, object);
 +          if (region >= 0) {
 +            CHECK_NE(holders_[region].load(std::memory_order_relaxed) & bit, 0);
++            CHECK(!IsFreeSpaceOrFiller(object));
 +          }
 +        });
 +  }
@@ -11851,28 +11931,39 @@ index 00000000..5030d773
 +  // An id may only be reused once no object of its region is left: otherwise
 +  // the next owner of the id could reach stale objects.
 +  std::vector<bool> live(count);
-+  // Regions with live objects on common pages: their owners cannot collect
-+  // them, since these objects are known only to a shared GC.
-+  std::vector<bool> common(count);
++  // Live objects of regions on common pages, which their owners need to
++  // know to collect them.
++  std::unordered_map<int, std::vector<Address>> common;
 +  std::vector<bool> live_stores(RegionBackingStores::Count());
 +  heap->CompleteSweepingFull(CompleteSweepingReason::kHeapObjectIterator);
++  Isolate* isolate = heap->isolate();
 +  PagedSpaceObjectIterator iterator(heap, heap->shared_space());
 +  for (Tagged<HeapObject> object = iterator.Next(); !object.is_null();
 +       object = iterator.Next()) {
-+    if (!IsJSRegionObject(object)) continue;
++    int page_region = MutablePage::FromHeapObject(isolate, object)->region_id();
++    if (!IsJSRegionObject(object)) {
++      // Values of a region object, or values that optimized code keeps
++      // without their object.
++      if (page_region == MutablePage::kNoRegion && IsFixedArray(object)) {
++        int region = RegionOf(isolate, object);
++        if (region >= 0) common[region].push_back(object.address());
++      }
++      continue;
++    }
 +    int region = Cast<JSRegionObject>(object)->region_id();
 +    live[region] = true;
 +    // Pages of a region hold no objects of other regions: the id of a page
 +    // can only be reused once none of its objects is left.
-+    int page_region =
-+        MutablePage::FromHeapObject(heap->isolate(), object)->region_id();
 +    DCHECK(page_region == MutablePage::kNoRegion || page_region == region);
++    if (page_region == MutablePage::kNoRegion) {
++      common[region].push_back(object.address());
++    }
++    // Values without a region object in them.
 +    Tagged<FixedArray> values = Cast<JSRegionObject>(object)->values();
-+    if (page_region == MutablePage::kNoRegion ||
-+        (HeapLayout::InWritableSharedSpace(values) &&
-+         MutablePage::FromHeapObject(heap->isolate(), values)->region_id() ==
-+             MutablePage::kNoRegion)) {
-+      common[region] = true;
++    if (HeapLayout::InWritableSharedSpace(values) &&
++        MutablePage::FromHeapObject(isolate, values)->region_id() ==
++            MutablePage::kNoRegion) {
++      common[region].push_back(values.address());
 +    }
 +    if (IsFreed(region)) {
 +      // Nobody may read a freed region, so its objects can let go of what
@@ -11894,7 +11985,11 @@ index 00000000..5030d773
 +    }
 +  }
 +  RegionBackingStores::ReleaseUnused(live_stores);
-+  RegionAllocator::AfterSharedGC(heap, common);
++  for (auto& [region, objects] : common) {
++    std::sort(objects.begin(), objects.end());
++    objects.erase(std::unique(objects.begin(), objects.end()), objects.end());
++  }
++  RegionAllocator::AfterSharedGC(heap, std::move(common));
 +
 +  base::MutexGuard guard(RegionsMutex());
 +  for (int region = 0; region < count; region++) {
@@ -12197,6 +12292,7 @@ index 00000000..5030d773
 +      }
 +    }
 +    if (it->second.array_map) GlobalHandles::Destroy(it->second.array_map);
++    for (int region : it->second.current) RegionRegistry::RemoveHandle(region);
 +    // Keep the entry: a thread may still have it cached, and a new isolate
 +    // at the same address starts from an empty state.
 +    it->second = State();
@@ -12857,6 +12953,9 @@ index 00000000..5030d773
 +
 +// static
 +void JSRegionObject::PushCurrent(Isolate* isolate, int region) {
++  // Literals allocate in the current region with no object of it alive, and
++  // the region object of JS may be gone: the id must stay.
++  RegionRegistry::AddHandle(region);
 +  RegionLiterals::Of(isolate).current.push_back(region);
 +  isolate->set_current_region(region);
 +}
@@ -12867,6 +12966,7 @@ index 00000000..5030d773
 +  for (auto it = current.rbegin(); it != current.rend(); ++it) {
 +    if (*it == region) {
 +      current.erase(std::next(it).base());
++      RegionRegistry::RemoveHandle(region);
 +      break;
 +    }
 +  }
@@ -13310,12 +13410,23 @@ index 00000000..5030d773
 +  std::unordered_map<int, std::vector<std::pair<Address, Address>>> chunks;
 +  std::unordered_map<int, std::vector<NormalPage*>> pages;
 +  std::unordered_map<int, std::vector<LargePage*>> large_pages;
++  // Objects on common pages outside the chunks, alive at the last shared GC
++  // or marking of the region.
++  std::unordered_map<int, std::vector<Address>> objects;
++  // Fillers on pages of a region, [start, end), to allocate from.
++  std::unordered_map<int, std::vector<std::pair<Address, Address>>> free;
 +  // Empty region pages for new regions.
 +  std::vector<NormalPage*> pool;
-+  // Regions with objects that the last shared GC found alive on common pages.
-+  std::vector<bool> common;
++  // What the last marking of a region found.
++  struct Marking {
++    int generation;
++    size_t bytes;  // RegionRegistry::Bytes() at the time.
++    size_t live;
++  };
++  std::unordered_map<int, Marking> markings;
 +  int collected = 0;
 +  int reused_pages = 0;
++  int marked = 0;
 +};
 +
 +RegionMemory* Memory() {
@@ -13327,6 +13438,13 @@ index 00000000..5030d773
 +// and a growing one does not come to the runtime often.
 +constexpr int kMinChunkSize = 1 * KB;
 +constexpr int kMaxChunkSize = 32 * KB;
++// Dead memory on region pages smaller than this stays a filler.
++constexpr size_t kMinFreeRange = 256;
++// Free memory an allocation looks at before it takes a new page.
++constexpr int kFreeRangeTries = 16;
++// A region is marked again once it allocated as much as was alive at its
++// last marking, and at least this much.
++constexpr size_t kMinMarkBytes = 1 * MB;
 +
 +SharedSpace* SharedSpaceOf(Isolate* isolate) {
 +  return static_cast<SharedSpace*>(isolate->heap()->shared_allocation_space());
@@ -13343,6 +13461,67 @@ index 00000000..5030d773
 +    heap::ZapBlock(start + sizeof(FreeSpace), size - sizeof(FreeSpace),
 +                   kZapValue);
 +  }
++}
++
++// Dead memory of regions on common pages goes back to the free list of the
++// shared space. With --verify-heap it becomes a filler that waits for the
++// next shared GC.
++void FreeCommon(Heap* heap, SharedSpace* space,
++                const std::vector<std::pair<Address, Address>>& ranges) {
++  if (v8_flags.verify_heap) {
++    for (auto [start, end] : ranges) FillDead(heap, start, end);
++  } else {
++    space->FreeRanges(ranges);
++  }
++}
++
++// Whether the sweepers of the shared heap are done with the memory of the
++// region, which they read and write. A later look collects it.
++bool IsSwept(RegionMemory* memory, int region) {
++  if (auto it = memory->pages.find(region); it != memory->pages.end()) {
++    for (NormalPage* page : it->second) {
++      if (!page->SweepingDone() || page->is_black_allocated()) return false;
++    }
++  }
++  if (auto it = memory->chunks.find(region); it != memory->chunks.end()) {
++    for (auto [start, end] : it->second) {
++      if (!NormalPage::FromAddress(start)->SweepingDone()) return false;
++    }
++  }
++  if (auto it = memory->objects.find(region); it != memory->objects.end()) {
++    for (Address object : it->second) {
++      if (!NormalPage::FromAddress(object)->SweepingDone()) return false;
++    }
++  }
++  return true;
++}
++
++int SizeAt(Address address) { return HeapObject::FromAddress(address)->Size(); }
++
++// Counts memory that the isolate takes for regions: new pages, pooled pages,
++// chunks and free memory of regions alike, since a region that reuses its
++// own memory grows only by what it takes between two looks. Every
++// --region-gc-pages pages worth, the isolate asks itself for a young
++// generation GC that looks for regions to collect. While the shared heap is
++// being marked, nothing can be collected, and that GC would become a full
++// one.
++void CountTaken(Isolate* isolate, size_t bytes) {
++  if (!v8_flags.region_gc || v8_flags.region_gc_pages <= 0) return;
++  size_t& taken = isolate->region_bytes_since_collection();
++  taken += bytes;
++  if (taken < static_cast<size_t>(v8_flags.region_gc_pages) *
++                  MemoryChunkLayout::AllocatableMemoryInMemoryChunk(
++                      SHARED_SPACE)) {
++    return;
++  }
++  if (isolate->shared_space_isolate()
++          ->heap()
++          ->incremental_marking()
++          ->IsMajorMarking()) {
++    return;
++  }
++  taken = 0;
++  isolate->heap()->RequestRegionCollection();
 +}
 +
 +}  // namespace
@@ -13422,6 +13601,35 @@ index 00000000..5030d773
 +      }
 +    }
 +  }
++  {
++    // Dead memory that the last marking of the region found.
++    std::pair<Address, Address> range{kNullAddress, kNullAddress};
++    {
++      base::MutexGuard guard(&Memory()->mutex);
++      auto it = Memory()->free.find(region);
++      if (it != Memory()->free.end()) {
++        auto& ranges = it->second;
++        int tries = std::min(kFreeRangeTries, static_cast<int>(ranges.size()));
++        for (int i = 0; i < tries; i++) {
++          size_t index = ranges.size() - 1 - i;
++          if (ranges[index].first + size <= ranges[index].second) {
++            range = ranges[index];
++            ranges[index] = ranges.back();
++            ranges.pop_back();
++            break;
++          }
++        }
++        if (ranges.empty()) Memory()->free.erase(it);
++      }
++    }
++    if (range.first != kNullAddress) {
++      CountTaken(isolate, range.second - range.first);
++      space->SetRegionAreaAllocated(range.first, range.second, true);
++      area->Reset(range.first, range.second);
++      isolate->set_region_allocation_region(region);
++      return true;
++    }
++  }
 +  if (!pages) return OpenChunk(isolate, region, size);
 +  NormalPage* page = nullptr;
 +  {
@@ -13439,21 +13647,8 @@ index 00000000..5030d773
 +  } else {
 +    page = space->AllocateRegionPage(isolate->main_thread_local_heap(), region);
 +    if (page == nullptr) return false;
-+    // Pages that come back from regions nobody points into any more are
-+    // what keeps the shared heap from growing.
-+    // While the shared heap is being marked, nothing can be collected, and
-+    // the young generation GC would become a full one.
-+    if (v8_flags.region_gc && v8_flags.region_gc_pages > 0 &&
-+        ++isolate->region_pages_since_collection() >=
-+            v8_flags.region_gc_pages &&
-+        !isolate->shared_space_isolate()
-+             ->heap()
-+             ->incremental_marking()
-+             ->IsMajorMarking()) {
-+      isolate->region_pages_since_collection() = 0;
-+      isolate->heap()->RequestRegionCollection();
-+    }
 +  }
++  CountTaken(isolate, page->area_size());
 +  {
 +    base::MutexGuard guard(&Memory()->mutex);
 +    Memory()->pages[region].push_back(page);
@@ -13473,6 +13668,7 @@ index 00000000..5030d773
 +  Tagged<HeapObject> memory;
 +  if (!result.To(&memory)) return false;
 +  Address start = memory.address();
++  CountTaken(isolate, chunk);
 +  {
 +    base::MutexGuard guard(&Memory()->mutex);
 +    Memory()->chunks[region].emplace_back(start, start + chunk);
@@ -13516,15 +13712,17 @@ index 00000000..5030d773
 +  }
 +  // Pooled pages are empty: the GC releases them.
 +  base::MutexGuard guard(&Memory()->mutex);
++  Memory()->free.clear();
 +  Memory()->pool.clear();
 +}
 +
 +// static
-+void RegionAllocator::AfterSharedGC(Heap* heap,
-+                                    const std::vector<bool>& common) {
++void RegionAllocator::AfterSharedGC(
++    Heap* heap, std::unordered_map<int, std::vector<Address>>&& objects) {
 +  RegionMemory* memory = Memory();
 +  base::MutexGuard guard(&memory->mutex);
 +  DCHECK(memory->pool.empty());
++  DCHECK(memory->free.empty());
 +  // Dead objects in chunks are swept, and their memory may be anybody's.
 +  memory->chunks.clear();
 +  memory->pages.clear();
@@ -13537,7 +13735,7 @@ index 00000000..5030d773
 +      memory->large_pages[page->region_id()].push_back(page);
 +    }
 +  }
-+  memory->common = common;
++  memory->objects = std::move(objects);
 +}
 +
 +// static
@@ -13549,65 +13747,270 @@ index 00000000..5030d773
 +  // stay accounted: a stale pointer into them fails its heap verification.
 +  const bool quarantine = v8_flags.verify_heap;
 +  RegionMemory* memory = Memory();
++  std::vector<std::pair<Address, Address>> common;
++  {
++    base::MutexGuard guard(&memory->mutex);
++    for (int region : regions) {
++      auto pages = memory->pages.find(region);
++      auto chunks = memory->chunks.find(region);
++      auto large_pages = memory->large_pages.find(region);
++      auto objects = memory->objects.find(region);
++      const bool has_pages = pages != memory->pages.end();
++      const bool has_chunks = chunks != memory->chunks.end();
++      const bool has_large_pages = large_pages != memory->large_pages.end();
++      const bool has_objects = objects != memory->objects.end();
++      if (!has_pages && !has_chunks && !has_large_pages && !has_objects) {
++        continue;
++      }
++      if (!IsSwept(memory, region)) continue;
++      {
++        base::MutexGuard rests_guard(RegionRestsMutex());
++        RegionRests()->erase(region);
++      }
++      memory->free.erase(region);
++      memory->markings.erase(region);
++      if (has_pages) {
++        for (NormalPage* page : pages->second) {
++          DCHECK_EQ(page->region_id(), region);
++          if (!quarantine) space->SetRegionPageEmpty(page);
++          FillDead(heap, page->area_start(), page->area_end());
++          page->set_region_id(MutablePage::kFreeRegionPage);
++          if (!quarantine) memory->pool.push_back(page);
++        }
++        memory->pages.erase(pages);
++      }
++      if (has_chunks) {
++        common.insert(common.end(), chunks->second.begin(),
++                      chunks->second.end());
++        memory->chunks.erase(chunks);
++      }
++      if (has_objects) {
++        for (Address object : objects->second) {
++          common.emplace_back(object, object + SizeAt(object));
++        }
++        memory->objects.erase(objects);
++      }
++      if (has_large_pages) {
++        // Each holds a dead array, released by the next shared GC.
++        Tagged<Object> undefined = ReadOnlyRoots(isolate).undefined_value();
++        for (LargePage* page : large_pages->second) {
++          Tagged<HeapObject> object = page->GetObject();
++          if (!IsFixedArray(object)) continue;
++          Tagged<FixedArray> array = Cast<FixedArray>(object);
++          MemsetTagged(array->RawFieldOfFirstElement(), undefined,
++                       array->ulength().value());
++        }
++        memory->large_pages.erase(large_pages);
++      }
++      memory->collected++;
++    }
++  }
++  FreeCommon(heap, space, common);
++}
++
++// static
++bool RegionAllocator::ShouldMark(int region) {
++  size_t bytes = RegionRegistry::Bytes(region);
++  RegionMemory* memory = Memory();
 +  base::MutexGuard guard(&memory->mutex);
-+  for (int region : regions) {
-+    if (region < static_cast<int>(memory->common.size()) &&
-+        memory->common[region]) {
++  // Small regions live on chunks and are left to the shared GC.
++  if (memory->pages.count(region) == 0 &&
++      memory->large_pages.count(region) == 0) {
++    return false;
++  }
++  size_t allocated = bytes;
++  size_t live = 0;
++  auto it = memory->markings.find(region);
++  if (it != memory->markings.end() &&
++      it->second.generation == RegionRegistry::Generation(region)) {
++    allocated = bytes - std::min(bytes, it->second.bytes);
++    live = it->second.live;
++  }
++  return allocated >= std::max(live, kMinMarkBytes);
++}
++
++// static
++void RegionAllocator::Mark(Isolate* isolate, int region,
++                           const std::vector<Tagged<HeapObject>>& roots) {
++  Heap* heap = isolate->heap();
++  SharedSpace* space = SharedSpaceOf(isolate);
++  // With --verify-heap, dead memory is not reused and empty pages stay with
++  // the region until the shared GC releases them.
++  const bool quarantine = v8_flags.verify_heap;
++  RegionMemory* memory = Memory();
++
++  // Only the owner allocates for the region, and it is stopped: the entries
++  // of the region stay its own until they go back.
++  std::vector<NormalPage*> pages;
++  std::vector<std::pair<Address, Address>> chunks;
++  std::vector<LargePage*> large_pages;
++  std::vector<Address> objects;
++  {
++    base::MutexGuard guard(&memory->mutex);
++    if (!IsSwept(memory, region)) return;
++    auto take = [&](auto& map, auto& out) {
++      auto it = map.find(region);
++      if (it == map.end()) return;
++      out = std::move(it->second);
++      map.erase(it);
++    };
++    take(memory->pages, pages);
++    take(memory->chunks, chunks);
++    take(memory->large_pages, large_pages);
++    take(memory->objects, objects);
++    // Free memory and the rest are fillers again, swept with the rest.
++    memory->free.erase(region);
++  }
++  {
++    base::MutexGuard guard(RegionRestsMutex());
++    RegionRests()->erase(region);
++  }
++
++  // Objects on pages of the region get a mark bit: the shared GC is not
++  // marking, and the pages are swept, so the bits are clear. Other objects
++  // go to `visited`. Objects of the region point only to the region and to
++  // common shared objects: maps, keys, strings and numbers. Of these, only
++  // fixed arrays are visited, since values that optimized code keeps can be
++  // on a common page without being listed.
++  std::unordered_set<Address> visited;
++  std::vector<Tagged<HeapObject>> worklist;
++  auto push = [&](Tagged<HeapObject> object) {
++    MutablePage* page = MutablePage::FromHeapObject(isolate, object);
++    if (page->region_id() == region) {
++      if (page->IsLargePage()) {
++        if (!visited.insert(object.address()).second) return;
++      } else if (!MarkBit::From(isolate, object).Set()) {
++        return;
++      }
++    } else if (page->region_id() == MutablePage::kNoRegion &&
++               (IsFixedArray(object) ||
++                (IsJSRegionObject(object) &&
++                 Cast<JSRegionObject>(object)->region_id() == region))) {
++      if (!visited.insert(object.address()).second) return;
++    } else {
++      return;
++    }
++    worklist.push_back(object);
++  };
++  for (Tagged<HeapObject> root : roots) push(root);
++  while (!worklist.empty()) {
++    Tagged<HeapObject> object = worklist.back();
++    worklist.pop_back();
++    MarkCompactCollector::VisitSharedPointersOf(isolate, object, push);
++  }
++
++  // Pages of the region: runs of dead objects and fillers become one filler
++  // each. Fillers there are not counted as allocated, dead objects stop
++  // being counted.
++  size_t live = 0;
++  std::vector<NormalPage*> kept_pages;
++  std::vector<NormalPage*> empty_pages;
++  std::vector<std::pair<Address, Address>> free;
++  std::vector<std::pair<Address, Address>> page_free;
++  for (NormalPage* page : pages) {
++    DCHECK_EQ(page->region_id(), region);
++    page_free.clear();
++    size_t dead = 0;
++    bool alive = false;
++    Address run = kNullAddress;
++    auto end_run = [&](Address end) {
++      if (run == kNullAddress) return;
++      FillDead(heap, run, end);
++      if (static_cast<size_t>(end - run) >= kMinFreeRange) {
++        page_free.emplace_back(run, end);
++      }
++      run = kNullAddress;
++    };
++    for (Address address = page->area_start(); address < page->area_end();) {
++      Tagged<HeapObject> object = HeapObject::FromAddress(address);
++      int size = object->Size();
++      if (IsFreeSpaceOrFiller(object)) {
++        if (run == kNullAddress) run = address;
++      } else if (MarkBit::From(isolate, object).Get()) {
++        end_run(address);
++        alive = true;
++        live += size;
++      } else {
++        if (run == kNullAddress) run = address;
++        dead += size;
++      }
++      address += size;
++    }
++    end_run(page->area_end());
++    page->marking_bitmap()->Clear<AccessMode::NON_ATOMIC>();
++    if (!alive && !quarantine) {
++      space->SetRegionPageEmpty(page);
++      page->set_region_id(MutablePage::kFreeRegionPage);
++      empty_pages.push_back(page);
 +      continue;
 +    }
-+    auto pages = memory->pages.find(region);
-+    auto chunks = memory->chunks.find(region);
-+    auto large_pages = memory->large_pages.find(region);
-+    const bool has_pages = pages != memory->pages.end();
-+    const bool has_chunks = chunks != memory->chunks.end();
-+    const bool has_large_pages = large_pages != memory->large_pages.end();
-+    if (!has_pages && !has_chunks && !has_large_pages) continue;
-+    // Sweeper threads of the shared heap may still be at the pages, which
-+    // they read. A later look collects the region.
-+    bool swept = true;
-+    if (has_pages) {
-+      for (NormalPage* page : pages->second) {
-+        swept &= page->SweepingDone() && !page->is_black_allocated();
-+      }
-+    }
-+    if (has_chunks) {
-+      for (auto [start, end] : chunks->second) {
-+        swept &= NormalPage::FromAllocationAreaAddress(start)->SweepingDone();
-+      }
-+    }
-+    if (!swept) continue;
-+    {
-+      base::MutexGuard rests_guard(RegionRestsMutex());
-+      RegionRests()->erase(region);
-+    }
-+    if (has_pages) {
-+      for (NormalPage* page : pages->second) {
-+        DCHECK_EQ(page->region_id(), region);
-+        if (!quarantine) space->SetRegionPageEmpty(page);
-+        FillDead(heap, page->area_start(), page->area_end());
-+        page->set_region_id(MutablePage::kFreeRegionPage);
-+        if (!quarantine) memory->pool.push_back(page);
-+      }
-+      memory->pages.erase(pages);
-+    }
-+    if (has_chunks) {
-+      for (auto [start, end] : chunks->second) FillDead(heap, start, end);
-+      memory->chunks.erase(chunks);
-+    }
-+    if (has_large_pages) {
-+      // Each holds a dead array, released by the next shared GC.
-+      Tagged<Object> undefined = ReadOnlyRoots(isolate).undefined_value();
-+      for (LargePage* page : large_pages->second) {
-+        Tagged<HeapObject> object = page->GetObject();
-+        if (!IsFixedArray(object)) continue;
-+        Tagged<FixedArray> array = Cast<FixedArray>(object);
-+        MemsetTagged(array->RawFieldOfFirstElement(), undefined,
-+                     array->ulength().value());
-+      }
-+      memory->large_pages.erase(large_pages);
-+    }
-+    memory->collected++;
++    space->FreeRegionBytes(page, dead);
++    kept_pages.push_back(page);
++    if (!quarantine) free.insert(free.end(), page_free.begin(), page_free.end());
 +  }
++
++  // Each large page holds one array; a dead one lets go of what it holds and
++  // waits for the shared GC.
++  std::vector<LargePage*> kept_large_pages;
++  Tagged<Object> undefined = ReadOnlyRoots(isolate).undefined_value();
++  for (LargePage* page : large_pages) {
++    Tagged<HeapObject> object = page->GetObject();
++    if (visited.count(object.address())) {
++      kept_large_pages.push_back(page);
++      live += object->Size();
++    } else if (IsFixedArray(object)) {
++      Tagged<FixedArray> array = Cast<FixedArray>(object);
++      MemsetTagged(array->RawFieldOfFirstElement(), undefined,
++                   array->ulength().value());
++    }
++  }
++
++  // Live objects in chunks join the listed ones; the rest of the chunks and
++  // dead listed objects go back to the shared space.
++  std::vector<Address> kept_objects;
++  std::vector<std::pair<Address, Address>> common;
++  for (auto [start, end] : chunks) {
++    Address run = kNullAddress;
++    for (Address address = start; address < end;) {
++      Tagged<HeapObject> object = HeapObject::FromAddress(address);
++      int size = object->Size();
++      if (!IsFreeSpaceOrFiller(object) && visited.count(address)) {
++        if (run != kNullAddress) common.emplace_back(run, address);
++        run = kNullAddress;
++        kept_objects.push_back(address);
++        live += size;
++      } else if (run == kNullAddress) {
++        run = address;
++      }
++      address += size;
++    }
++    if (run != kNullAddress) common.emplace_back(run, end);
++  }
++  for (Address address : objects) {
++    int size = SizeAt(address);
++    if (visited.count(address)) {
++      kept_objects.push_back(address);
++      live += size;
++    } else {
++      common.emplace_back(address, address + size);
++    }
++  }
++
++  {
++    base::MutexGuard guard(&memory->mutex);
++    if (!kept_pages.empty()) memory->pages[region] = std::move(kept_pages);
++    if (!kept_large_pages.empty()) {
++      memory->large_pages[region] = std::move(kept_large_pages);
++    }
++    if (!kept_objects.empty()) memory->objects[region] = std::move(kept_objects);
++    if (!free.empty()) memory->free[region] = std::move(free);
++    memory->pool.insert(memory->pool.end(), empty_pages.begin(),
++                        empty_pages.end());
++    memory->markings[region] = {RegionRegistry::Generation(region),
++                                RegionRegistry::Bytes(region), live};
++    memory->marked++;
++  }
++  FreeCommon(heap, space, common);
 +}
 +
 +// static
@@ -13622,14 +14025,34 @@ index 00000000..5030d773
 +  return Memory()->reused_pages;
 +}
 +
++// static
++int RegionAllocator::MarkedCount() {
++  base::MutexGuard guard(&Memory()->mutex);
++  return Memory()->marked;
++}
++
++// static
++int RegionAllocator::PageCount(int region) {
++  base::MutexGuard guard(&Memory()->mutex);
++  int count = 0;
++  if (auto it = Memory()->pages.find(region); it != Memory()->pages.end()) {
++    count += static_cast<int>(it->second.size());
++  }
++  if (auto it = Memory()->large_pages.find(region);
++      it != Memory()->large_pages.end()) {
++    count += static_cast<int>(it->second.size());
++  }
++  return count;
++}
++
 +}  // namespace internal
 +}  // namespace v8
 diff --git a/src/objects/js-region.h b/src/objects/js-region.h
 new file mode 100644
-index 00000000..236fc189
+index 00000000..e602e012
 --- /dev/null
 +++ b/src/objects/js-region.h
-@@ -0,0 +1,438 @@
+@@ -0,0 +1,458 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -13638,6 +14061,7 @@ index 00000000..236fc189
 +#define V8_OBJECTS_JS_REGION_H_
 +
 +#include <atomic>
++#include <unordered_map>
 +#include <vector>
 +
 +#include "src/objects/fixed-array.h"
@@ -13736,8 +14160,10 @@ index 00000000..236fc189
 +  // done sweeping, and of young generation GCs that RegionAllocator asks for.
 +  // With `collect`, regions the isolate owns, that no other isolate holds
 +  // and that the isolate has no pointer into are collected right away: no
-+  // pointer into them is left anywhere.
-+  static void ReportHolders(Isolate* isolate, bool collect);
++  // pointer into them is left anywhere. With `mark` as well, such regions
++  // that the isolate does point into and that grew enough since they were
++  // last marked are marked from its pointers and swept.
++  static void ReportHolders(Isolate* isolate, bool collect, bool mark = false);
 +  // Called once the isolate has left the shared heap: it holds nothing.
 +  static void ForgetHolder(Isolate* isolate);
 +
@@ -13827,14 +14253,22 @@ index 00000000..236fc189
 +// rests: the pages they are on are swept or stay black until the next one.
 +//
 +// All objects of a region are thus on its pages, its large pages or its
-+// chunks, or on common pages where a shared GC found them alive. A region
-+// without objects of the latter kind can be collected by its owner once no
-+// pointer into it is left: its pages go to a pool that new regions take
-+// pages from, its chunks become fillers and its large arrays let go of what
-+// they hold, so that no dead object points into the pages. With
-+// --verify-heap the pages are filled with a pattern that fails heap
-+// verification if anything still points into them, and wait for the next
-+// shared GC instead of the pool.
++// chunks, or on common pages where a shared GC or a marking of the region
++// found them alive; the region keeps a list of the latter. Only region
++// objects and their values arrays are allocated here: maps, keys, strings
++// and numbers are common shared objects.
++//
++// The owner can collect a region once no pointer into it is left: its pages
++// go to a pool that new regions take pages from, its chunks and listed
++// objects go back to the free list of the shared space and its large arrays
++// let go of what they hold, so that no dead object points into the pages.
++// A region that the owner does point into can be marked from the owner's
++// pointers instead: dead objects on its pages become free memory of the
++// region, which it allocates from before taking new pages, empty pages go
++// to the pool, and the rest is handled as above. With --verify-heap dead
++// memory is filled with a pattern that fails heap verification if anything
++// still points into it, and waits for the next shared GC instead of being
++// reused.
 +class V8_EXPORT_PRIVATE RegionAllocator : public AllStatic {
 + public:
 +  // Reads the flags, once per process; until then no region gets pages.
@@ -13853,22 +14287,31 @@ index 00000000..236fc189
 +                           Tagged<HeapObject> array);
 +  // Called by the shared space isolate while all isolates are stopped, after
 +  // they parked: when black allocation starts and when a full GC starts.
-+  // Forgets the rests and the pooled pages, which the GC then releases.
++  // Forgets the rests, the free memory and the pooled pages of regions,
++  // which the GC then sweeps or releases.
 +  static void ForgetFreeMemory();
 +  // Called by the shared space isolate after a full GC: the chunks are swept
-+  // now, and `common[region]` tells whether objects of the region are alive
-+  // on common pages.
-+  static void AfterSharedGC(Heap* shared_space_heap,
-+                            const std::vector<bool>& common);
-+  // Whether the owner may collect the region once no pointer into it is
-+  // left: none of its objects is on a common page outside its chunks.
-+  static bool IsCollectable(int region);
++  // now, and `objects[region]` are the objects of the region alive on common
++  // pages.
++  static void AfterSharedGC(
++      Heap* shared_space_heap,
++      std::unordered_map<int, std::vector<Address>>&& objects);
 +  // Collects regions that nothing points into, from an isolate that is
 +  // stopped. Regions whose pages are not swept yet are skipped.
 +  static void Collect(Isolate* isolate, const std::vector<int>& regions);
-+  // Totals for tests: regions collected, pages taken from the pool.
++  // Whether `region` grew enough since its last marking to be marked again.
++  static bool ShouldMark(int region);
++  // Marks `region` from `roots`, all pointers into it that the stopped
++  // isolate has, and sweeps it. Skipped if its pages are not swept yet.
++  static void Mark(Isolate* isolate, int region,
++                   const std::vector<Tagged<HeapObject>>& roots);
++  // Totals for tests: regions collected, pages taken from the pool, regions
++  // marked.
 +  static int CollectedCount();
 +  static int ReusedPageCount();
++  static int MarkedCount();
++  // Pages of `region` for tests, large pages included.
++  static int PageCount(int region);
 +  // Region bytes from which on a region gets pages of its own, or SIZE_MAX.
 +  // Read by generated code.
 +  static Address threshold_address() {
@@ -14857,7 +15300,7 @@ index 2ab60bab..433e7430 100644
          result = JSObject::GetPropertyAttributesWithInterceptor(&it);
          if (result.IsNothing()) return MaybeDirectHandle<Object>();
 diff --git a/src/runtime/runtime-object.cc b/src/runtime/runtime-object.cc
-index 96c1c2f4..f45cc156 100644
+index 96c1c2f4..ac84a36d 100644
 --- a/src/runtime/runtime-object.cc
 +++ b/src/runtime/runtime-object.cc
 @@ -3,6 +3,7 @@
@@ -14880,7 +15323,7 @@ index 96c1c2f4..f45cc156 100644
  #include "src/objects/property-descriptor-object.h"
  #include "src/objects/property-descriptor.h"
  #include "src/objects/property-details.h"
-@@ -87,6 +91,100 @@ Maybe<bool> Runtime::DeleteObjectProperty(Isolate* isolate,
+@@ -87,6 +91,114 @@ Maybe<bool> Runtime::DeleteObjectProperty(Isolate* isolate,
  }
  
  // https://tc39.es/ecma262/#sec-object.keys
@@ -14978,10 +15421,24 @@ index 96c1c2f4..f45cc156 100644
 +  return Smi::FromInt(RegionAllocator::ReusedPageCount());
 +}
 +
++RUNTIME_FUNCTION(Runtime_RegionMarkedCount) {
++  DCHECK_EQ(0, args.length());
++  return Smi::FromInt(RegionAllocator::MarkedCount());
++}
++
++RUNTIME_FUNCTION(Runtime_RegionPageCount) {
++  DCHECK_EQ(1, args.length());
++  int region = args.smi_value_at(0);
++  if (region < 0 || region >= RegionRegistry::kMaxRegions) {
++    return Smi::FromInt(-1);
++  }
++  return Smi::FromInt(RegionAllocator::PageCount(region));
++}
++
  RUNTIME_FUNCTION(Runtime_ObjectKeys) {
    HandleScope scope(isolate);
    DirectHandle<Object> object = args.at(0);
-@@ -221,6 +319,7 @@ RUNTIME_FUNCTION(Runtime_HasOwnConstDataProperty) {
+@@ -221,6 +333,7 @@ RUNTIME_FUNCTION(Runtime_HasOwnConstDataProperty) {
        case LookupIterator::ACCESS_CHECK:
        case LookupIterator::JSPROXY:
        case LookupIterator::WASM_OBJECT:
@@ -14990,10 +15447,10 @@ index 96c1c2f4..f45cc156 100644
        case LookupIterator::ACCESSOR:
        case LookupIterator::MODULE_NAMESPACE:
 diff --git a/src/runtime/runtime.h b/src/runtime/runtime.h
-index 8be2dd32..7eff78fb 100644
+index 8be2dd32..38b6568f 100644
 --- a/src/runtime/runtime.h
 +++ b/src/runtime/runtime.h
-@@ -395,6 +395,15 @@ constexpr bool CanTriggerGC(T... properties) {
+@@ -395,6 +395,17 @@ constexpr bool CanTriggerGC(T... properties) {
    F(HasOwnConstDataProperty, 2, 1)                                     \
    F(ObjectIsExtensible, 1, 1)                                          \
    F(ObjectKeys, 1, 1)                                                  \
@@ -15006,6 +15463,8 @@ index 8be2dd32..7eff78fb 100644
 +  F(RegionIsHolder, 1, 1)                                              \
 +  F(RegionCollectedCount, 0, 1)                                        \
 +  F(RegionReusedPageCount, 0, 1)                                       \
++  F(RegionMarkedCount, 0, 1)                                           \
++  F(RegionPageCount, 1, 1)                                             \
    F(ObjectValues, 1, 1)                                                \
    F(ObjectValuesSkipFastPath, 1, 1)                                    \
    F(OptimizeObjectForAddingMultipleProperties, 2, 1)                   \

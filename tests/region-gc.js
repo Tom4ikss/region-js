@@ -5,7 +5,7 @@
 // region-holders.js) and the owner's own GC finds no pointer to it. Its pages
 // go to a pool that new regions take pages from. The owner looks at its full
 // GCs, and at a young generation GC that it starts after taking
-// --region-gc-pages region pages (64, 16 MB). %RegionCollectedCount and
+// --region-gc-pages pages worth of region memory (64, 16 MB). %RegionCollectedCount and
 // %RegionReusedPageCount count for the whole process. With --verify-heap
 // the pages do not go to the pool: they get a pattern that fails heap
 // verification if anything still points into them. While the shared heap is
@@ -98,8 +98,8 @@ const given = step({ op: 'give' }).list;
 step({ op: 'collect' });
 check('given region intact', given.length === 3000 && given[2999].customer.name === 'c9');
 
-// The main thread looks for regions to collect after taking 64 region pages
-// (16 MB), in a young generation GC: no gc() call needed.
+// The main thread looks for regions to collect after taking 16 MB of region
+// memory, in a young generation GC: no gc() call needed.
 function build(region, count) {
   'use region';
   using _ = region.enter();

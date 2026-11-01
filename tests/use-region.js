@@ -1,4 +1,4 @@
-// d8 --harmony-region-literals --verify-heap use-region.js
+// d8 --harmony-region-literals --expose-gc --verify-heap use-region.js
 // 'use region': {} and [] in the function, and in the functions inside it,
 // are #{} and #[]. Destructuring patterns stay patterns.
 const check = (name, ok) => {
@@ -144,4 +144,19 @@ const made = spawn(() => {
   return { made: ['in', 'a', 'task'] };
 }).join();
 check('spawn task', isRegion(made) && made.made.join(' ') === 'in a task');
+
+// The current region keeps its id while nothing holds the Region object or
+// any object of the region: literals still allocate in it.
+function pair(x, y) {
+  'use region';
+  return { x, y };
+}
+let kept;
+{
+  using _ = new Region().enter();
+  for (let i = 0; i < 1000; i++) pair(i, 1);
+  gc(); gc(); gc();
+  kept = pair(1, 2);
+}
+check('entered region keeps its id', Region.of(kept) !== new Region());
 print('done');
