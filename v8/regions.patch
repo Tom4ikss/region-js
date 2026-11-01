@@ -446,10 +446,10 @@ index 7677d9c3..fc762f96 100644
  }  // namespace v8
 diff --git a/src/builtins/builtins-region-gen.cc b/src/builtins/builtins-region-gen.cc
 new file mode 100644
-index 00000000..b0ccacde
+index 00000000..6a3198bc
 --- /dev/null
 +++ b/src/builtins/builtins-region-gen.cc
-@@ -0,0 +1,406 @@
+@@ -0,0 +1,436 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -489,12 +489,16 @@ index 00000000..b0ccacde
 +  TNode<HeapObject> AllocateInRegion(TNode<IntPtrT> region_id,
 +                                     TNode<IntPtrT> size_in_bytes);
 +
-+  // A copy in shared space of a local number or short sequential string, the
-+  // values literals hold most often, without the runtime. Adds the bytes of
-+  // a string copy to {var_bytes}. Jumps to {runtime} for anything else.
-+  TNode<HeapObject> TryShareValue(TNode<HeapObject> value,
++  // A shared copy of a local number or short sequential string, the values
++  // literals hold most often, without the runtime: in the memory of the
++  // region, as the runtime makes it (JSRegionObject::ShareValue). Adds the
++  // bytes of the copy to {var_bytes}. Jumps to {runtime} for anything else.
++  TNode<HeapObject> TryShareValue(TNode<IntPtrT> region_id,
++                                  TNode<HeapObject> value,
 +                                  TVariable<IntPtrT>* var_bytes,
 +                                  Label* runtime);
++  TNode<HeapObject> AllocateSharedValue(TNode<IntPtrT> region_id,
++                                        TNode<IntPtrT> size);
 +
 +  // Stores of a shared or read-only value into a shared object need no
 +  // remembered set, only the marking barrier, and that only while marking.
@@ -683,8 +687,9 @@ index 00000000..b0ccacde
 +
 +        BIND(&share);
 +        GotoIf(TaggedIsSmi(value), &runtime);
-+        StoreSharedElement(values, i,
-+                           TryShareValue(CAST(value), &var_bytes, &runtime));
++        StoreSharedElement(
++            values, i,
++            TryShareValue(region_id, CAST(value), &var_bytes, &runtime));
 +        Goto(&next);
 +
 +        BIND(&runtime);
@@ -757,8 +762,27 @@ index 00000000..b0ccacde
 +  return result.value();
 +}
 +
++TNode<HeapObject> RegionLiteralAssembler::AllocateSharedValue(
++    TNode<IntPtrT> region_id, TNode<IntPtrT> size) {
++  TVARIABLE(HeapObject, result);
++  Label region(this), common(this), done(this);
++  Branch(Word32Equal(Load<Uint8T>(ExternalConstant(
++                         ExternalReference::region_strings_flag())),
++                     Int32Constant(0)),
++         &common, &region);
++  BIND(&region);
++  result = AllocateInRegion(region_id, size);
++  Goto(&done);
++  BIND(&common);
++  result = AllocateInSharedSpace(size);
++  Goto(&done);
++  BIND(&done);
++  return result.value();
++}
++
 +TNode<HeapObject> RegionLiteralAssembler::TryShareValue(
-+    TNode<HeapObject> value, TVariable<IntPtrT>* var_bytes, Label* runtime) {
++    TNode<IntPtrT> region_id, TNode<HeapObject> value,
++    TVariable<IntPtrT>* var_bytes, Label* runtime) {
 +  TVARIABLE(HeapObject, var_copy);
 +  Label number(this), one_byte(this), two_byte(this),
 +      done(this, {&var_copy, var_bytes});
@@ -772,12 +796,18 @@ index 00000000..b0ccacde
 +
 +  BIND(&number);
 +  {
++    // A shared number is in memory of regions, maybe of this one.
++    GotoIf(IsPageFlagSet(BitcastTaggedToWord(value),
++                         MemoryChunk::IN_WRITABLE_SHARED_SPACE),
++           runtime);
 +    static_assert(!USE_ALLOCATION_ALIGNMENT_HEAP_NUMBER_BOOL);
-+    TNode<HeapObject> copy =
-+        AllocateInSharedSpace(IntPtrConstant(sizeof(HeapNumber)));
++    TNode<IntPtrT> size = IntPtrConstant(sizeof(HeapNumber));
++    TNode<Float64T> number_value = LoadHeapNumberValue(value);
++    TNode<HeapObject> copy = AllocateSharedValue(region_id, size);
 +    StoreMapNoWriteBarrier(copy, RootIndex::kHeapNumberMap);
 +    StoreObjectFieldNoWriteBarrier(copy, offsetof(HeapNumber, value_),
-+                                   LoadHeapNumberValue(value));
++                                   number_value);
++    *var_bytes = IntPtrAdd(var_bytes->value(), size);
 +    var_copy = copy;
 +    Goto(&done);
 +  }
@@ -796,7 +826,7 @@ index 00000000..b0ccacde
 +    TNode<IntPtrT> size = WordAnd(
 +        IntPtrAdd(IntPtrConstant(data_start + kObjectAlignmentMask), chars),
 +        IntPtrConstant(~kObjectAlignmentMask));
-+    TNode<HeapObject> copy = AllocateInSharedSpace(size);
++    TNode<HeapObject> copy = AllocateSharedValue(region_id, size);
 +    // Clear the padding after the characters.
 +    StoreNoWriteBarrier(
 +        MachineRepresentation::kTaggedSigned, copy,
@@ -871,7 +901,7 @@ index 36439464..29842b91 100644
      case Builtin::kInterpreterEntryTrampolineForProfiling:
      // Tiering builtins are set directly into the dispatch table and never
 diff --git a/src/codegen/code-stub-assembler.cc b/src/codegen/code-stub-assembler.cc
-index 976c1b3e..687c11f7 100644
+index 976c1b3e..ea8b260b 100644
 --- a/src/codegen/code-stub-assembler.cc
 +++ b/src/codegen/code-stub-assembler.cc
 @@ -40,6 +40,7 @@
@@ -901,7 +931,7 @@ index 976c1b3e..687c11f7 100644
    const bool kHandlePrivateNames = mode == HasPropertyLookupMode::kHasProperty;
    TryPrototypeChainLookup(object, object, key, lookup_property_in_holder,
                            lookup_element_in_holder, &return_false,
-@@ -21983,6 +21996,181 @@ void CodeStubAssembler::SharedValueBarrier(
+@@ -21983,6 +21996,193 @@ void CodeStubAssembler::SharedValueBarrier(
    BIND(&done);
  }
  
@@ -968,11 +998,23 @@ index 976c1b3e..687c11f7 100644
 +  GotoIf(InstanceTypeEqual(instance_type, JS_REGION_OBJECT_TYPE),
 +         &check_region);
 +  GotoIf(IsJSReceiverInstanceType(instance_type), slow);
-+  Branch(WordNotEqual(
-+             WordAnd(page_flags,
-+                     IntPtrConstant(MemoryChunk::IN_WRITABLE_SHARED_SPACE)),
-+             IntPtrConstant(0)),
-+         &store, slow);
++  // A common primitive in shared space, or one on a page of this region. One
++  // in other memory of regions may be another region's, which the runtime
++  // tells.
++  TNode<IntPtrT> shared_flags = WordAnd(
++      page_flags, IntPtrConstant(MemoryChunk::IN_WRITABLE_SHARED_SPACE |
++                                 MemoryChunk::REGION_MEMORY));
++  GotoIf(WordEqual(shared_flags,
++                   IntPtrConstant(MemoryChunk::IN_WRITABLE_SHARED_SPACE)),
++         &store);
++  GotoIfNot(WordEqual(shared_flags,
++                      IntPtrConstant(MemoryChunk::IN_WRITABLE_SHARED_SPACE |
++                                     MemoryChunk::REGION_MEMORY)),
++            slow);
++  TNode<Int32T> page_region = Load<Int32T>(
++      BasePageFromAddress(BitcastTaggedToWord(heap_value)),
++      IntPtrConstant(MutablePage::RegionIdOffset()));
++  Branch(Word32Equal(page_region, SmiToInt32(region)), &store, slow);
 +
 +  BIND(&check_region);
 +  Branch(TaggedEqual(
@@ -1133,7 +1175,7 @@ index f214a151..6e1b2fc3 100644
    TNode<IntPtrT> TimesSystemPointerSize(TNode<IntPtrT> value) {
      return Signed(TimesSystemPointerSize(implicit_cast<TNode<WordT>>(value)));
 diff --git a/src/codegen/external-reference.cc b/src/codegen/external-reference.cc
-index 9ae5654b..ef120a1b 100644
+index 9ae5654b..20a1da18 100644
 --- a/src/codegen/external-reference.cc
 +++ b/src/codegen/external-reference.cc
 @@ -36,6 +36,7 @@
@@ -1185,7 +1227,7 @@ index 9ae5654b..ef120a1b 100644
  FUNCTION_REFERENCE(new_deoptimizer_function, Deoptimizer::New)
  
  FUNCTION_REFERENCE(compute_output_frames_function,
-@@ -813,6 +848,18 @@ ExternalReference ExternalReference::address_of_builtin_subclassing_flag() {
+@@ -813,6 +848,22 @@ ExternalReference ExternalReference::address_of_builtin_subclassing_flag() {
    return ExternalReference(&v8_flags.builtin_subclassing);
  }
  
@@ -1201,11 +1243,15 @@ index 9ae5654b..ef120a1b 100644
 +  return ExternalReference(RegionAllocator::threshold_address());
 +}
 +
++ExternalReference ExternalReference::region_strings_flag() {
++  return ExternalReference(RegionAllocator::strings_in_regions_address());
++}
++
  ExternalReference ExternalReference::address_of_js_pr_3883_flag() {
    return ExternalReference(&v8_flags.js_pr_3883);
  }
 diff --git a/src/codegen/external-reference.h b/src/codegen/external-reference.h
-index 8226ac48..0cb02207 100644
+index 8226ac48..2a2edb0d 100644
 --- a/src/codegen/external-reference.h
 +++ b/src/codegen/external-reference.h
 @@ -32,6 +32,18 @@ enum class IsolateFieldId : uint8_t;
@@ -1227,13 +1273,14 @@ index 8226ac48..0cb02207 100644
    V(isolate_root, "Isolate::isolate_root()")                                   \
    V(address_of_jslimit, "StackGuard::address_of_jslimit()")                    \
    V(address_of_no_heap_write_interrupt_request,                                \
-@@ -81,6 +93,9 @@ enum class IsolateFieldId : uint8_t;
+@@ -81,6 +93,10 @@ enum class IsolateFieldId : uint8_t;
    V(abort_with_sandbox_violation, "abort_with_sandbox_violation")              \
    V(address_of_log_or_trace_osr, "v8_flags.log_or_trace_osr")                  \
    V(address_of_builtin_subclassing_flag, "v8_flags.builtin_subclassing")       \
 +  V(region_registry_owners, "RegionRegistry::owners_")                         \
 +  V(region_registry_bytes, "RegionRegistry::bytes_")                           \
 +  V(region_page_threshold, "RegionAllocator::threshold_")                      \
++  V(region_strings_flag, "RegionAllocator::strings_in_regions_")               \
    V(address_of_double_abs_constant, "double_absolute_constant")                \
    V(address_of_double_neg_constant, "double_negate_constant")                  \
    V(address_of_enable_experimental_regexp_engine,                              \
@@ -2307,7 +2354,7 @@ index f7525792..70305f25 100644
      case JS_ARRAY_ITERATOR_TYPE:
      case JS_REG_EXP_TYPE:
 diff --git a/src/compiler/turboshaft/graph-builder.cc b/src/compiler/turboshaft/graph-builder.cc
-index 568f11e8..f6a7e862 100644
+index 568f11e8..b31c8f23 100644
 --- a/src/compiler/turboshaft/graph-builder.cc
 +++ b/src/compiler/turboshaft/graph-builder.cc
 @@ -47,7 +47,9 @@
@@ -2320,7 +2367,7 @@ index 568f11e8..f6a7e862 100644
  #include "src/objects/map.h"
  #include "src/zone/zone-containers.h"
  
-@@ -243,6 +245,199 @@ struct GraphBuilder {
+@@ -243,6 +245,202 @@ struct GraphBuilder {
    TurnTaggedSignedInputIntoSmi(OpIndex value, MemoryRepresentation rep,
                                 WriteBarrierKind write_barrier);
  
@@ -2367,7 +2414,8 @@ index 568f11e8..f6a7e862 100644
 +  }
 +
 +  // Whether `value` can be stored in `region` as it is: Smis, read-only
-+  // objects, primitives in shared space and objects of the same region.
++  // objects, common primitives in shared space and objects of the same
++  // region.
 +  V<Word32> RegionValueStorable(V<Smi> region, V<Object> value) {
 +    Variable storable = __ NewVariable(RegisterRepresentation::Word32());
 +    __ SetVariable(storable, __ Word32Constant(1));
@@ -2397,16 +2445,18 @@ index 568f11e8..f6a7e862 100644
 +                                       instance_type)) {
 +            __ SetVariable(storable, __ Word32Constant(0));
 +          } ELSE {
++            // A common primitive in shared space; one in memory of regions
++            // may be another region's, which the runtime tells.
 +            __ SetVariable(
 +                storable,
-+                __ Word32Equal(
-+                    __ WordPtrEqual(
-+                        __ WordPtrBitwiseAnd(
-+                            __ LoadPageFlags(heap_value),
-+                            static_cast<uintptr_t>(
-+                                MemoryChunk::IN_WRITABLE_SHARED_SPACE)),
-+                        0),
-+                    0));
++                __ WordPtrEqual(
++                    __ WordPtrBitwiseAnd(
++                        __ LoadPageFlags(heap_value),
++                        static_cast<uintptr_t>(
++                            MemoryChunk::IN_WRITABLE_SHARED_SPACE |
++                            MemoryChunk::REGION_MEMORY)),
++                    static_cast<uintptr_t>(
++                        MemoryChunk::IN_WRITABLE_SHARED_SPACE)));
 +          }
 +        }
 +      }
@@ -2520,7 +2570,7 @@ index 568f11e8..f6a7e862 100644
    OpIndex Process(Node* node, BasicBlock* block,
                    const base::SmallVector<int, 16>& predecessor_permutation,
                    V<EagerFrameState>& dominating_frame_state,
-@@ -432,6 +627,114 @@ GraphBuilder::TurnTaggedSignedInputIntoSmi(OpIndex value,
+@@ -432,6 +630,114 @@ GraphBuilder::TurnTaggedSignedInputIntoSmi(OpIndex value,
    return {value, rep, write_barrier};
  }
  
@@ -2635,7 +2685,7 @@ index 568f11e8..f6a7e862 100644
  OpIndex GraphBuilder::Process(
      Node* node, BasicBlock* block,
      const base::SmallVector<int, 16>& predecessor_permutation,
-@@ -2232,6 +2535,36 @@ OpIndex GraphBuilder::Process(
+@@ -2232,6 +2538,36 @@ OpIndex GraphBuilder::Process(
        return __ CheckedClosure(Map(node->InputAt(0)), dominating_frame_state,
                                 FeedbackCellOf(node->op()));
  
@@ -8709,10 +8759,10 @@ index 793be1a7..b00ea27a 100644
    // Certain objects may be allocated in RO space if suitable for the snapshot.
    bool enable_ro_allocation_for_snapshot_ = false;
 diff --git a/src/flags/flag-definitions.h b/src/flags/flag-definitions.h
-index f47b7006..e8597da9 100644
+index f47b7006..b9e3d5bb 100644
 --- a/src/flags/flag-definitions.h
 +++ b/src/flags/flag-definitions.h
-@@ -1306,6 +1306,38 @@ DEFINE_WEAK_IMPLICATION(trace_baseline, trace_baseline_batch_compilation)
+@@ -1306,6 +1306,41 @@ DEFINE_WEAK_IMPLICATION(trace_baseline, trace_baseline_batch_compilation)
  // Internalize into a shared string table in the shared isolate
  DEFINE_BOOL(shared_strings, false, "allow sharing of strings")
  DEFINE_IMPLICATION(shared_strings, shared_heap)
@@ -8735,6 +8785,9 @@ index f47b7006..e8597da9 100644
 +            "--region-page-threshold bytes")
 +DEFINE_SIZE_T(region_page_threshold, 64 * KB,
 +              "bytes a region holds before it gets pages of its own")
++DEFINE_BOOL(region_strings, true,
++            "copy strings and numbers that a region shares into the memory "
++            "of the region, so that they die with it")
 +DEFINE_BOOL(region_gc, true,
 +            "let the owner of a region collect it, without stopping other "
 +            "isolates, once nothing points into it")
@@ -8887,7 +8940,7 @@ index 073ae1d3..eda08655 100644
   private:
    std::unique_ptr<PersistentHandles> persistent_handles_;
 diff --git a/src/heap/factory.cc b/src/heap/factory.cc
-index 9c2a0c4c..7284c7a3 100644
+index 9c2a0c4c..918beded 100644
 --- a/src/heap/factory.cc
 +++ b/src/heap/factory.cc
 @@ -72,6 +72,7 @@
@@ -8898,7 +8951,7 @@ index 9c2a0c4c..7284c7a3 100644
  #include "src/objects/js-struct.h"
  #include "src/objects/js-weak-refs-inl.h"
  #include "src/objects/literal-objects-inl.h"
-@@ -3644,6 +3645,44 @@ Handle<JSObject> Factory::NewJSObjectFromMap(
+@@ -3644,6 +3645,114 @@ Handle<JSObject> Factory::NewJSObjectFromMap(
    return handle(js_obj, isolate());
  }
  
@@ -8940,14 +8993,84 @@ index 9c2a0c4c..7284c7a3 100644
 +  return handle(array, isolate());
 +}
 +
++namespace {
++
++template <typename SeqStringT>
++Handle<String> CopySharedString(Isolate* isolate, DirectHandle<String> flat,
++                                Tagged<HeapObject> memory, Tagged<Map> map) {
++  DisallowGarbageCollection no_gc;
++  uint32_t length = flat->length();
++  memory->set_map_after_allocation(isolate, map, SKIP_WRITE_BARRIER);
++  Tagged<SeqStringT> copy = Cast<SeqStringT>(memory);
++  copy->clear_padding_destructively(length);
++  copy->set_length(length);
++  copy->set_raw_hash_field(String::kEmptyHashField);
++  String::WriteToFlat(*flat, copy->GetChars(no_gc), 0, length);
++  return handle(copy, isolate);
++}
++
++}  // namespace
++
++Handle<String> Factory::NewSharedStringInRegion(DirectHandle<String> source,
++                                                int region) {
++  DirectHandle<String> flat = String::Flatten(isolate(), source);
++  uint32_t length = flat->length();
++  if (length == 0) return empty_string();
++  const bool one_byte = flat->IsOneByteRepresentation();
++  int size = one_byte ? SeqOneByteString::SizeFor(length)
++                      : SeqTwoByteString::SizeFor(length);
++  if (size > isolate()->heap()->MaxRegularHeapObjectSize(
++                 AllocationType::kSharedOld)) {
++    return NewSharedStringCopy(flat);
++  }
++  Tagged<HeapObject> memory = RegionAllocator::Allocate(isolate(), region, size);
++  if (one_byte) {
++    return CopySharedString<SeqOneByteString>(
++        isolate(), flat, memory,
++        read_only_roots().shared_seq_one_byte_string_map());
++  }
++  return CopySharedString<SeqTwoByteString>(
++      isolate(), flat, memory,
++      read_only_roots().shared_seq_two_byte_string_map());
++}
++
++Handle<String> Factory::NewSharedStringCopy(DirectHandle<String> source) {
++  DirectHandle<String> flat = String::Flatten(isolate(), source);
++  uint32_t length = flat->length();
++  if (length == 0) return empty_string();
++  if (flat->IsOneByteRepresentation()) {
++    Handle<SeqOneByteString> copy =
++        NewRawSharedOneByteString(length).ToHandleChecked();
++    DisallowGarbageCollection no_gc;
++    String::WriteToFlat(*flat, copy->GetChars(no_gc), 0, length);
++    return copy;
++  }
++  Handle<SeqTwoByteString> copy =
++      NewRawSharedTwoByteString(length).ToHandleChecked();
++  DisallowGarbageCollection no_gc;
++  String::WriteToFlat(*flat, copy->GetChars(no_gc), 0, length);
++  return copy;
++}
++
++Handle<HeapNumber> Factory::NewHeapNumberInRegion(uint64_t bits, int region) {
++  Tagged<HeapObject> memory =
++      RegionAllocator::Allocate(isolate(), region, sizeof(HeapNumber));
++  DisallowGarbageCollection no_gc;
++  memory->set_map_after_allocation(isolate(), read_only_roots().heap_number_map(),
++                                   SKIP_WRITE_BARRIER);
++  Tagged<HeapNumber> number = Cast<HeapNumber>(memory);
++  number->set_value_as_bits(bits);
++  return handle(number, isolate());
++}
++
  Handle<JSObject> Factory::NewSlowJSObjectFromMap(
      DirectHandle<Map> map, int capacity, AllocationType allocation,
      MaybeDirectHandle<AllocationSite> allocation_site,
 diff --git a/src/heap/factory.h b/src/heap/factory.h
-index 41ebcdbd..e863618f 100644
+index 41ebcdbd..d12ec8e7 100644
 --- a/src/heap/factory.h
 +++ b/src/heap/factory.h
-@@ -765,6 +765,15 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
+@@ -765,6 +765,22 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
        DirectHandle<Map> map, AllocationType allocation = AllocationType::kYoung,
        MaybeDirectHandle<AllocationSite> allocation_site = kNullMaybeHandle,
        NewJSObjectType = NewJSObjectType::kMaybeEmbedderFieldsAndNoApiWrapper);
@@ -8960,6 +9083,13 @@ index 41ebcdbd..e863618f 100644
 +      NewJSObjectType = NewJSObjectType::kMaybeEmbedderFieldsAndNoApiWrapper);
 +  Handle<FixedArray> NewFixedArrayInRegion(uint32_t length, int region,
 +                                           size_t pending_bytes);
++  // A shared copy of `source` in the memory of `region`, or, if it is too
++  // long for a page, a common shared one.
++  Handle<String> NewSharedStringInRegion(DirectHandle<String> source,
++                                         int region);
++  // A common shared copy of `source`, which may itself be shared.
++  Handle<String> NewSharedStringCopy(DirectHandle<String> source);
++  Handle<HeapNumber> NewHeapNumberInRegion(uint64_t bits, int region);
    // Like NewJSObjectFromMap, but includes allocating a properties dictionary.);
    Handle<JSObject> NewSlowJSObjectFromMap(
        DirectHandle<Map> map, int number_of_slow_properties,
@@ -9371,11 +9501,35 @@ index 8b1de531..dbb44925 100644
   private:
    using ResizeNewSpaceMode = Heap::ResizeNewSpaceMode;
  
+diff --git a/src/heap/memory-chunk.h b/src/heap/memory-chunk.h
+index b3be665e..1230fc03 100644
+--- a/src/heap/memory-chunk.h
++++ b/src/heap/memory-chunk.h
+@@ -106,6 +106,11 @@ class V8_EXPORT_PRIVATE MemoryChunk final {
+     // mark-bits are enabled and major GC in progress, treat all objects as old.
+     STICKY_MARK_BIT_IS_MAJOR_GC_IN_PROGRESS = 1u << 12,
+ #endif
++
++    // The chunk is a page of an ownership region, or a common page with
++    // memory of regions on it: a shared object there may belong to a region
++    // (see RegionAllocator). Generated code only uses it to take a slow path.
++    REGION_MEMORY = 1u << 13,
+   };
+ 
+   using MainThreadFlags = base::Flags<Flag, uintptr_t>;
+@@ -200,6 +205,7 @@ class V8_EXPORT_PRIVATE MemoryChunk final {
+   }
+ 
+   V8_INLINE bool IsBlackAllocated() const { return IsFlagSet(BLACK_ALLOCATED); }
++  V8_INLINE bool IsRegionMemory() const { return IsFlagSet(REGION_MEMORY); }
+ 
+   V8_INLINE bool IsBlackAllocatedOrWritableShared() const {
+     return GetFlags() & kIsBlackAllocatedOrWriteableSharedMask;
 diff --git a/src/heap/mutable-page.h b/src/heap/mutable-page.h
-index b5280854..d4e09fc0 100644
+index b5280854..de1826ac 100644
 --- a/src/heap/mutable-page.h
 +++ b/src/heap/mutable-page.h
-@@ -95,6 +95,15 @@ class MutablePage : public BasePage {
+@@ -95,6 +95,20 @@ class MutablePage : public BasePage {
  
    V8_EXPORT_PRIVATE void MarkNeverEvacuate();
  
@@ -9387,11 +9541,16 @@ index b5280854..d4e09fc0 100644
 +  static constexpr int kFreeRegionPage = -2;
 +  int region_id() const { return region_id_; }
 +  void set_region_id(int region) { region_id_ = region; }
++  // For generated code, which reads the id to store a primitive of the page's
++  // region into an object of the region without the runtime.
++  static constexpr intptr_t RegionIdOffset() {
++    return offsetof(MutablePage, region_id_);
++  }
 +
    size_t BucketsInSlotSet() const { return SlotSet::BucketsForSize(size()); }
  
    base::Mutex& mutex() { return mutex_; }
-@@ -331,6 +340,8 @@ class MutablePage : public BasePage {
+@@ -331,6 +345,8 @@ class MutablePage : public BasePage {
  
    MarkingBitmap marking_bitmap_;
  
@@ -9401,10 +9560,10 @@ index b5280854..d4e09fc0 100644
    // bitmap offset from generated code and assume that it's stable across 64-bit
    // platforms. In theory, there could be a difference between Linux and Android
 diff --git a/src/heap/paged-spaces.cc b/src/heap/paged-spaces.cc
-index 233ce511..6f6c3d25 100644
+index 233ce511..037b5bf9 100644
 --- a/src/heap/paged-spaces.cc
 +++ b/src/heap/paged-spaces.cc
-@@ -302,6 +302,87 @@ bool PagedSpaceBase::TryExpand(LocalHeap* local_heap, AllocationOrigin origin) {
+@@ -302,6 +302,88 @@ bool PagedSpaceBase::TryExpand(LocalHeap* local_heap, AllocationOrigin origin) {
    return true;
  }
  
@@ -9434,6 +9593,7 @@ index 233ce511..6f6c3d25 100644
 +  DCHECK_EQ(page->area_size(), accounted_size);
 +  DCHECK_EQ(page->allocated_bytes(), page->area_size());
 +  page->set_region_id(region);
++  page->SetFlagNonExecutable(MemoryChunk::REGION_MEMORY);
 +  page->set_never_allocate_on_chunk(true);
 +  page->MarkNeverEvacuate();
 +  {
@@ -10379,7 +10539,7 @@ index 6bfaf56f..17d8cee8 100644
  
    using TaskQueueEntry = std::pair<Nestability, std::unique_ptr<Task>>;
 diff --git a/src/maglev/arm64/maglev-ir-arm64.cc b/src/maglev/arm64/maglev-ir-arm64.cc
-index cdeb38c6..68013687 100644
+index cdeb38c6..4b287570 100644
 --- a/src/maglev/arm64/maglev-ir-arm64.cc
 +++ b/src/maglev/arm64/maglev-ir-arm64.cc
 @@ -7,6 +7,7 @@
@@ -10398,7 +10558,7 @@ index cdeb38c6..68013687 100644
  #include "src/objects/property-details.h"
  #include "src/objects/swiss-name-dictionary.h"
  
-@@ -1235,6 +1237,275 @@ void LoadDictionaryField::GenerateCode(MaglevAssembler* masm,
+@@ -1235,6 +1237,277 @@ void LoadDictionaryField::GenerateCode(MaglevAssembler* masm,
    __ bind(*done);
  }
  
@@ -10444,8 +10604,9 @@ index cdeb38c6..68013687 100644
 +}
 +
 +// Jumps to `not_storable` unless `value` can be stored as it is in the
-+// region with the tagged id `region`: Smis, read-only objects, primitives in
-+// shared space and objects of the same region.
++// region with the tagged id `region`: Smis, read-only objects, common
++// primitives in shared space and objects of the same region. A primitive in
++// memory of regions may be another region's, which the runtime tells.
 +void EmitRegionStorableCheck(MaglevAssembler* masm, Register region,
 +                             Register value, Label* not_storable,
 +                             Register scratch) {
@@ -10466,6 +10627,7 @@ index cdeb38c6..68013687 100644
 +  __ B(hs, not_storable);
 +  __ CheckPageFlag(value, MemoryChunk::IN_WRITABLE_SHARED_SPACE, eq,
 +                   not_storable);
++  __ CheckPageFlag(value, MemoryChunk::REGION_MEMORY, ne, not_storable);
 +  __ B(&storable);
 +  __ Bind(&region_object);
 +  __ LoadTaggedSignedField(scratch, value, offsetof(JSRegionObject, region_id_));
@@ -11322,10 +11484,10 @@ index 00000000..844041ef
 +#endif  // V8_OBJECTS_JS_REGION_INL_H_
 diff --git a/src/objects/js-region.cc b/src/objects/js-region.cc
 new file mode 100644
-index 00000000..5fabef83
+index 00000000..15d0c0c0
 --- /dev/null
 +++ b/src/objects/js-region.cc
-@@ -0,0 +1,2869 @@
+@@ -0,0 +1,3045 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -11335,6 +11497,7 @@ index 00000000..5fabef83
 +#include <algorithm>
 +#include <bitset>
 +#include <limits>
++#include <map>
 +#include <unordered_map>
 +#include <unordered_set>
 +#include <vector>
@@ -11664,9 +11827,16 @@ index 00000000..5fabef83
 +// static
 +int RegionRegistry::RegionOf(Isolate* isolate, Tagged<HeapObject> object) {
 +  if (!HeapLayout::InWritableSharedSpace(object)) return -1;
-+  int region = MutablePage::FromHeapObject(isolate, object)->region_id();
++  MutablePage* page = MutablePage::FromHeapObject(isolate, object);
++  int region = page->region_id();
 +  if (region != MutablePage::kNoRegion) return std::max(region, -1);
 +  if (IsJSRegionObject(object)) return Cast<JSRegionObject>(object)->region_id();
++  // Chunks and listed objects: strings and numbers of a region have nothing
++  // else to tell it by.
++  if (page->Chunk()->IsRegionMemory()) {
++    region = RegionAllocator::RegionAt(object.address());
++    if (region >= 0) return region;
++  }
 +  if (IsFixedArray(object)) {
 +    // Maybe the values of a region object: optimized code can keep them
 +    // without the object.
@@ -12083,6 +12253,10 @@ index 00000000..5fabef83
 +  std::unordered_map<int, std::vector<Address>> common;
 +  std::vector<bool> live_stores(RegionBackingStores::Count());
 +  heap->CompleteSweepingFull(CompleteSweepingReason::kHeapObjectIterator);
++  // The GC may have moved common objects into what were chunks of regions:
++  // only page ids and region objects tell regions now. Strings and numbers of
++  // regions on common pages become common.
++  RegionAllocator::ForgetIndex();
 +  Isolate* isolate = heap->isolate();
 +  PagedSpaceObjectIterator iterator(heap, heap->shared_space());
 +  for (Tagged<HeapObject> object = iterator.Next(); !object.is_null();
@@ -12157,6 +12331,9 @@ index 00000000..5fabef83
 +    readers_[region].store(kNotFrozen, std::memory_order_relaxed);
 +    bytes_[region].store(0, std::memory_order_relaxed);
 +    holders_[region].store(0, std::memory_order_relaxed);
++    // Strings of the region may still be alive, and nobody holds the region
++    // for them any more.
++    RegionAllocator::Detach(region);
 +    FreeRegions()->push_back(region);
 +  }
 +}
@@ -12482,7 +12659,9 @@ index 00000000..5fabef83
 +    DirectHandle<FixedArray> new_keys =
 +        factory->NewFixedArray(length, AllocationType::kSharedOld);
 +    for (int i = 0; i < length; i++) {
-+      DirectHandle<String> key = String::Share(isolate, keys[i]);
++      // Shapes outlive regions: a key of a region is copied.
++      DirectHandle<String> key = Cast<String>(
++          JSRegionObject::ShareValue(isolate, -1, keys[i]).ToHandleChecked());
 +      // Shared strings must be hashed before other isolates can see them.
 +      key->EnsureHash();
 +      new_keys->set(i, *key);
@@ -12573,8 +12752,8 @@ index 00000000..5fabef83
 +                      NewTypeError(MessageTemplate::kRegionCannotMove, value));
 +    }
 +    DirectHandle<Object> shared;
-+    ASSIGN_RETURN_ON_EXCEPTION(isolate_, shared,
-+                               Object::Share(isolate_, value, kThrowOnError));
++    ASSIGN_RETURN_ON_EXCEPTION(
++        isolate_, shared, JSRegionObject::ShareValue(isolate_, region_, value));
 +    if (IsString(*shared)) bytes_ += Cast<String>(*shared)->Size();
 +    return shared;
 +  }
@@ -13080,6 +13259,44 @@ index 00000000..5fabef83
 +
 +void ForgetRegionLiterals(Isolate* isolate) { RegionLiterals::Forget(isolate); }
 +
++}  // namespace
++
++// static
++MaybeDirectHandle<Object> JSRegionObject::ShareValue(Isolate* isolate,
++                                                     int region,
++                                                     DirectHandle<Object> value) {
++  if (IsSmi(*value)) return value;
++  Tagged<HeapObject> object = Cast<HeapObject>(*value);
++  if (HeapLayout::InReadOnlySpace(object)) return value;
++  const bool is_string = IsString(object);
++  if (!is_string && !IsHeapNumber(object)) {
++    return Object::Share(isolate, value, kThrowOnError);
++  }
++  if (HeapLayout::InWritableSharedSpace(object) &&
++      (!is_string || Cast<String>(object)->IsShared())) {
++    int owner = RegionRegistry::RegionOf(isolate, object);
++    if (owner < 0 || owner == region) return value;
++  }
++  Factory* factory = isolate->factory();
++  if (region >= 0 && RegionAllocator::StringsInRegions()) {
++    if (is_string) {
++      return factory->NewSharedStringInRegion(Cast<String>(value), region);
++    }
++    return factory->NewHeapNumberInRegion(
++        Cast<HeapNumber>(object)->value_as_bits(), region);
++  }
++  if (!is_string) {
++    return factory->NewHeapNumberFromBits<AllocationType::kSharedOld>(
++        Cast<HeapNumber>(object)->value_as_bits());
++  }
++  if (Cast<String>(object)->IsShared()) {
++    return factory->NewSharedStringCopy(Cast<String>(value));
++  }
++  return String::Share(isolate, Cast<String>(value));
++}
++
++namespace {
++
 +MaybeDirectHandle<Object> LiteralValue(Isolate* isolate, int region,
 +                                       DirectHandle<Object> value) {
 +  if (IsSmi(*value)) return value;
@@ -13094,7 +13311,7 @@ index 00000000..5fabef83
 +    THROW_NEW_ERROR(isolate,
 +                    NewTypeError(MessageTemplate::kRegionLiteralPlainValue));
 +  }
-+  return Object::Share(isolate, value, kThrowOnError);
++  return JSRegionObject::ShareValue(isolate, region, value);
 +}
 +
 +}  // namespace
@@ -13161,9 +13378,9 @@ index 00000000..5fabef83
 +    DirectHandle<Object> value;
 +    ASSIGN_RETURN_ON_EXCEPTION(isolate, value,
 +                               LiteralValue(isolate, region, values[i]));
-+    // Count strings copied into shared space, as region.run() does.
-+    if (IsString(*value) && *value != *values[i]) {
-+      bytes += Cast<String>(*value)->Size();
++    // Count strings and numbers copied, as region.run() does.
++    if ((IsString(*value) || IsHeapNumber(*value)) && *value != *values[i]) {
++      bytes += Cast<HeapObject>(*value)->Size();
 +    }
 +    object_values->set(i, *value);
 +  }
@@ -13187,8 +13404,8 @@ index 00000000..5fabef83
 +  DirectHandle<Object> shared;
 +  ASSIGN_RETURN_ON_EXCEPTION(isolate, shared,
 +                             LiteralValue(isolate, region, value));
-+  if (IsString(*shared) && *shared != *value) {
-+    RegionRegistry::AddBytes(region, Cast<String>(*shared)->Size());
++  if ((IsString(*shared) || IsHeapNumber(*shared)) && *shared != *value) {
++    RegionRegistry::AddBytes(region, Cast<HeapObject>(*shared)->Size());
 +  }
 +  return shared;
 +}
@@ -13463,16 +13680,22 @@ index 00000000..5fabef83
 +    RETURN_FAILURE(isolate, kThrowOnError,
 +                   NewTypeError(MessageTemplate::kRegionCrossReference));
 +  }
-+  // Numbers, shared primitives and objects of the region go in as they are;
-+  // only the rest needs the evacuator (strings to share, typed arrays).
++  // Small integers and objects of the region go in as they are, other
++  // primitives as ShareValue() gives them; only the rest needs the evacuator
++  // (typed arrays).
 +  DirectHandle<Object> shared = value;
 +  bool as_is = IsSmi(*value) ||
 +               (IsJSRegionObject(*value) &&
-+                Cast<JSRegionObject>(*value)->region_id() == object->region_id()) ||
-+               (!IsJSReceiver(*value) &&
-+                (HeapLayout::InReadOnlySpace(Cast<HeapObject>(*value)) ||
-+                 HeapLayout::InAnySharedSpace(Cast<HeapObject>(*value))));
-+  if (!as_is) {
++                Cast<JSRegionObject>(*value)->region_id() == object->region_id());
++  if (!as_is && !IsJSReceiver(*value)) {
++    ASSIGN_RETURN_ON_EXCEPTION_VALUE(
++        isolate, shared, ShareValue(isolate, object->region_id(), value),
++        Nothing<bool>());
++    if (*shared != *value && (IsString(*shared) || IsHeapNumber(*shared))) {
++      RegionRegistry::AddBytes(object->region_id(),
++                               Cast<HeapObject>(*shared)->Size());
++    }
++  } else if (!as_is) {
 +    ASSIGN_RETURN_ON_EXCEPTION_VALUE(
 +        isolate, shared,
 +        Evacuator(isolate, object->region_id()).Copy(value), Nothing<bool>());
@@ -13532,6 +13755,7 @@ index 00000000..5fabef83
 +}
 +
 +size_t RegionAllocator::threshold_ = std::numeric_limits<size_t>::max();
++bool RegionAllocator::strings_in_regions_ = false;
 +
 +namespace {
 +
@@ -13575,11 +13799,55 @@ index 00000000..5fabef83
 +  int collected = 0;
 +  int reused_pages = 0;
 +  int marked = 0;
++  // The chunks and listed objects above by address, [start, end) -> region.
++  // An owner frees nothing on common pages that is not here, and RegionOf()
++  // reads it: whatever points there counts for the region. Changed under
++  // `mutex` as well, so that it matches the lists.
++  base::Mutex index_mutex;
++  std::map<Address, std::pair<Address, int>> index;
 +};
 +
 +RegionMemory* Memory() {
 +  static base::LeakyObject<RegionMemory> memory;
 +  return memory.get();
++}
++
++// Marks a common page that region memory is taken from. The mark stays until
++// the page is released.
++void MarkRegionMemory(Address address) {
++  MutablePage* page = MutablePage::FromAddress(address);
++  if (!page->Chunk()->IsRegionMemory()) {
++    page->SetFlagNonExecutable(MemoryChunk::REGION_MEMORY);
++  }
++}
++
++// Under memory->mutex.
++void AddToIndex(RegionMemory* memory, int region,
++                const std::vector<std::pair<Address, Address>>& ranges) {
++  base::MutexGuard guard(&memory->index_mutex);
++  for (auto [start, end] : ranges) memory->index[start] = {end, region};
++}
++
++// A shared GC may have moved listed objects to pages without the mark.
++void AddToIndex(RegionMemory* memory, int region,
++                const std::vector<Address>& objects) {
++  base::MutexGuard guard(&memory->index_mutex);
++  for (Address object : objects) {
++    memory->index[object] = {object + HeapObject::FromAddress(object)->Size(),
++                             region};
++    MarkRegionMemory(object);
++  }
++}
++
++void RemoveFromIndex(RegionMemory* memory,
++                     const std::vector<std::pair<Address, Address>>& ranges) {
++  base::MutexGuard guard(&memory->index_mutex);
++  for (auto [start, end] : ranges) memory->index.erase(start);
++}
++
++void RemoveFromIndex(RegionMemory* memory, const std::vector<Address>& objects) {
++  base::MutexGuard guard(&memory->index_mutex);
++  for (Address object : objects) memory->index.erase(object);
 +}
 +
 +// Chunks grow with the region, so that a small region takes little memory
@@ -13681,6 +13949,7 @@ index 00000000..5fabef83
 +  if (v8_flags.region_pages && v8_flags.black_allocated_pages &&
 +      !v8_flags.sticky_mark_bits) {
 +    threshold_ = v8_flags.region_page_threshold;
++    strings_in_regions_ = v8_flags.region_strings;
 +  }
 +}
 +
@@ -13820,6 +14089,9 @@ index 00000000..5fabef83
 +  {
 +    base::MutexGuard guard(&Memory()->mutex);
 +    Memory()->chunks[region].emplace_back(start, start + chunk);
++    AddToIndex(Memory(), region,
++               std::vector<std::pair<Address, Address>>{{start, start + chunk}});
++    MarkRegionMemory(start);
 +  }
 +  isolate->region_allocation_info()->Reset(start, start + chunk);
 +  isolate->set_region_allocation_region(region);
@@ -13848,6 +14120,7 @@ index 00000000..5fabef83
 +                                   Tagged<HeapObject> array) {
 +  LargePage* page = LargePage::FromHeapObject(isolate, array);
 +  page->set_region_id(region);
++  page->SetFlagNonExecutable(MemoryChunk::REGION_MEMORY);
 +  base::MutexGuard guard(&Memory()->mutex);
 +  Memory()->large_pages[region].push_back(page);
 +}
@@ -13873,6 +14146,7 @@ index 00000000..5fabef83
 +  DCHECK(memory->free.empty());
 +  // Dead objects in chunks are swept, and their memory may be anybody's.
 +  memory->chunks.clear();
++  DCHECK(memory->index.empty());
 +  memory->pages.clear();
 +  memory->large_pages.clear();
 +  for (NormalPage* page : *heap->shared_space()) {
@@ -13884,6 +14158,52 @@ index 00000000..5fabef83
 +    }
 +  }
 +  memory->objects = std::move(objects);
++  for (const auto& [region, region_objects] : memory->objects) {
++    AddToIndex(memory, region, region_objects);
++  }
++}
++
++// static
++void RegionAllocator::ForgetIndex() {
++  RegionMemory* memory = Memory();
++  base::MutexGuard guard(&memory->mutex);
++  base::MutexGuard index_guard(&memory->index_mutex);
++  memory->index.clear();
++}
++
++// static
++void RegionAllocator::Detach(int region) {
++  {
++    base::MutexGuard guard(RegionRestsMutex());
++    RegionRests()->erase(region);
++  }
++  RegionMemory* memory = Memory();
++  base::MutexGuard guard(&memory->mutex);
++  // Pages stay never allocated on: what is left on them dies in place, and
++  // the shared GC releases them once they are empty.
++  if (auto it = memory->pages.find(region); it != memory->pages.end()) {
++    for (NormalPage* page : it->second) {
++      page->set_region_id(MutablePage::kNoRegion);
++    }
++    memory->pages.erase(it);
++  }
++  if (auto it = memory->large_pages.find(region);
++      it != memory->large_pages.end()) {
++    for (LargePage* page : it->second) {
++      page->set_region_id(MutablePage::kNoRegion);
++    }
++    memory->large_pages.erase(it);
++  }
++  if (auto it = memory->chunks.find(region); it != memory->chunks.end()) {
++    RemoveFromIndex(memory, it->second);
++    memory->chunks.erase(it);
++  }
++  if (auto it = memory->objects.find(region); it != memory->objects.end()) {
++    RemoveFromIndex(memory, it->second);
++    memory->objects.erase(it);
++  }
++  memory->free.erase(region);
++  memory->markings.erase(region);
 +}
 +
 +// static
@@ -13928,11 +14248,13 @@ index 00000000..5fabef83
 +        memory->pages.erase(pages);
 +      }
 +      if (has_chunks) {
++        RemoveFromIndex(memory, chunks->second);
 +        common.insert(common.end(), chunks->second.begin(),
 +                      chunks->second.end());
 +        memory->chunks.erase(chunks);
 +      }
 +      if (has_objects) {
++        RemoveFromIndex(memory, objects->second);
 +        for (Address object : objects->second) {
 +          common.emplace_back(object, object + SizeAt(object));
 +        }
@@ -14019,7 +14341,8 @@ index 00000000..5fabef83
 +  // go to `visited`. Objects of the region point only to the region and to
 +  // common shared objects: maps, keys, strings and numbers. Of these, only
 +  // fixed arrays are visited, since values that optimized code keeps can be
-+  // on a common page without being listed.
++  // on a common page without being listed. Strings and numbers of the region
++  // in its chunks or listed are told by the index.
 +  std::unordered_set<Address> visited;
 +  std::vector<Tagged<HeapObject>> worklist;
 +  auto push = [&](Tagged<HeapObject> object) {
@@ -14032,8 +14355,10 @@ index 00000000..5fabef83
 +      }
 +    } else if (page->region_id() == MutablePage::kNoRegion &&
 +               (IsFixedArray(object) ||
-+                (IsJSRegionObject(object) &&
-+                 Cast<JSRegionObject>(object)->region_id() == region))) {
++                (IsJSRegionObject(object)
++                     ? Cast<JSRegionObject>(object)->region_id() == region
++                     : page->Chunk()->IsRegionMemory() &&
++                           RegionAt(object.address()) == region))) {
 +      if (!visited.insert(object.address()).second) return;
 +    } else {
 +      return;
@@ -14146,6 +14471,9 @@ index 00000000..5fabef83
 +
 +  {
 +    base::MutexGuard guard(&memory->mutex);
++    RemoveFromIndex(memory, chunks);
++    RemoveFromIndex(memory, objects);
++    AddToIndex(memory, region, kept_objects);
 +    if (!kept_pages.empty()) memory->pages[region] = std::move(kept_pages);
 +    if (!kept_large_pages.empty()) {
 +      memory->large_pages[region] = std::move(kept_large_pages);
@@ -14159,6 +14487,16 @@ index 00000000..5fabef83
 +    memory->marked++;
 +  }
 +  FreeCommon(heap, space, common);
++}
++
++// static
++int RegionAllocator::RegionAt(Address address) {
++  RegionMemory* memory = Memory();
++  base::MutexGuard guard(&memory->index_mutex);
++  auto it = memory->index.upper_bound(address);
++  if (it == memory->index.begin()) return -1;
++  --it;
++  return address < it->second.first ? it->second.second : -1;
 +}
 +
 +// static
@@ -14197,10 +14535,10 @@ index 00000000..5fabef83
 +}  // namespace v8
 diff --git a/src/objects/js-region.h b/src/objects/js-region.h
 new file mode 100644
-index 00000000..345ef7e0
+index 00000000..c19c57c6
 --- /dev/null
 +++ b/src/objects/js-region.h
-@@ -0,0 +1,464 @@
+@@ -0,0 +1,492 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -14408,9 +14746,13 @@ index 00000000..345ef7e0
 +//
 +// All objects of a region are thus on its pages, its large pages or its
 +// chunks, or on common pages where a shared GC or a marking of the region
-+// found them alive; the region keeps a list of the latter. Only region
-+// objects and their values arrays are allocated here: maps, keys, strings
-+// and numbers are common shared objects.
++// found them alive; the region keeps a list of the latter, and an index of
++// the chunks and listed objects tells their region by address. Region
++// objects, their values arrays, and the strings and numbers they hold are
++// allocated here (--region-strings); maps and keys are common shared objects.
++// A string or number of another region is copied when it is stored, so that
++// no region points into another. Pages with memory of regions on them are
++// marked with MemoryChunk::REGION_MEMORY.
 +//
 +// The owner can collect a region once no pointer into it is left: its pages
 +// go to a pool that new regions take pages from, its chunks and listed
@@ -14459,6 +14801,22 @@ index 00000000..345ef7e0
 +  // isolate has, and sweeps it. Skipped if its pages are not swept yet.
 +  static void Mark(Isolate* isolate, int region,
 +                   const std::vector<Tagged<HeapObject>>& roots);
++  // The region whose chunk or listed object on a common page holds
++  // `address`, or -1.
++  static int RegionAt(Address address);
++  // Called by the shared space isolate after a full GC, before it looks for
++  // objects of regions: the GC may have moved objects into what were chunks.
++  static void ForgetIndex();
++  // Called by the shared space isolate when the id of `region` is released:
++  // what is left of the region becomes common memory, which only shared GCs
++  // collect, so that the next region with the id does not take it.
++  static void Detach(int region);
++  // Whether strings and numbers that regions share are copied into their
++  // memory. Read by generated code.
++  static bool StringsInRegions() { return strings_in_regions_; }
++  static Address strings_in_regions_address() {
++    return reinterpret_cast<Address>(&strings_in_regions_);
++  }
 +  // Totals for tests: regions collected, pages taken from the pool, regions
 +  // marked.
 +  static int CollectedCount();
@@ -14478,6 +14836,7 @@ index 00000000..345ef7e0
 +  static bool OpenChunk(Isolate* isolate, int region, int size);
 +
 +  static size_t threshold_;
++  static bool strings_in_regions_;
 +};
 +
 +// A plain object or array copied into an ownership region. Properties are not
@@ -14597,6 +14956,13 @@ index 00000000..345ef7e0
 +
 +  // A value of #{} or #[] as the object holds it: as it is, shared, copied
 +  // or rejected. Counts the bytes of a string copied into the region.
++  // A primitive for an object of `region`, or for a common shared object if
++  // `region` is -1: Smis, read-only objects and common shared ones as they
++  // are, strings and numbers of the region as well; other strings and numbers
++  // are copied into the memory of the region (see RegionAllocator), the rest
++  // shared as Object::Share() does.
++  static MaybeDirectHandle<Object> ShareValue(Isolate* isolate, int region,
++                                              DirectHandle<Object> value);
 +  static MaybeDirectHandle<Object> ShareLiteralValue(
 +      Isolate* isolate, int region, DirectHandle<Object> value);
 +
@@ -15454,7 +15820,7 @@ index 2ab60bab..433e7430 100644
          result = JSObject::GetPropertyAttributesWithInterceptor(&it);
          if (result.IsNothing()) return MaybeDirectHandle<Object>();
 diff --git a/src/runtime/runtime-object.cc b/src/runtime/runtime-object.cc
-index 96c1c2f4..ac84a36d 100644
+index 96c1c2f4..b75a46e3 100644
 --- a/src/runtime/runtime-object.cc
 +++ b/src/runtime/runtime-object.cc
 @@ -3,6 +3,7 @@
@@ -15477,7 +15843,7 @@ index 96c1c2f4..ac84a36d 100644
  #include "src/objects/property-descriptor-object.h"
  #include "src/objects/property-descriptor.h"
  #include "src/objects/property-details.h"
-@@ -87,6 +91,114 @@ Maybe<bool> Runtime::DeleteObjectProperty(Isolate* isolate,
+@@ -87,6 +91,123 @@ Maybe<bool> Runtime::DeleteObjectProperty(Isolate* isolate,
  }
  
  // https://tc39.es/ecma262/#sec-object.keys
@@ -15540,6 +15906,15 @@ index 96c1c2f4..ac84a36d 100644
 +          ->region_id());
 +}
 +
++// For tests: the region whose memory holds a value, or -1.
++RUNTIME_FUNCTION(Runtime_RegionOfValue) {
++  HandleScope scope(isolate);
++  DCHECK_EQ(1, args.length());
++  Tagged<Object> value = args[0];
++  if (!IsHeapObject(value)) return Smi::FromInt(-1);
++  return Smi::FromInt(RegionRegistry::RegionOf(isolate, Cast<HeapObject>(value)));
++}
++
 +// For tests: how many isolates may hold pointers into a region, and whether
 +// this one may.
 +RUNTIME_FUNCTION(Runtime_RegionHolderCount) {
@@ -15592,7 +15967,7 @@ index 96c1c2f4..ac84a36d 100644
  RUNTIME_FUNCTION(Runtime_ObjectKeys) {
    HandleScope scope(isolate);
    DirectHandle<Object> object = args.at(0);
-@@ -221,6 +333,7 @@ RUNTIME_FUNCTION(Runtime_HasOwnConstDataProperty) {
+@@ -221,6 +342,7 @@ RUNTIME_FUNCTION(Runtime_HasOwnConstDataProperty) {
        case LookupIterator::ACCESS_CHECK:
        case LookupIterator::JSPROXY:
        case LookupIterator::WASM_OBJECT:
@@ -15601,10 +15976,10 @@ index 96c1c2f4..ac84a36d 100644
        case LookupIterator::ACCESSOR:
        case LookupIterator::MODULE_NAMESPACE:
 diff --git a/src/runtime/runtime.h b/src/runtime/runtime.h
-index 8be2dd32..38b6568f 100644
+index 8be2dd32..1015b868 100644
 --- a/src/runtime/runtime.h
 +++ b/src/runtime/runtime.h
-@@ -395,6 +395,17 @@ constexpr bool CanTriggerGC(T... properties) {
+@@ -395,6 +395,18 @@ constexpr bool CanTriggerGC(T... properties) {
    F(HasOwnConstDataProperty, 2, 1)                                     \
    F(ObjectIsExtensible, 1, 1)                                          \
    F(ObjectKeys, 1, 1)                                                  \
@@ -15614,6 +15989,7 @@ index 8be2dd32..38b6568f 100644
 +  F(AllocateInRegion, 2, 1)                                            \
 +  F(RegionPageOf, 1, 1)                                                \
 +  F(RegionHolderCount, 1, 1)                                           \
++  F(RegionOfValue, 1, 1)                                               \
 +  F(RegionIsHolder, 1, 1)                                              \
 +  F(RegionCollectedCount, 0, 1)                                        \
 +  F(RegionReusedPageCount, 0, 1)                                       \
