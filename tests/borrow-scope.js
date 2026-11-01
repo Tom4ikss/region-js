@@ -42,7 +42,8 @@ const sleep = () => new Promise((resolve) => setTimeout(resolve, 0));
       try {
         print('late read', i, state.counter);
       } catch (e) {
-        print('late read', i, 'failed:', e.message);
+        // Frozen, or owned by main again if it thawed first.
+        print('late read', i, 'failed:', e.name);
       }
     }, 0);
   })));

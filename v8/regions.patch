@@ -5721,7 +5721,7 @@ index 00000000..bd767012
 +
 +#endif  // V8_D8_D8_PORT_H_
 diff --git a/src/d8/d8.cc b/src/d8/d8.cc
-index 49121fe1..78ce1716 100644
+index 49121fe1..36dd2d17 100644
 --- a/src/d8/d8.cc
 +++ b/src/d8/d8.cc
 @@ -14,6 +14,7 @@
@@ -5880,7 +5880,20 @@ index 49121fe1..78ce1716 100644
  void PerIsolateData::UnregisterWorker(const std::shared_ptr<Worker>& worker) {
    registered_workers_.erase(worker);
    worker_message_callbacks_.erase(worker);
-@@ -4366,11 +4450,21 @@ void Shell::WorkerOnMessageSetter(
+@@ -4209,7 +4293,12 @@ void Shell::WorkerGetMessage(const v8::FunctionCallbackInfo<v8::Value>& info) {
+     return;
+   }
+ 
++  // The wait checks no interrupts and runs no tasks: GCs that other isolates
++  // asked for, to let go of their regions, come before and after it.
++  i::Heap* heap = reinterpret_cast<i::Isolate*>(isolate)->heap();
++  heap->HandleRegionCollectionRequest();
+   std::unique_ptr<SerializationData> data = worker->GetMessage(isolate);
++  heap->HandleRegionCollectionRequest();
+   if (data) {
+     Local<Value> value;
+     if (Shell::DeserializeValue(isolate, std::move(data)).ToLocal(&value)) {
+@@ -4366,11 +4455,21 @@ void Shell::WorkerOnMessageSetter(
    }
  
    Local<Value> callback = info[0];
@@ -5903,7 +5916,7 @@ index 49121fe1..78ce1716 100644
  }
  
  void Shell::WorkerTerminate(const v8::FunctionCallbackInfo<v8::Value>& info) {
-@@ -4804,99 +4898,1211 @@ Local<ObjectTemplate> Shell::CreateGlobalTemplate(Isolate* isolate) {
+@@ -4804,99 +4903,1211 @@ Local<ObjectTemplate> Shell::CreateGlobalTemplate(Isolate* isolate) {
    global_template->Set(isolate, "performance",
                         Shell::CreatePerformanceTemplate(isolate));
    global_template->Set(isolate, "Worker", Shell::CreateWorkerTemplate(isolate));
@@ -7186,7 +7199,7 @@ index 49121fe1..78ce1716 100644
  }
  
  Local<ObjectTemplate> Shell::CreateAsyncHookTemplate(Isolate* isolate) {
-@@ -5376,9 +6582,801 @@ MaybeLocal<Context> Shell::CreateEvaluationContext(Isolate* isolate) {
+@@ -5376,9 +6587,801 @@ MaybeLocal<Context> Shell::CreateEvaluationContext(Isolate* isolate) {
    }
  #endif  // V8_ENABLE_HARDWARE_WATCHPOINT_SUPPORT
  
@@ -7988,7 +8001,7 @@ index 49121fe1..78ce1716 100644
  namespace {
  int LineFromOffset(Local<debug::Script> script, int offset) {
    debug::Location location = script->GetSourceLocation(offset);
-@@ -6538,6 +8536,7 @@ void SourceGroup::JoinThread(const i::ParkedScope& parked) {
+@@ -6538,6 +8541,7 @@ void SourceGroup::JoinThread(const i::ParkedScope& parked) {
  void SerializationDataQueue::Enqueue(std::unique_ptr<SerializationData> data) {
    base::MutexGuard lock_guard(&mutex_);
    data_.push_back(std::move(data));
@@ -7996,7 +8009,7 @@ index 49121fe1..78ce1716 100644
  }
  
  bool SerializationDataQueue::Dequeue(
-@@ -6547,6 +8546,7 @@ bool SerializationDataQueue::Dequeue(
+@@ -6547,6 +8551,7 @@ bool SerializationDataQueue::Dequeue(
    if (data_.empty()) return false;
    *out_data = std::move(data_[0]);
    data_.erase(data_.begin());
@@ -8004,7 +8017,7 @@ index 49121fe1..78ce1716 100644
    return true;
  }
  
-@@ -6558,6 +8558,7 @@ bool SerializationDataQueue::IsEmpty() {
+@@ -6558,6 +8563,7 @@ bool SerializationDataQueue::IsEmpty() {
  void SerializationDataQueue::Clear() {
    base::MutexGuard lock_guard(&mutex_);
    data_.clear();
@@ -8012,7 +8025,7 @@ index 49121fe1..78ce1716 100644
  }
  
  Worker::Worker(Isolate* parent_isolate, const char* script)
-@@ -6668,6 +8669,12 @@ std::unique_ptr<SerializationData> Worker::GetMessage(Isolate* requester) {
+@@ -6668,6 +8674,12 @@ std::unique_ptr<SerializationData> Worker::GetMessage(Isolate* requester) {
        out_queue_.Dequeue(&result);
        break;
      }
@@ -8025,7 +8038,7 @@ index 49121fe1..78ce1716 100644
      out_semaphore_.ParkedWait(
          reinterpret_cast<i::Isolate*>(requester)->main_thread_local_isolate());
    }
-@@ -6705,6 +8712,8 @@ void Worker::Terminate() {
+@@ -6705,6 +8717,8 @@ void Worker::Terminate() {
    // returning to the event queue. Since we checked the state before, and we are
    // holding the {worker_mutex_}, it's safe to access the isolate.
    isolate_->TerminateExecution();
@@ -8034,7 +8047,7 @@ index 49121fe1..78ce1716 100644
  }
  
  void Worker::EnterTerminatedState() {
-@@ -6791,6 +8800,7 @@ Worker* Worker::GetCurrentWorker() { return current_worker_; }
+@@ -6791,6 +8805,7 @@ Worker* Worker::GetCurrentWorker() { return current_worker_; }
  void Worker::ExecuteInThread() {
    Isolate::CreateParams create_params = GetDefaultIsolateCreateParams();
    isolate_ = Isolate::New(create_params);
@@ -8042,7 +8055,7 @@ index 49121fe1..78ce1716 100644
  
    // TODO(mdanylo): can we omit dump disable here?
  #ifdef V8_DUMPLING
-@@ -6926,6 +8936,7 @@ void Worker::ExecuteInThread() {
+@@ -6926,6 +8941,7 @@ void Worker::ExecuteInThread() {
      platform::NotifyIsolateShutdown(g_default_platform, isolate_);
    }
  
@@ -8050,7 +8063,7 @@ index 49121fe1..78ce1716 100644
    isolate_->Dispose();
    isolate_ = nullptr;
  
-@@ -7310,6 +9321,9 @@ bool Shell::SetOptions(int argc, char* argv[]) {
+@@ -7310,6 +9326,9 @@ bool Shell::SetOptions(int argc, char* argv[]) {
                                    argv, &i)) {
        // Value is expressed in MB.
        options.max_serializer_memory = atoi(flag_value) * i::MB;
@@ -8060,7 +8073,7 @@ index 49121fe1..78ce1716 100644
      } else if (FlagMatches("--bundle", &argv[i])) {
        options.bundle = true;
  #ifdef V8_FUZZILLI
-@@ -7921,6 +9935,27 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7921,6 +9940,27 @@ class Serializer : public ValueSerializer::Delegate {
      return true;
    }
  
@@ -8088,7 +8101,7 @@ index 49121fe1..78ce1716 100644
   private:
    Maybe<bool> PrepareTransfer(Local<Context> context, Local<Value> transfer) {
      if (transfer->IsArray()) {
-@@ -7929,6 +9964,22 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7929,6 +9969,22 @@ class Serializer : public ValueSerializer::Delegate {
        for (uint32_t i = 0; i < length; ++i) {
          Local<Value> element;
          if (transfer_array->Get(context, i).ToLocal(&element)) {
@@ -8111,7 +8124,7 @@ index 49121fe1..78ce1716 100644
            if (!element->IsArrayBuffer()) {
              ThrowError(isolate_,
                         "Transfer array elements must be an ArrayBuffer");
-@@ -7961,7 +10012,58 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7961,7 +10017,58 @@ class Serializer : public ValueSerializer::Delegate {
      }
    }
  
@@ -8170,7 +8183,7 @@ index 49121fe1..78ce1716 100644
      for (const auto& global_array_buffer : array_buffers_) {
        Local<ArrayBuffer> array_buffer =
            Local<ArrayBuffer>::New(isolate_, global_array_buffer);
-@@ -7987,6 +10089,7 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7987,6 +10094,7 @@ class Serializer : public ValueSerializer::Delegate {
    ValueSerializer serializer_;
    std::unique_ptr<SerializationData> data_;
    std::vector<Global<ArrayBuffer>> array_buffers_;
@@ -8178,7 +8191,7 @@ index 49121fe1..78ce1716 100644
    std::vector<Global<SharedArrayBuffer>> shared_array_buffers_;
    std::vector<Global<WasmModuleObject>> wasm_modules_;
    std::vector<std::shared_ptr<v8::BackingStore>> backing_stores_;
-@@ -8013,6 +10116,21 @@ class Deserializer : public ValueDeserializer::Delegate {
+@@ -8013,6 +10121,21 @@ class Deserializer : public ValueDeserializer::Delegate {
        return MaybeLocal<Value>();
      }
  
@@ -8200,7 +8213,7 @@ index 49121fe1..78ce1716 100644
      uint32_t index = 0;
      for (const auto& backing_store : data_->backing_stores()) {
        Local<ArrayBuffer> array_buffer =
-@@ -8049,6 +10167,21 @@ class Deserializer : public ValueDeserializer::Delegate {
+@@ -8049,6 +10172,21 @@ class Deserializer : public ValueDeserializer::Delegate {
      return nullptr;
    }
  
@@ -8222,7 +8235,7 @@ index 49121fe1..78ce1716 100644
   private:
    Isolate* isolate_;
    ValueDeserializer deserializer_;
-@@ -8309,9 +10442,13 @@ int Shell::Main(int argc, char* argv[]) {
+@@ -8309,9 +10447,13 @@ int Shell::Main(int argc, char* argv[]) {
    // The platform is owned by wrapper platform despite the `std::move` below.
    START_IGNORE_LIFETIME_SAFETY_WARNINGS()
    g_default_platform = g_platform.get();
@@ -8236,7 +8249,7 @@ index 49121fe1..78ce1716 100644
    }
    if (options.stress_delay_tasks) {
      int64_t random_seed = i::v8_flags.fuzzer_random_seed;
-@@ -8438,6 +10575,7 @@ int Shell::Main(int argc, char* argv[]) {
+@@ -8438,6 +10580,7 @@ int Shell::Main(int argc, char* argv[]) {
    }
  
    Isolate* isolate = Isolate::New(create_params);
@@ -8696,10 +8709,10 @@ index 793be1a7..b00ea27a 100644
    // Certain objects may be allocated in RO space if suitable for the snapshot.
    bool enable_ro_allocation_for_snapshot_ = false;
 diff --git a/src/flags/flag-definitions.h b/src/flags/flag-definitions.h
-index f47b7006..5cc9752d 100644
+index f47b7006..e8597da9 100644
 --- a/src/flags/flag-definitions.h
 +++ b/src/flags/flag-definitions.h
-@@ -1306,6 +1306,35 @@ DEFINE_WEAK_IMPLICATION(trace_baseline, trace_baseline_batch_compilation)
+@@ -1306,6 +1306,38 @@ DEFINE_WEAK_IMPLICATION(trace_baseline, trace_baseline_batch_compilation)
  // Internalize into a shared string table in the shared isolate
  DEFINE_BOOL(shared_strings, false, "allow sharing of strings")
  DEFINE_IMPLICATION(shared_strings, shared_heap)
@@ -8725,6 +8738,9 @@ index f47b7006..5cc9752d 100644
 +DEFINE_BOOL(region_gc, true,
 +            "let the owner of a region collect it, without stopping other "
 +            "isolates, once nothing points into it")
++DEFINE_BOOL(region_gc_requests, true,
++            "let the owner of a region ask other isolates that hold it for "
++            "a report, and wake the owner when the last one lets go")
 +DEFINE_BOOL(region_gc_marking, true,
 +            "let the owner of a region that it points into mark and sweep "
 +            "it in a young generation GC that region_gc_pages asks for")
@@ -8969,7 +8985,7 @@ index cead3955..2dc18143 100644
  
      shared_trusted_space_allocator_.emplace(
 diff --git a/src/heap/heap.cc b/src/heap/heap.cc
-index edb398ee..b324775e 100644
+index edb398ee..64db6452 100644
 --- a/src/heap/heap.cc
 +++ b/src/heap/heap.cc
 @@ -119,6 +119,7 @@
@@ -8992,26 +9008,56 @@ index edb398ee..b324775e 100644
    // Invoke GCEpilogueCallbacks for all involved LocalHeaps.
    {
      // Allows handle derefs for all threads/isolates from this thread.
-@@ -1188,6 +1194,18 @@ void Heap::HandleGCRequest() {
+@@ -1188,6 +1194,48 @@ void Heap::HandleGCRequest() {
      CollectGarbage(NEW_SPACE,
                     GarbageCollectionReason::kFinalizeConcurrentMinorMS);
    }
-+  // During marking it would be a full GC, which looks for regions anyway.
-+  if (region_collection_requested_.exchange(false, std::memory_order_relaxed) &&
-+      !incremental_marking()->IsMajorMarking()) {
++  HandleRegionCollectionRequest();
++}
++
++namespace {
++
++// Runs requested region GCs of an isolate that waits for tasks, e.g. a worker
++// between messages, which checks no interrupts.
++class RegionCollectionTask final : public CancelableTask {
++ public:
++  explicit RegionCollectionTask(Isolate* isolate)
++      : CancelableTask(isolate), isolate_(isolate) {}
++
++  void RunInternal() override {
++    isolate_->heap()->HandleRegionCollectionRequest();
++  }
++
++ private:
++  Isolate* const isolate_;
++};
++
++}  // namespace
++
++void Heap::HandleRegionCollectionRequest() {
++  int rounds = region_collection_rounds_.exchange(0, std::memory_order_relaxed);
++  for (int i = 0; i < rounds; i++) {
++    // During marking it would be a full GC, which looks for regions anyway.
++    if (incremental_marking()->IsMajorMarking()) return;
 +    CollectGarbage(NEW_SPACE, GarbageCollectionReason::kRegions);
 +  }
 +}
 +
-+void Heap::RequestRegionCollection() {
-+  if (region_collection_requested_.exchange(true, std::memory_order_relaxed)) {
-+    return;
++void Heap::RequestRegionCollection(int rounds, bool interrupt) {
++  int pending = 0;
++  while (!region_collection_rounds_.compare_exchange_weak(
++      pending, std::max(pending, rounds), std::memory_order_relaxed)) {
 +  }
-+  isolate()->stack_guard()->RequestGC();
++  if (interrupt) {
++    isolate()->stack_guard()->RequestGC();
++  } else if (pending == 0) {
++    GetForegroundTaskRunner(TaskPriority::kUserVisible)
++        ->PostTask(std::make_unique<RegionCollectionTask>(isolate()));
++  }
  }
  
  namespace {
-@@ -2199,6 +2217,10 @@ void Heap::PerformGarbageCollection(GarbageCollector collector,
+@@ -2199,6 +2247,10 @@ void Heap::PerformGarbageCollection(GarbageCollector collector,
        CompleteSweepingFull(CompleteSweepingReason::kMinorGC);
      } else {
        CompleteSweepingYoung(CompleteSweepingReason::kMinorGC);
@@ -9022,7 +9068,7 @@ index edb398ee..b324775e 100644
        if (v8_flags.verify_heap) {
          // If heap verification is enabled, we want to ensure that sweeping is
          // completed here, as it will be triggered from Heap::Verify anyway.
-@@ -2247,6 +2269,17 @@ void Heap::PerformGarbageCollection(GarbageCollector collector,
+@@ -2247,6 +2299,17 @@ void Heap::PerformGarbageCollection(GarbageCollector collector,
    }
  
    FreeLinearAllocationAreas();
@@ -9040,7 +9086,7 @@ index edb398ee..b324775e 100644
  
    if (!incremental_marking_->IsMarking()) {
      young_pending_allocations_->ResetVersion();
-@@ -2528,6 +2561,12 @@ void Heap::MarkCompact() {
+@@ -2528,6 +2591,12 @@ void Heap::MarkCompact() {
    uint64_t external_memory_before_gc =
        AllocatedExternalMemorySinceMarkCompact();
  
@@ -9053,7 +9099,7 @@ index edb398ee..b324775e 100644
    mark_compact_collector()->Prepare();
  
    ms_count_++;
-@@ -3307,6 +3346,7 @@ void Heap::MakeHeapIterable(CompleteSweepingReason reason) {
+@@ -3307,6 +3376,7 @@ void Heap::MakeHeapIterable(CompleteSweepingReason reason) {
  
  void Heap::MakeLinearAllocationAreasIterable() {
    allocator()->MakeLinearAllocationAreasIterable();
@@ -9061,7 +9107,7 @@ index edb398ee..b324775e 100644
  
    safepoint()->IterateLocalHeaps([](LocalHeap* local_heap) {
      local_heap->MakeLinearAllocationAreasIterable();
-@@ -3333,12 +3373,14 @@ void Heap::FreeLinearAllocationAreas() {
+@@ -3333,12 +3403,14 @@ void Heap::FreeLinearAllocationAreas() {
  
  void Heap::FreeMainThreadLinearAllocationAreas() {
    allocator()->FreeLinearAllocationAreas();
@@ -9076,7 +9122,7 @@ index edb398ee..b324775e 100644
  
    safepoint()->IterateLocalHeaps([](LocalHeap* local_heap) {
      local_heap->MarkSharedLinearAllocationAreasBlack();
-@@ -3350,6 +3392,7 @@ void Heap::FreeSharedLinearAllocationAreasAndResetFreeLists() {
+@@ -3350,6 +3422,7 @@ void Heap::FreeSharedLinearAllocationAreasAndResetFreeLists() {
    DCHECK(v8_flags.black_allocated_pages);
    allocator()->FreeSharedLinearAllocationAreasAndResetFreeLists();
    main_thread_local_heap()->FreeSharedLinearAllocationAreasAndResetFreeLists();
@@ -9085,29 +9131,32 @@ index edb398ee..b324775e 100644
    safepoint()->IterateLocalHeaps([](LocalHeap* local_heap) {
      local_heap->FreeSharedLinearAllocationAreasAndResetFreeLists();
 diff --git a/src/heap/heap.h b/src/heap/heap.h
-index 56ee0219..bba1928b 100644
+index 56ee0219..cb4622fd 100644
 --- a/src/heap/heap.h
 +++ b/src/heap/heap.h
-@@ -700,6 +700,10 @@ class Heap final {
+@@ -700,6 +700,13 @@ class Heap final {
  
    bool CollectionRequested();
  
-+  // Asks for a young generation GC that looks for ownership regions to
-+  // collect, at the next interrupt check.
-+  void RequestRegionCollection();
++  // Asks for `rounds` young generation GCs that look for ownership regions to
++  // collect: with `interrupt` at the next interrupt check, otherwise in a task
++  // once the isolate waits for one, e.g. between two messages. Other isolates
++  // ask without `interrupt`, so as not to stop running code.
++  void RequestRegionCollection(int rounds = 1, bool interrupt = true);
++  void HandleRegionCollectionRequest();
 +
    void RestoreHeapLimit(size_t heap_limit);
  
    // ===========================================================================
-@@ -2118,6 +2122,7 @@ class Heap final {
+@@ -2118,6 +2125,7 @@ class Heap final {
    // Stores the memory pressure level that set by MemoryPressureNotification
    // and reset by a mark-compact garbage collection.
    std::atomic<v8::MemoryPressureLevel> memory_pressure_level_;
-+  std::atomic<bool> region_collection_requested_{false};
++  std::atomic<int> region_collection_rounds_{0};
  
    std::vector<std::pair<v8::NearHeapLimitCallback, void*>>
        near_heap_limit_callbacks_;
-@@ -2483,6 +2488,7 @@ class Heap final {
+@@ -2483,6 +2491,7 @@ class Heap final {
    friend class ScheduleMinorGCTaskObserver;
    friend class SemiSpaceNewSpace;
    friend class SemiSpaceNewSpaceAllocatorPolicy;
@@ -11273,10 +11322,10 @@ index 00000000..844041ef
 +#endif  // V8_OBJECTS_JS_REGION_INL_H_
 diff --git a/src/objects/js-region.cc b/src/objects/js-region.cc
 new file mode 100644
-index 00000000..6ad21bce
+index 00000000..5fabef83
 --- /dev/null
 +++ b/src/objects/js-region.cc
-@@ -0,0 +1,2770 @@
+@@ -0,0 +1,2869 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -11290,6 +11339,7 @@ index 00000000..6ad21bce
 +#include <unordered_set>
 +#include <vector>
 +
++#include "src/base/bits.h"
 +#include "src/base/lazy-instance.h"
 +#include "src/base/platform/mutex.h"
 +#include "src/execution/isolate.h"
@@ -11329,6 +11379,7 @@ index 00000000..6ad21bce
 +std::atomic<bool> RegionRegistry::locked_[RegionRegistry::kMaxRegions];
 +std::atomic<size_t> RegionRegistry::bytes_[RegionRegistry::kMaxRegions];
 +std::atomic<uint64_t> RegionRegistry::holders_[RegionRegistry::kMaxRegions];
++std::atomic<bool> RegionRegistry::awaited_[RegionRegistry::kMaxRegions];
 +
 +namespace {
 +
@@ -11356,6 +11407,39 @@ index 00000000..6ad21bce
 +  return slots.get();
 +}
 +
++// The isolate of each holder slot that others may ask for a report, guarded
++// by RegionsMutex(); null once the isolate starts to tear down.
++Isolate** ReportTargets() {
++  static Isolate* targets[RegionRegistry::kHolderSlots] = {};
++  return targets;
++}
++
++// Asks the isolates of `bits` for `rounds` young generation GCs, each with a
++// report, in a task: a running isolate does them between two tasks, e.g.
++// two messages. The isolates that share the last bit are not known.
++void RequestReports(uint64_t bits, int rounds) {
++  if (!v8_flags.region_gc_requests) return;
++  bits &= ~(uint64_t{1} << kSharedHolderSlot);
++  if (bits == 0) return;
++  base::MutexGuard guard(RegionsMutex());
++  for (int slot = 0; slot < kSharedHolderSlot; slot++) {
++    if ((bits & (uint64_t{1} << slot)) == 0) continue;
++    if (Isolate* target = ReportTargets()[slot]) {
++      target->heap()->RequestRegionCollection(rounds, false);
++    }
++  }
++}
++
++// Regions that hold less than this in all are not worth GCs of other
++// isolates; a region that is due to be marked always is.
++constexpr size_t kRequestBytes = 1 * MB;
++
++// Whether `owner` is an isolate that owns the region, not a state.
++bool IsOwnerKey(uintptr_t owner) {
++  return owner != 0 && owner != RegionRegistry::kFrozen &&
++         owner != RegionRegistry::kFreed;
++}
++
 +uint64_t HolderBit(Isolate* isolate) {
 +  int slot = isolate->region_holder_slot();
 +  if (slot < 0) {
@@ -11367,6 +11451,7 @@ index 00000000..6ad21bce
 +      for (int i = 0; i < kSharedHolderSlot; i++) {
 +        if (!HolderSlots()->test(i)) {
 +          HolderSlots()->set(i);
++          ReportTargets()[i] = isolate;
 +          slot = i;
 +          break;
 +        }
@@ -11566,6 +11651,7 @@ index 00000000..6ad21bce
 +  readers_[region].store(kNotFrozen, std::memory_order_relaxed);
 +  frozen_by_[region].store(0, std::memory_order_relaxed);
 +  holders_[region].store(HolderBit(owner), std::memory_order_relaxed);
++  awaited_[region].store(false, std::memory_order_relaxed);
 +  owners_[region].store(OwnerKey(owner), std::memory_order_release);
 +  return region;
 +}
@@ -11662,6 +11748,8 @@ index 00000000..6ad21bce
 +        auto it = roots.find(region);
 +        if (it != roots.end()) it->second.push_back(object);
 +      });
++  // Owners that may collect a region now that this isolate left it.
++  uint64_t owners_to_wake = 0;
 +  for (int region = 0; region < count; region++) {
 +    if (referenced[region] ||
 +        (holders_[region].load(std::memory_order_relaxed) & bit) == 0) {
@@ -11669,13 +11757,54 @@ index 00000000..6ad21bce
 +    }
 +    // The owner gets new pointers by allocating, the isolate that froze a
 +    // region by thawing it.
-+    if (owners_[region].load(std::memory_order_acquire) == key ||
-+        frozen_by_[region].load(std::memory_order_acquire) == key) {
++    uintptr_t owner = owners_[region].load(std::memory_order_acquire);
++    if (owner == key || frozen_by_[region].load(std::memory_order_acquire) == key) {
 +      continue;
 +    }
-+    holders_[region].fetch_and(~bit, std::memory_order_acq_rel);
++    uint64_t left =
++        holders_[region].fetch_and(~bit, std::memory_order_acq_rel) & ~bit;
++    if (IsOwnerKey(owner) && base::bits::CountPopulation(left) == 1 &&
++        awaited_[region].exchange(false, std::memory_order_acq_rel)) {
++      owners_to_wake |= left;
++    }
 +  }
++  RequestReports(owners_to_wake, 1);
 +  if (collect) {
++    // Holders that keep the isolate from collecting or marking a region it
++    // owns: those that have no pointer left let go of it in their report,
++    // and then wake the isolate.
++    // Their GCs are not free: only regions that took 1 MB in all are worth
++    // them.
++    uint64_t holders_to_ask = 0;
++    size_t blocked_bytes = 0;
++    std::vector<int> blocked;
++    for (int region = 0; region < count; region++) {
++      uint64_t others = holders_[region].load(std::memory_order_acquire) & ~bit;
++      if (others == 0 || !in_use_[region].load(std::memory_order_relaxed) ||
++          owners_[region].load(std::memory_order_acquire) != key ||
++          locked_[region].load(std::memory_order_acquire)) {
++        continue;
++      }
++      if (!referenced[region]) {
++        blocked_bytes += Bytes(region);
++      } else if (mark && v8_flags.region_gc_marking &&
++                 RegionAllocator::ShouldMark(region)) {
++        blocked_bytes += kRequestBytes;
++      } else {
++        // The owner still uses it: nobody needs to wake the owner for it.
++        awaited_[region].store(false, std::memory_order_relaxed);
++        continue;
++      }
++      holders_to_ask |= others;
++      blocked.push_back(region);
++    }
++    if (blocked_bytes >= kRequestBytes) {
++      for (int region : blocked) {
++        awaited_[region].store(true, std::memory_order_release);
++      }
++      // A pointer that died since the last GC still counts in the first.
++      RequestReports(holders_to_ask, 2);
++    }
 +    std::vector<int> unreferenced;
 +    for (int region = 0; region < count; region++) {
 +      if (!referenced[region] && collectable(region)) {
@@ -11705,6 +11834,14 @@ index 00000000..6ad21bce
 +}
 +
 +// static
++void RegionRegistry::StopReportRequests(Isolate* isolate) {
++  int slot = isolate->region_holder_slot();
++  if (slot < 0 || slot == kSharedHolderSlot) return;
++  base::MutexGuard guard(RegionsMutex());
++  ReportTargets()[slot] = nullptr;
++}
++
++// static
 +void RegionRegistry::ForgetHolder(Isolate* isolate) {
 +  int slot = isolate->region_holder_slot();
 +  if (slot < 0) return;
@@ -11712,10 +11849,20 @@ index 00000000..6ad21bce
 +  if (slot == kSharedHolderSlot) return;
 +  uint64_t bit = uint64_t{1} << slot;
 +  int count = next_region_.load(std::memory_order_acquire);
++  uint64_t owners_to_wake = 0;
 +  for (int region = 0; region < count; region++) {
-+    holders_[region].fetch_and(~bit, std::memory_order_acq_rel);
++    uint64_t previous =
++        holders_[region].fetch_and(~bit, std::memory_order_acq_rel);
++    uint64_t left = previous & ~bit;
++    if ((previous & bit) != 0 && base::bits::CountPopulation(left) == 1 &&
++        IsOwnerKey(owners_[region].load(std::memory_order_acquire)) &&
++        awaited_[region].exchange(false, std::memory_order_acq_rel)) {
++      owners_to_wake |= left;
++    }
 +  }
++  RequestReports(owners_to_wake, 1);
 +  base::MutexGuard guard(RegionsMutex());
++  ReportTargets()[slot] = nullptr;
 +  HolderSlots()->reset(slot);
 +}
 +
@@ -12921,6 +13068,7 @@ index 00000000..6ad21bce
 +
 +// static
 +void JSRegionObject::ForgetIsolate(Isolate* isolate) {
++  RegionRegistry::StopReportRequests(isolate);
 +  for (Address* location : RegionViews::Take(isolate, -1)) {
 +    GlobalHandles::Destroy(location);
 +  }
@@ -14049,10 +14197,10 @@ index 00000000..6ad21bce
 +}  // namespace v8
 diff --git a/src/objects/js-region.h b/src/objects/js-region.h
 new file mode 100644
-index 00000000..e602e012
+index 00000000..345ef7e0
 --- /dev/null
 +++ b/src/objects/js-region.h
-@@ -0,0 +1,458 @@
+@@ -0,0 +1,464 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -14164,6 +14312,9 @@ index 00000000..e602e012
 +  // that the isolate does point into and that grew enough since they were
 +  // last marked are marked from its pointers and swept.
 +  static void ReportHolders(Isolate* isolate, bool collect, bool mark = false);
++  // Called when the isolate starts to tear down: other isolates stop asking
++  // it for reports.
++  static void StopReportRequests(Isolate* isolate);
 +  // Called once the isolate has left the shared heap: it holds nothing.
 +  static void ForgetHolder(Isolate* isolate);
 +
@@ -14240,6 +14391,9 @@ index 00000000..e602e012
 +  static std::atomic<bool> locked_[kMaxRegions];
 +  static std::atomic<size_t> bytes_[kMaxRegions];
 +  static std::atomic<uint64_t> holders_[kMaxRegions];
++  // Set when the owner asked the other holders for reports, so that the last
++  // one to let go wakes it.
++  static std::atomic<bool> awaited_[kMaxRegions];
 +};
 +
 +// Memory for the objects of ownership regions. A region that holds
