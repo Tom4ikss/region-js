@@ -124,12 +124,12 @@ error TS2339: Property 'total' does not exist on type '{ count: number; }'.</pre
   <span class="tok-keyword">return</span> i;
 }));</code></pre></figure>
 </div>
-<pre class="shell wrap">warning  The result of spawn() is neither awaited nor joined, so its value and errors are lost. Use `await spawn(...)`, `.join()`, or return the handle, e.g. to Promise.all()
+<pre class="shell wrap">warning  The result of spawn() is neither awaited nor joined, so its value and errors are lost. Use `await spawn(...)`, `.join()`, return the handle, e.g. to Promise.all(), or start the task with `s.spawn(...)` in `spawn.scope(async (s) =&gt; ...)`, which waits for it
 warning  This callback returns `i`, not the handle of this spawn(), so whoever waits for the callback (e.g. Promise.all over map()) does not wait for the task. Return the handle: `return spawn(...)`, or `return spawn(...).then(() =&gt; i)` to keep the value</pre>
 <p>Второй случай — колбэк <code>map</code>, который запускает задачу, но возвращает другое значение. <code>Promise.all</code> тогда ждёт это значение, а не задачу (<a href="practices.html#map">практика 10</a>). Задачи, запущенные внутри другой задачи без <code>await</code>, правило тоже отметит, хотя внешняя задача их дождётся (<a href="spawn.html#nested">задачи внутри задач</a>).</p>
 
 <h3 id="no-region-use-while-spawned"><a class="anchor" href="#no-region-use-while-spawned" aria-hidden="true" tabindex="-1"></a><code>regions/no-region-use-while-spawned</code></h3>
-<p>Регион, захваченный задачей или переданный ей аргументом, уезжает в воркер и возвращается, когда задача закончилась. Правило находит три ошибки вокруг этого. Все три в d8 закончились бы <code>OwnershipError</code>.</p>
+<p>Регион, захваченный задачей или переданный ей аргументом, уезжает в воркер и возвращается, когда задача закончилась. Задачи <code>s.spawn()</code> из <a href="spawn.html#scope"><code>spawn.scope</code></a> и <code>set.spawn()</code> из <code>JoinSet</code> правило считает так же. Правило находит три ошибки вокруг этого. Все три в d8 закончились бы <code>OwnershipError</code>.</p>
 <div class="versus">
 <figure class="snippet bad"><div class="snippet-head"><span class="mark" aria-hidden="true"></span>Плохо</div><pre class="code"><code><span class="tok-comment">// 1. Регион трогают, пока задача идёт.</span>
 <span class="tok-keyword">const</span> cart = <span class="tok-keyword">new</span> <span class="tok-api">Region</span>().<span class="tok-api">run</span>(() =&gt; ({ total: <span class="tok-number">0</span> }));

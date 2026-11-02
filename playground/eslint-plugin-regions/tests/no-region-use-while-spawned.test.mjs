@@ -45,6 +45,12 @@ tester.run('no-region-use-while-spawned', rule, {
     // Awaited on every iteration: each task gets the region in turn.
     `const state = new Region().run(() => ({ n: 0 }));
      for (const i of [0, 1, 2]) await spawn(() => state.n++);`,
+    // After spawn.scope() every task of the scope has finished.
+    `const state = new Region().run(() => ({ n: 0 }));
+     await spawn.scope(async (s) => {
+       s.spawn(() => state.n++);
+     });
+     state.n;`,
     // Frozen region shared by tasks started in a loop.
     `const region = new Region();
      const config = region.run(() => ({ name: 'prod' }));
@@ -52,6 +58,16 @@ tester.run('no-region-use-while-spawned', rule, {
      await Promise.all([0, 1].map(() => spawn(() => config.name)));`,
   ],
   invalid: [
+    {
+      // s.spawn() moves the region like spawn(); the scope waits for the task
+      // only at its end.
+      code: `await spawn.scope(async (s) => {
+       const state = new Region().run(() => ({ n: 0 }));
+       s.spawn(() => state.n++);
+       state.n;
+     });`,
+      errors: [{ messageId: 'usedWhileSpawned', data: { name: 'state', line: 3 } }],
+    },
     {
       // Tasks may read a frozen region but not write it.
       code: `const region = new Region();

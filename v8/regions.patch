@@ -5772,7 +5772,7 @@ index 00000000..bd767012
 +
 +#endif  // V8_D8_D8_PORT_H_
 diff --git a/src/d8/d8.cc b/src/d8/d8.cc
-index 49121fe1..9e4db773 100644
+index 49121fe1..30197263 100644
 --- a/src/d8/d8.cc
 +++ b/src/d8/d8.cc
 @@ -14,6 +14,7 @@
@@ -5990,18 +5990,12 @@ index 49121fe1..9e4db773 100644
  
    // Prevent fuzzers from creating side effects.
    if (!i::v8_flags.fuzzing) {
-@@ -4811,92 +4919,1421 @@ Local<ObjectTemplate> Shell::CreateGlobalTemplate(Isolate* isolate) {
+@@ -4815,88 +4923,1417 @@ Local<ObjectTemplate> Shell::CreateGlobalTemplate(Isolate* isolate) {
+     global_template->Set(isolate, "async_hooks",
+                          Shell::CreateAsyncHookTemplate(isolate));
    }
-   global_template->Set(isolate, "d8", Shell::CreateD8Template(isolate));
- 
--  if (i::v8_flags.expose_async_hooks) {
--    global_template->Set(isolate, "async_hooks",
--                         Shell::CreateAsyncHookTemplate(isolate));
--  }
-+  if (i::v8_flags.expose_async_hooks) {
-+    global_template->Set(isolate, "async_hooks",
-+                         Shell::CreateAsyncHookTemplate(isolate));
-+  }
+-
+-  return global_template;
 +
 +  return global_template;
 +}
@@ -7305,8 +7299,7 @@ index 49121fe1..9e4db773 100644
 +  int region = CurrentRegion(info, "object");
 +  if (region >= 0) CreateInRegion(info, region, info[0]);
 +}
- 
--  return global_template;
++
 +void Shell::RegionCurrentArray(
 +    const v8::FunctionCallbackInfo<v8::Value>& info) {
 +  DCHECK(i::ValidateCallbackInfo(info));
@@ -7315,18 +7308,8 @@ index 49121fe1..9e4db773 100644
 +  Local<Array> items;
 +  if (!ArgumentsArray(info).ToLocal(&items)) return;
 +  CreateInRegion(info, region, items);
- }
- 
--Local<ObjectTemplate> Shell::GetOrCreateGlobalTemplate(Isolate* isolate) {
--  // Creating the global template is fairly expensive compared to the rest of
--  // the context setup, e.g. in REPRL mode, which creates a new context for
--  // every script. None of the templates depend on the context, so all contexts
--  // of an isolate (including realms) share one global template. In particular,
--  // all d8.dom objects of an isolate are instances of the same templates (see
--  // SetDomNodeCtor), no matter in which context they were created.
--  PerIsolateData* data = PerIsolateData::Get(isolate);
--  if (data->global_template_.IsEmpty()) {
--    data->global_template_.Reset(isolate, CreateGlobalTemplate(isolate));
++}
++
 +namespace {
 +
 +// A typed array whose bytes belong to `region` from the start.
@@ -7351,25 +7334,36 @@ index 49121fe1..9e4db773 100644
 +          String::NewFromUtf8(isolate, message.c_str()).ToLocalChecked()));
 +    }
 +    return;
-   }
--  return data->global_template_.Get(isolate);
++  }
 +  info.GetReturnValue().Set(Utils::ToLocal(i::Cast<i::JSObject>(result)));
  }
  
--void Shell::ChangeDirectoryCallback(
+-Local<ObjectTemplate> Shell::GetOrCreateGlobalTemplate(Isolate* isolate) {
+-  // Creating the global template is fairly expensive compared to the rest of
+-  // the context setup, e.g. in REPRL mode, which creates a new context for
+-  // every script. None of the templates depend on the context, so all contexts
+-  // of an isolate (including realms) share one global template. In particular,
+-  // all d8.dom objects of an isolate are instances of the same templates (see
+-  // SetDomNodeCtor), no matter in which context they were created.
+-  PerIsolateData* data = PerIsolateData::Get(isolate);
+-  if (data->global_template_.IsEmpty()) {
+-    data->global_template_.Reset(isolate, CreateGlobalTemplate(isolate));
+-  }
+-  return data->global_template_.Get(isolate);
 +}  // namespace
 +
 +// region.typedArray(Float64Array, length) and Region.typedArray(...) for the
 +// current region.
 +void Shell::RegionNewTypedArray(
-     const v8::FunctionCallbackInfo<v8::Value>& info) {
-   DCHECK(i::ValidateCallbackInfo(info));
-+  CreateTypedArrayInRegion(info, RegionIdOf(info), "region.typedArray");
-+}
-+
-+void Shell::RegionCurrentTypedArray(
 +    const v8::FunctionCallbackInfo<v8::Value>& info) {
 +  DCHECK(i::ValidateCallbackInfo(info));
++  CreateTypedArrayInRegion(info, RegionIdOf(info), "region.typedArray");
+ }
+ 
+-void Shell::ChangeDirectoryCallback(
++void Shell::RegionCurrentTypedArray(
+     const v8::FunctionCallbackInfo<v8::Value>& info) {
+   DCHECK(i::ValidateCallbackInfo(info));
 +  int region = CurrentRegion(info, "typedArray");
 +  if (region >= 0) CreateTypedArrayInRegion(info, region, "Region.typedArray");
 +}
@@ -7483,7 +7477,7 @@ index 49121fe1..9e4db773 100644
  }
  
  Local<ObjectTemplate> Shell::CreateAsyncHookTemplate(Isolate* isolate) {
-@@ -5376,9 +6813,873 @@ MaybeLocal<Context> Shell::CreateEvaluationContext(Isolate* isolate) {
+@@ -5376,9 +6813,995 @@ MaybeLocal<Context> Shell::CreateEvaluationContext(Isolate* isolate) {
    }
  #endif  // V8_ENABLE_HARDWARE_WATCHPOINT_SUPPORT
  
@@ -7903,11 +7897,18 @@ index 49121fe1..9e4db773 100644
 +    }
 +  };
 +
++  // Aborts the task of a handle with an error of this name and message.
++  let abortHandle;
++
 +  // Like a promise of the task's result: join() waits for it blocking,
 +  // awaiting the handle waits without blocking. Either can be repeated.
 +  class SpawnHandle {
 +    #pool;
 +    #task;
++    static {
++      abortHandle = (handle, name, message) =>
++          handle.#pool.abort(handle.#task, name, message);
++    }
 +    constructor(pool, task) {
 +      this.#pool = pool;
 +      this.#task = task;
@@ -7989,6 +7990,100 @@ index 49121fe1..9e4db773 100644
 +    }
 +  }
 +  globalThis.JoinSet = JoinSet;
++
++
++  // The `s` of spawn.scope(async (s) => ...), like std::thread::Scope.
++  let endScope;
++  class SpawnScope {
++    #running = new Set();
++    #channels = [];
++    #idle = null;
++    #ended = false;
++    #failed = false;
++    #error = undefined;
++    static {
++      // Waits for every task; after that no task can start in the scope.
++      endScope = async (scope) => {
++        while (scope.#running.size > 0) {
++          await new Promise((resolve) => { scope.#idle = resolve; });
++          scope.#idle = null;
++        }
++        scope.#ended = true;
++        return scope.#failed ? { error: scope.#error } : null;
++      };
++    }
++    // A task that ends with the scope: the scope fails if it fails, and
++    // waits for it. Its handle can be awaited and joined as usual.
++    spawn(callback, ...args) {
++      if (this.#ended) {
++        throw new TypeError(
++            'spawn.scope() has ended; start tasks while its function runs');
++      }
++      if (this.#failed) {
++        throw newAbortError('spawn.scope() has failed; no task starts in it');
++      }
++      const handle = spawn(callback, ...args);
++      this.#running.add(handle);
++      const done = () => {
++        this.#running.delete(handle);
++        if (this.#running.size === 0) this.#idle?.();
++      };
++      handle.then(done, (e) => {
++        // A task aborted on purpose, by its handle or by this scope, is not
++        // a failure of the scope.
++        if (e?.name !== 'AbortError') this.fail(e);
++        done();
++      });
++      return handle;
++    }
++    // A channel that the scope closes if it fails, so that nobody waits on
++    // it for tasks that are gone.
++    channel(capacity) {
++      const channel = new Channel(capacity);
++      this.#channels.push(channel);
++      return channel;
++    }
++    // Closes `channel` once the tasks of `handles` have finished, as the
++    // last sender would: for a channel that several tasks send to. Does
++    // nothing if the channel is closed by then.
++    closeAfter(channel, handles) {
++      const close = () => {
++        try {
++          channel.close();
++        } catch {
++          // Closed already, by the scope that failed or by a task.
++        }
++      };
++      Promise.allSettled(handles).then(close);
++    }
++    // Fails the scope with `error` unless it has failed already: the other
++    // tasks are aborted and the scope's channels closed.
++    fail(error) {
++      if (this.#failed) return;
++      this.#failed = true;
++      this.#error = error;
++      for (const handle of this.#running) {
++        abortHandle(handle, 'AbortError',
++                    'spawn() task was aborted: its scope failed');
++      }
++      for (const channel of this.#channels) {
++        try {
++          channel.close();
++        } catch {
++          // Closed already.
++        }
++      }
++    }
++    get failed() {
++      return this.#failed;
++    }
++  }
++  const newAbortError = (message) => {
++    if (typeof AbortError === 'function') return new AbortError(message);
++    const error = new Error(message);
++    error.name = 'AbortError';
++    return error;
++  };
 +
 +  // Channels and locks are shared by reference.
 +  const isChannel = (value) =>
@@ -8177,6 +8272,27 @@ index 49121fe1..9e4db773 100644
 +  // Outside a task nothing is aborted; pool workers replace this.
 +  spawn.aborted = () => false;
 +
++  // Structured concurrency, like std::thread::scope: runs `body(s)` and
++  // settles once it and every task it started with s.spawn() have finished.
++  // The first failure, of `body` or of a task, aborts the other tasks and
++  // closes the channels made with s.channel(); the scope then fails with it.
++  // Otherwise it gives what `body` returned.
++  spawn.scope = async function scope(body) {
++    if (typeof body !== 'function') {
++      throw new TypeError('spawn.scope() expects a function');
++    }
++    const s = new SpawnScope();
++    let value;
++    try {
++      value = await body(s);
++    } catch (e) {
++      s.fail(e);
++    }
++    const failure = await endScope(s);
++    if (failure) throw failure.error;
++    return value;
++  };
++
 +  // Copies `data` into a new sealed region, like Arc::new: every thread reads
 +  // the copy without a borrow and without copying it again. Typed arrays
 +  // whose buffers are in `transfer` move in without a copy.
@@ -8357,7 +8473,7 @@ index 49121fe1..9e4db773 100644
  namespace {
  int LineFromOffset(Local<debug::Script> script, int offset) {
    debug::Location location = script->GetSourceLocation(offset);
-@@ -6538,6 +8839,7 @@ void SourceGroup::JoinThread(const i::ParkedScope& parked) {
+@@ -6538,6 +8961,7 @@ void SourceGroup::JoinThread(const i::ParkedScope& parked) {
  void SerializationDataQueue::Enqueue(std::unique_ptr<SerializationData> data) {
    base::MutexGuard lock_guard(&mutex_);
    data_.push_back(std::move(data));
@@ -8365,7 +8481,7 @@ index 49121fe1..9e4db773 100644
  }
  
  bool SerializationDataQueue::Dequeue(
-@@ -6547,6 +8849,7 @@ bool SerializationDataQueue::Dequeue(
+@@ -6547,6 +8971,7 @@ bool SerializationDataQueue::Dequeue(
    if (data_.empty()) return false;
    *out_data = std::move(data_[0]);
    data_.erase(data_.begin());
@@ -8373,7 +8489,7 @@ index 49121fe1..9e4db773 100644
    return true;
  }
  
-@@ -6558,6 +8861,7 @@ bool SerializationDataQueue::IsEmpty() {
+@@ -6558,6 +8983,7 @@ bool SerializationDataQueue::IsEmpty() {
  void SerializationDataQueue::Clear() {
    base::MutexGuard lock_guard(&mutex_);
    data_.clear();
@@ -8381,7 +8497,7 @@ index 49121fe1..9e4db773 100644
  }
  
  Worker::Worker(Isolate* parent_isolate, const char* script)
-@@ -6668,6 +8972,12 @@ std::unique_ptr<SerializationData> Worker::GetMessage(Isolate* requester) {
+@@ -6668,6 +9094,12 @@ std::unique_ptr<SerializationData> Worker::GetMessage(Isolate* requester) {
        out_queue_.Dequeue(&result);
        break;
      }
@@ -8394,7 +8510,7 @@ index 49121fe1..9e4db773 100644
      out_semaphore_.ParkedWait(
          reinterpret_cast<i::Isolate*>(requester)->main_thread_local_isolate());
    }
-@@ -6705,6 +9015,8 @@ void Worker::Terminate() {
+@@ -6705,6 +9137,8 @@ void Worker::Terminate() {
    // returning to the event queue. Since we checked the state before, and we are
    // holding the {worker_mutex_}, it's safe to access the isolate.
    isolate_->TerminateExecution();
@@ -8403,7 +8519,7 @@ index 49121fe1..9e4db773 100644
  }
  
  void Worker::EnterTerminatedState() {
-@@ -6791,6 +9103,7 @@ Worker* Worker::GetCurrentWorker() { return current_worker_; }
+@@ -6791,6 +9225,7 @@ Worker* Worker::GetCurrentWorker() { return current_worker_; }
  void Worker::ExecuteInThread() {
    Isolate::CreateParams create_params = GetDefaultIsolateCreateParams();
    isolate_ = Isolate::New(create_params);
@@ -8411,7 +8527,7 @@ index 49121fe1..9e4db773 100644
  
    // TODO(mdanylo): can we omit dump disable here?
  #ifdef V8_DUMPLING
-@@ -6926,6 +9239,7 @@ void Worker::ExecuteInThread() {
+@@ -6926,6 +9361,7 @@ void Worker::ExecuteInThread() {
      platform::NotifyIsolateShutdown(g_default_platform, isolate_);
    }
  
@@ -8419,7 +8535,7 @@ index 49121fe1..9e4db773 100644
    isolate_->Dispose();
    isolate_ = nullptr;
  
-@@ -7190,6 +9504,8 @@ bool Shell::SetOptions(int argc, char* argv[]) {
+@@ -7190,6 +9626,8 @@ bool Shell::SetOptions(int argc, char* argv[]) {
        options.expected_to_throw = true;
      } else if (FlagMatches("--no-fail", &argv[i])) {
        options.no_fail = true;
@@ -8428,7 +8544,7 @@ index 49121fe1..9e4db773 100644
      } else if (FlagMatches("--dump-counters", &argv[i])) {
        options.dump_counters = true;
      } else if (FlagMatches("--dump-counters-nvp", &argv[i])) {
-@@ -7310,6 +9626,9 @@ bool Shell::SetOptions(int argc, char* argv[]) {
+@@ -7310,6 +9748,9 @@ bool Shell::SetOptions(int argc, char* argv[]) {
                                    argv, &i)) {
        // Value is expressed in MB.
        options.max_serializer_memory = atoi(flag_value) * i::MB;
@@ -8438,7 +8554,7 @@ index 49121fe1..9e4db773 100644
      } else if (FlagMatches("--bundle", &argv[i])) {
        options.bundle = true;
  #ifdef V8_FUZZILLI
-@@ -7921,6 +10240,27 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7921,6 +10362,27 @@ class Serializer : public ValueSerializer::Delegate {
      return true;
    }
  
@@ -8466,7 +8582,7 @@ index 49121fe1..9e4db773 100644
   private:
    Maybe<bool> PrepareTransfer(Local<Context> context, Local<Value> transfer) {
      if (transfer->IsArray()) {
-@@ -7929,6 +10269,22 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7929,6 +10391,22 @@ class Serializer : public ValueSerializer::Delegate {
        for (uint32_t i = 0; i < length; ++i) {
          Local<Value> element;
          if (transfer_array->Get(context, i).ToLocal(&element)) {
@@ -8489,7 +8605,7 @@ index 49121fe1..9e4db773 100644
            if (!element->IsArrayBuffer()) {
              ThrowError(isolate_,
                         "Transfer array elements must be an ArrayBuffer");
-@@ -7961,7 +10317,64 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7961,7 +10439,64 @@ class Serializer : public ValueSerializer::Delegate {
      }
    }
  
@@ -8554,7 +8670,7 @@ index 49121fe1..9e4db773 100644
      for (const auto& global_array_buffer : array_buffers_) {
        Local<ArrayBuffer> array_buffer =
            Local<ArrayBuffer>::New(isolate_, global_array_buffer);
-@@ -7987,6 +10400,7 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7987,6 +10522,7 @@ class Serializer : public ValueSerializer::Delegate {
    ValueSerializer serializer_;
    std::unique_ptr<SerializationData> data_;
    std::vector<Global<ArrayBuffer>> array_buffers_;
@@ -8562,7 +8678,7 @@ index 49121fe1..9e4db773 100644
    std::vector<Global<SharedArrayBuffer>> shared_array_buffers_;
    std::vector<Global<WasmModuleObject>> wasm_modules_;
    std::vector<std::shared_ptr<v8::BackingStore>> backing_stores_;
-@@ -8013,6 +10427,21 @@ class Deserializer : public ValueDeserializer::Delegate {
+@@ -8013,6 +10549,21 @@ class Deserializer : public ValueDeserializer::Delegate {
        return MaybeLocal<Value>();
      }
  
@@ -8584,7 +8700,7 @@ index 49121fe1..9e4db773 100644
      uint32_t index = 0;
      for (const auto& backing_store : data_->backing_stores()) {
        Local<ArrayBuffer> array_buffer =
-@@ -8049,6 +10478,21 @@ class Deserializer : public ValueDeserializer::Delegate {
+@@ -8049,6 +10600,21 @@ class Deserializer : public ValueDeserializer::Delegate {
      return nullptr;
    }
  
@@ -8606,7 +8722,7 @@ index 49121fe1..9e4db773 100644
   private:
    Isolate* isolate_;
    ValueDeserializer deserializer_;
-@@ -8309,9 +10753,13 @@ int Shell::Main(int argc, char* argv[]) {
+@@ -8309,9 +10875,13 @@ int Shell::Main(int argc, char* argv[]) {
    // The platform is owned by wrapper platform despite the `std::move` below.
    START_IGNORE_LIFETIME_SAFETY_WARNINGS()
    g_default_platform = g_platform.get();
@@ -8620,7 +8736,7 @@ index 49121fe1..9e4db773 100644
    }
    if (options.stress_delay_tasks) {
      int64_t random_seed = i::v8_flags.fuzzer_random_seed;
-@@ -8438,6 +10886,7 @@ int Shell::Main(int argc, char* argv[]) {
+@@ -8438,6 +11008,7 @@ int Shell::Main(int argc, char* argv[]) {
    }
  
    Isolate* isolate = Isolate::New(create_params);

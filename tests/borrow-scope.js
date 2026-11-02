@@ -36,21 +36,28 @@ const sleep = () => new Promise((resolve) => setTimeout(resolve, 0));
 {
   const state = new Region().run(() => ({ counter: 1 }));
   Region.of(state).freeze();
+  // The workers report through a channel: two threads printing at once
+  // would mix their lines.
+  const late = new Channel(2);
   await Promise.all([0, 1].map((i) => spawn(() => {
     const borrow = Region.of(state).borrow();
     setTimeout(() => {
+      let line;
       try {
-        print('late read', i, state.counter);
+        line = 'late read ' + i + ' ' + state.counter;
       } catch (e) {
         // Frozen, or owned by main again if it thawed first.
-        print('late read', i, 'failed:', e.name);
+        line = 'late read ' + i + ' failed: ' + e.name;
       }
+      late.sendSync(line);
     }, 0);
   })));
   print('leaked readers after tasks:', Region.of(state).readers);
   Region.of(state).thaw();
   state.counter++;
   print('main after thaw:', state.counter);
+  const lines = [(await late.recv()).value, (await late.recv()).value];
+  for (const line of lines.sort()) print(line);
 }
 
 // borrowWhile keeps the borrow until the async work is done.

@@ -162,11 +162,11 @@
 <span class="tok-fn">measure</span>(<span class="tok-string">'region.run             '</span>, viaRun);
 <span class="tok-fn">measure</span>(<span class="tok-string">'Region.object, enter   '</span>, viaObject);
 <span class="tok-fn">measure</span>(<span class="tok-string">'Region.object и push   '</span>, viaPush);
-<span class="tok-fn">measure</span>(<span class="tok-string">'литерал #{} и push     '</span>, viaLiteral);</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8 --harmony-region-literals; время у вас будет другим</span></div><pre class="out">обычные объекты        : создание 27 ms, проход 0.2 ms (сумма 9900000)
-region.run             : создание 152 ms, проход 0.7 ms (сумма 9900000)
-Region.object, enter   : создание 466 ms, проход 0.8 ms (сумма 9900000)
-Region.object и push   : создание 463 ms, проход 0.8 ms (сумма 9900000)
-литерал #{} и push     : создание 73 ms, проход 0.7 ms (сумма 9900000)</pre></figure></details>
+<span class="tok-fn">measure</span>(<span class="tok-string">'литерал #{} и push     '</span>, viaLiteral);</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8 --harmony-region-literals; время у вас будет другим</span></div><pre class="out">обычные объекты        : создание 26 ms, проход 0.2 ms (сумма 9900000)
+region.run             : создание 152 ms, проход 1.2 ms (сумма 9900000)
+Region.object, enter   : создание 462 ms, проход 0.7 ms (сумма 9900000)
+Region.object и push   : создание 468 ms, проход 0.8 ms (сумма 9900000)
+литерал #{} и push     : создание 72 ms, проход 0.7 ms (сумма 9900000)</pre></figure></details>
 
 <h2 id="access"><a class="anchor" href="#access" aria-hidden="true" tabindex="-1"></a>Чтение и запись</h2>
 <p>Maglev и Turbofan встраивают доступ к объектам региона в машинный код. Владельца Turbofan в цикле без вызовов проверяет один раз, остальные проверки идут на каждом обращении (подробнее на странице <a href="inside.html#jit">«Как это устроено»</a>). Замеры ниже сделаны на сборке <code>out/release/d8</code> с теми же настройками, что и остальные.</p>

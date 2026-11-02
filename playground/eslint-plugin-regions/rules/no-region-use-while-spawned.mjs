@@ -5,8 +5,14 @@
 const isFunction = (node) =>
   node.type === 'ArrowFunctionExpression' || node.type === 'FunctionExpression';
 
+// spawn(), and s.spawn() of spawn.scope() or set.spawn() of JoinSet.
 const isSpawnCall = (node) =>
-  node.type === 'CallExpression' && node.callee.type === 'Identifier' && node.callee.name === 'spawn';
+  node.type === 'CallExpression' &&
+  ((node.callee.type === 'Identifier' && node.callee.name === 'spawn') ||
+    (node.callee.type === 'MemberExpression' &&
+      !node.callee.computed &&
+      node.callee.object.type === 'Identifier' &&
+      node.callee.property.name === 'spawn'));
 
 const isStatementOrFunction = (node) =>
   node.type.endsWith('Statement') || node.type.endsWith('Declaration') || isFunction(node) ||

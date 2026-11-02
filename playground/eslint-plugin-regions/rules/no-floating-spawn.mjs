@@ -29,7 +29,8 @@ export default {
     messages: {
       floating:
         'The result of spawn() is neither awaited nor joined, so its value and errors are lost. ' +
-        'Use `await spawn(...)`, `.join()`, or return the handle, e.g. to Promise.all().',
+        'Use `await spawn(...)`, `.join()`, return the handle, e.g. to Promise.all(), or start the task ' +
+        'with `s.spawn(...)` in `spawn.scope(async (s) => ...)`, which waits for it.',
       returnsOther:
         'This callback returns `{{value}}`, not the handle of this spawn(), so whoever waits for the ' +
         'callback (e.g. Promise.all over map()) does not wait for the task. Return the handle: ' +

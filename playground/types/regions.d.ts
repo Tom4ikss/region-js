@@ -29,10 +29,37 @@ type RegionData =
   | RegionData[]
   | { readonly [key: string]: RegionData };
 
+/** Why an OwnershipError was thrown. */
+type OwnershipReason =
+  | 'not-owner'
+  | 'in-transit'
+  | 'frozen'
+  | 'not-borrowed'
+  | 'freed'
+  | 'sealed'
+  | 'locked'
+  | 'read-locked'
+  | 'borrowed'
+  | 'not-frozen'
+  | 'outside-reference';
+
 /** Thrown when a thread touches a region it does not own, writes into a frozen
- * region or links a region object to an object outside the region. In this
- * prototype it is a TypeError whose message starts with "OwnershipError:". */
-type OwnershipError = TypeError;
+ * region or links a region object to an object outside the region. The
+ * message ends with where the region was last sent, thawed, frozen, sealed,
+ * freed or put in an RwLock: "(sent at main.js:12:5)". */
+declare class OwnershipError extends TypeError {
+  /** Number of the region. */
+  readonly region: number;
+  readonly reason: OwnershipReason;
+}
+
+/** A task, or a wait in it, was aborted: by `handle.abort()`, with the task
+ * that spawned it, or by its failing `spawn.scope()`. */
+declare class AbortError extends Error {}
+/** A task did not finish in the time given to `handle.timeout(ms)`. */
+declare class TimeoutError extends AbortError {}
+/** Every thread waits on channels or locks and none can wake the others. */
+declare class DeadlockError extends Error {}
 
 /**
  * A set of objects in shared memory owned by one thread at a time.
@@ -194,7 +221,35 @@ declare function spawn<Args extends (RegionData | Channel | RwLock)[], Result ex
   ...args: Args
 ): SpawnHandle<Result>;
 
+/** The `s` of `spawn.scope(async (s) => ...)`, like `std::thread::Scope`. */
+interface SpawnScope {
+  /** Starts a task that ends with the scope: the scope waits for it and fails
+   * if it fails, except with an `AbortError`. Throws once the scope has ended
+   * or failed. */
+  spawn<Args extends (RegionData | Channel | RwLock)[], Result extends RegionData | void>(
+    callback: (...args: Args) => Result | PromiseLike<Result>,
+    ...args: Args
+  ): SpawnHandle<Result>;
+  /** A channel that the scope closes if it fails. */
+  channel<T = any>(capacity?: number): Channel<T>;
+  /** Closes `channel` once these tasks have finished, as the last sender
+   * would; nothing happens if it is closed by then. */
+  closeAfter(channel: Channel, handles: Iterable<SpawnHandle<unknown>>): void;
+  /** Fails the scope with `error`, unless it has failed already. */
+  fail(error: unknown): void;
+  readonly failed: boolean;
+}
+
 declare namespace spawn {
+  /**
+   * Structured concurrency, like `std::thread::scope`: runs `body(s)` and
+   * settles once it and every task started with `s.spawn()` have finished,
+   * so the regions those tasks took are back. The first failure, of `body` or
+   * of a task, aborts the other tasks and closes the channels made with
+   * `s.channel()`; the scope then fails with that error. Otherwise it gives
+   * what `body` returned.
+   */
+  function scope<T>(body: (s: SpawnScope) => T | PromiseLike<T>): Promise<T>;
   /** Number of pool workers, 4 by default. */
   let poolSize: number;
   /** Resolves once every task spawned by this thread has finished. */
