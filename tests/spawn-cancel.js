@@ -21,17 +21,21 @@ const busy = (ms) => {
 // fires, and the code after the await does not run.
 {
   const doc = new Region().run(() => ({ title: '', words: 0 }));
-  const start = performance.now();
-  const task = spawn(async (doc) => {
+  const started = new Channel(1);
+  const task = spawn(async (doc, started) => {
     const sleep = (ms) => new Promise((resolve) => {
       const end = performance.now() + ms;
       const tick = () => (performance.now() >= end ? resolve() : setTimeout(tick, 0));
       tick();
     });
     doc.title = 'final';
+    await started.send(1);
     await sleep(500);
     doc.words = 1000;
-  }, doc).timeout(30);
+  }, doc, started);
+  await started.recv();
+  const start = performance.now();
+  task.timeout(30);
   const result = await outcome(task);
   const took = performance.now() - start;
   check('timeout during a timer', result.startsWith('TimeoutError'), result);
@@ -71,14 +75,13 @@ const busy = (ms) => {
 
 // Catch and finally blocks run before the handle settles, with the task's
 // regions; inner functions unwind before outer ones; a later await throws
-// again. (The promise is kept: one that nothing refers to is collected with
-// the functions that wait for it, which then never run again.)
+// again.
 {
   const log = new Region().run(() => []);
   const task = spawn(async (log) => {
     const inner = async () => {
       try {
-        await (globalThis.kept = new Promise(() => {}));
+        await new Promise(() => {});
       } finally {
         log.push('inner finally');
       }
@@ -154,17 +157,19 @@ const busy = (ms) => {
 // with it, and their regions are back before the task ends.
 {
   const data = new Region().run(() => ({ steps: [] }));
-  const task = spawn(async (data) => spawn.scope(async (s) => {
-    s.spawn(async (data) => {
+  const started = new Channel(1);
+  const task = spawn(async (data, started) => spawn.scope(async (s) => {
+    s.spawn(async (data, started) => {
       try {
+        await started.send(1);
         await new Promise(() => {});
       } finally {
         data.steps.push('child cleaned up');
       }
-    }, data);
+    }, data, started);
     await new Promise(() => {});
-  }), data);
-  busy(30);
+  }), data, started);
+  await started.recv();
   task.abort();
   const result = await outcome(task);
   check('task with a scope', result.startsWith('AbortError'), result);
@@ -261,7 +266,7 @@ const busy = (ms) => {
       g.value.inFlight++;
     }
     try {
-      await (globalThis.kept = new Promise(() => {}));
+      await new Promise(() => {});
       log.push('work done');
     } finally {
       log.push('aborted: ' + spawn.aborted());
@@ -308,7 +313,7 @@ const busy = (ms) => {
       const child = spawn(async (ch) => (await ch.recv()).value, ch);
       log.push('child got ' + await child);
     });
-    await (globalThis.kept = new Promise(() => {}));
+    await new Promise(() => {});
   }, ch, log);
   busy(30);
   task.abort();
@@ -337,12 +342,12 @@ const busy = (ms) => {
   const start = performance.now();
   const task = spawn(async (log) => {
     try {
-      await (globalThis.kept = new Promise(() => {}));
+      await new Promise(() => {});
     } finally {
       try {
         await spawn.shield(async () => {
           try {
-            await (globalThis.keptToo = new Promise(() => {}));
+            await new Promise(() => {});
           } finally {
             log.push('shield cleanup: ' + spawn.aborted());
           }

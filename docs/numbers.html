@@ -147,10 +147,10 @@
 <span class="tok-fn">measure</span>(<span class="tok-string">'обычные объекты      '</span>, () =&gt; <span class="tok-fn">plain</span>());
 <span class="tok-fn">measure</span>(<span class="tok-string">'один region.run      '</span>, viaRun);
 <span class="tok-fn">measure</span>(<span class="tok-string">'run по одному и push '</span>, viaRunEach);
-<span class="tok-fn">measure</span>(<span class="tok-string">'литерал #{} и push   '</span>, viaLiteral);</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8; время у вас будет другим</span></div><pre class="out">обычные объекты      : создание 27 ms, проход 0.3 ms (сумма 9900000)
-один region.run      : создание 173 ms, проход 0.9 ms (сумма 9900000)
-run по одному и push : создание 384 ms, проход 1.2 ms (сумма 9900000)
-литерал #{} и push   : создание 78 ms, проход 0.7 ms (сумма 9900000)</pre></figure></details>
+<span class="tok-fn">measure</span>(<span class="tok-string">'литерал #{} и push   '</span>, viaLiteral);</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8; время у вас будет другим</span></div><pre class="out">обычные объекты      : создание 26 ms, проход 0.3 ms (сумма 9900000)
+один region.run      : создание 156 ms, проход 0.7 ms (сумма 9900000)
+run по одному и push : создание 376 ms, проход 1.3 ms (сумма 9900000)
+литерал #{} и push   : создание 73 ms, проход 0.7 ms (сумма 9900000)</pre></figure></details>
 
 <h2 id="access"><a class="anchor" href="#access" aria-hidden="true" tabindex="-1"></a>Чтение и запись</h2>
 <p>Maglev и Turbofan встраивают доступ к объектам региона в машинный код. Владельца Turbofan в цикле без вызовов проверяет один раз, остальные проверки идут на каждом обращении (подробнее на странице <a href="inside.html#jit">«Как это устроено»</a>). Замеры ниже сделаны на сборке <code>out/release/d8</code> с теми же настройками, что и остальные.</p>
