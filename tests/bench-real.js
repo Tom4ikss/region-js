@@ -97,7 +97,7 @@ await time('build: workers + postMessage', () => {
 const makeOrder = (0, eval)(ORDER_SOURCE);
 const makeRegionOrder = (0, eval)(`'use region'; ${ORDER_SOURCE}`);
 const makeBatch = (make, from, to) => {
-  const orders = make === makeOrder ? [] : Region.array();
+  const orders = make === makeOrder ? [] : #[];
   for (let i = from; i < to; i++) orders.push(make(i));
   return orders;
 };

@@ -1,6 +1,7 @@
-// d8 --harmony-regions --module --verify-heap direct.js
-// Writing into a region without run(): region.enter() makes it current,
-// Region.object() and Region.array() create objects in it, and arrays grow.
+// d8 --harmony-region-literals --module --verify-heap direct.js
+// Writing into a region without run(): region.enter() makes it current, #{}
+// and #[] create objects in it, region.object() and region.array() in a
+// region named explicitly, and arrays grow.
 const expectError = (name, fn) => {
   try {
     print(`${name}: NO ERROR ->`, fn());
@@ -13,15 +14,15 @@ const region = new Region();
 let state;
 {
   using _ = region.enter();
-  state = Region.object({ orders: Region.array(), total: 0, owner: 'shop' });
+  state = #{ orders: #[], total: 0, owner: 'shop' };
   for (let i = 0; i < 5; i++) {
-    state.orders.push(Region.object({ id: i, price: 10 * (i + 1), tags: Region.array('new') }));
+    state.orders.push(#{ id: i, price: 10 * (i + 1), tags: #['new'] });
     state.total += 10 * (i + 1);
   }
 }
 print('in region:', Region.of(state).id === region.id, Region.of(state.orders[3]).id === region.id);
 print('orders:', state.orders.length, 'total:', state.total, 'last:', JSON.stringify(state.orders[4]));
-expectError('Region.object outside enter', () => Region.object({ a: 1 }));
+expectError('literal outside enter', () => #{ a: 1 });
 print('explicit region.object:', Region.of(region.object({ b: 2 })).id === region.id);
 print('explicit region.array:', JSON.stringify(region.array(1, 'two', null)));
 expectError('array into object()', () => region.object([1, 2]));
@@ -37,18 +38,18 @@ expectError('enter a region we do not own', () => {
   const a = new Region();
   const b = new Region();
   using _a = a.enter();
-  const inA = Region.object({ where: 'a' });
+  const inA = #{ where: 'a' };
   {
     using _b = b.enter();
-    print('inner is b:', Region.of(Region.object({ where: 'b' })).id === b.id);
+    print('inner is b:', Region.of(#{ where: 'b' }).id === b.id);
   }
-  print('after inner, current is a:', Region.of(Region.object({})).id === a.id,
+  print('after inner, current is a:', Region.of(#{}).id === a.id,
         Region.of(inA).id === a.id);
 }
 
 // run() makes the region current too.
-const fromRun = region.run(() => ({ list: Region.array(1, 2, 3) }));
-print('Region.array inside run:', JSON.stringify(fromRun), Region.of(fromRun.list).id === region.id);
+const fromRun = region.run(() => ({ list: #[1, 2, 3] }));
+print('#[] inside run:', JSON.stringify(fromRun), Region.of(fromRun.list).id === region.id);
 
 // Arrays grow and shrink.
 const list = region.array();

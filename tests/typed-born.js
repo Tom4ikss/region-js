@@ -1,5 +1,5 @@
 // d8 --harmony-region-literals --module --expose-gc --verify-heap typed-born.js
-// Region.typedArray() makes a typed array whose bytes belong to the region
+// region.typedArray() makes a typed array whose bytes belong to the region
 // from the start: storing its view in the region copies nothing.
 const expectError = (name, fn) => {
   try {
@@ -13,7 +13,7 @@ const region = new Region();
 {
   using _ = region.enter();
   const before = region.byteSize;
-  const samples = Region.typedArray(Float64Array, 1000);
+  const samples = region.typedArray(Float64Array, 1000);
   print('fresh view:', samples instanceof Float64Array, samples.length, samples[999],
         'bytes counted:', region.byteSize - before);
   for (let i = 0; i < samples.length; i++) samples[i] = i * 0.5;
@@ -28,7 +28,7 @@ const region = new Region();
 
   // A view of the region's bytes stays registered while it lives, also
   // across a garbage collection.
-  const later = Region.typedArray(Int32Array, 4);
+  const later = region.typedArray(Int32Array, 4);
   later[3] = 7;
   gc();
   gc();
@@ -59,7 +59,7 @@ const region = new Region();
   let view;
   {
     using _ = region.enter();
-    view = Region.typedArray(Uint8Array, 3);
+    view = region.typedArray(Uint8Array, 3);
     view.set([1, 2, 3]);
   }
   using _ = other.enter();
@@ -91,7 +91,6 @@ const region = new Region();
 }
 
 // Errors.
-expectError('no current region', () => Region.typedArray(Float64Array, 1));
 expectError('not a typed array constructor', () => region.typedArray(Array, 1));
 expectError('negative length', () => region.typedArray(Uint8Array, -1));
 expectError('huge length', () => region.typedArray(Float64Array, 2 ** 52));

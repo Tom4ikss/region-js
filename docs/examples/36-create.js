@@ -10,22 +10,20 @@ const plain = () => Array.from({ length: N }, (_, i) => item(i));
 // 2. Собрать обычные объекты и скопировать в регион через run.
 const viaRun = (region) => region.run(plain);
 
-// 3. Каждый объект сразу в регион через Region.object, в конце один массив.
+// 3. Каждый объект сразу в регион через region.object, в конце один массив.
 const viaObject = (region) => {
-  using _ = region.enter();
   const list = new Array(N);
   for (let i = 0; i < N; i++) {
-    list[i] = Region.object({ id: i, name: 'товар ' + i, tags: Region.array('новый', 'склад'), price: i % 100 });
+    list[i] = region.object({ id: i, name: 'товар ' + i, tags: region.array('новый', 'склад'), price: i % 100 });
   }
-  return Region.object({ list }).list; // копируется только внешний массив
+  return region.object({ list }).list; // копируется только внешний массив
 };
 
 // 4. То же, но массив региона растёт через push.
 const viaPush = (region) => {
-  using _ = region.enter();
-  const list = Region.array();
+  const list = region.array();
   for (let i = 0; i < N; i++) {
-    list.push(Region.object({ id: i, name: 'товар ' + i, tags: Region.array('новый', 'склад'), price: i % 100 }));
+    list.push(region.object({ id: i, name: 'товар ' + i, tags: region.array('новый', 'склад'), price: i % 100 }));
   }
   return list;
 };
@@ -65,6 +63,6 @@ const measure = (label, build) => {
 
 measure('обычные объекты        ', () => plain());
 measure('region.run             ', viaRun);
-measure('Region.object, enter   ', viaObject);
-measure('Region.object и push   ', viaPush);
+measure('region.object по одному', viaObject);
+measure('region.object и push   ', viaPush);
 measure('литерал #{} и push     ', viaLiteral);

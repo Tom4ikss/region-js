@@ -1,15 +1,11 @@
 // d8-flags: --module
-// Писать прямо в регион: enter() делает его текущим, Region.object() и
-// Region.array() создают объекты в нём, массивы растут.
+// Писать прямо в регион: region.object() и region.array() создают объекты
+// в нём, массивы растут.
 const region = new Region();
-let shop;
-{
-  using _ = region.enter();
-  shop = Region.object({ orders: Region.array(), total: 0 });
-  for (let id = 1; id <= 3; id++) {
-    shop.orders.push(Region.object({ id, price: id * 10, tags: Region.array('новый') }));
-    shop.total += id * 10;
-  }
+const shop = region.object({ orders: region.array(), total: 0 });
+for (let id = 1; id <= 3; id++) {
+  shop.orders.push(region.object({ id, price: id * 10, tags: region.array('новый') }));
+  shop.total += id * 10;
 }
 print('заказов:', shop.orders.length, '| сумма:', shop.total);
 print('всё в одном регионе:', Region.of(shop.orders[2]).id === region.id);

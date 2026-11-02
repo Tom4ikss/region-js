@@ -102,9 +102,9 @@ start = performance.<span class="tok-fn">now</span>();
 workers.<span class="tok-fn">forEach</span>((w, t) =&gt; w.<span class="tok-api">postMessage</span>([t * ORDERS / TASKS, (t + <span class="tok-number">1</span>) * ORDERS / TASKS]));
 <span class="tok-keyword">const</span> copies = workers.<span class="tok-fn">map</span>((w) =&gt; w.<span class="tok-api">getMessage</span>());
 <span class="tok-fn">print</span>(<span class="tok-string">`postMessage: ${</span>copies.<span class="tok-fn">reduce</span>((n, p) =&gt; n + p.length, <span class="tok-number">0</span>)<span class="tok-string">} заказов, ${</span>(performance.<span class="tok-fn">now</span>() - start).<span class="tok-fn">toFixed</span>(<span class="tok-number">0</span>)<span class="tok-string">} мс`</span>);
-<span class="tok-keyword">for</span> (<span class="tok-keyword">const</span> w <span class="tok-keyword">of</span> workers) w.<span class="tok-api">terminate</span>();</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8 --module --harmony-region-literals; время у вас будет другим</span></div><pre class="out">spawn: 100000 заказов, qty 199999, 23 мс
+<span class="tok-keyword">for</span> (<span class="tok-keyword">const</span> w <span class="tok-keyword">of</span> workers) w.<span class="tok-api">terminate</span>();</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8 --module --harmony-region-literals; время у вас будет другим</span></div><pre class="out">spawn: 100000 заказов, qty 199999, 22 мс
 лежат в регионе: true | владелец теперь главный поток: 0
-postMessage: 100000 заказов, 320 мс</pre></figure>
+postMessage: 100000 заказов, 336 мс</pre></figure>
 
 <p>Разница больше чем на порядок, и она растёт вместе с данными: копия стоит пропорционально числу объектов, а переезд региона — нет. Дерево из миллиона узлов переезжает за 0,12 мс, копия такого дерева через <code>postMessage</code> идёт почти секунду (<a href="numbers.html#move">замер</a>).</p>
 <p>Код задачи — обычный JavaScript. <code>'use region'</code> — это строка-директива, как <code>'use strict'</code>, поэтому TypeScript, ESLint и Biome читают такой код без расширений. Переменные, которые нужны задаче, <code>spawn</code> находит и передаёт сам.</p>

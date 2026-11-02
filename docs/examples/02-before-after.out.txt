@@ -1,4 +1,4 @@
 узлов в дереве: 131071
-копия (structured clone): 134.21 ms
+копия (structured clone): 138.08 ms
 переезд региона:          0.15 ms
 главный поток после переезда: OwnershipError: region 0 belongs to another thread (isolate 1, this is isolate 0) (sent at 02-before-after.js:13:10)

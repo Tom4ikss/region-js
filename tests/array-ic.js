@@ -40,7 +40,7 @@ const other = new Region();
   a.push(new Uint8Array([7, 8]));
   a[a.length] = 2 ** 40;
   a.push(null, undefined, true);
-  a.push(Region.object({ ok: 1 }));
+  a.push(region.object({ ok: 1 }));
   print('copied values:', a.length, a[0], a[1], a[2][1], a[3], a[7].ok);
   expectError('plain object', () => a.push({ a: 1 }));
   expectError('plain object by index', () => { a[a.length] = { a: 1 }; });

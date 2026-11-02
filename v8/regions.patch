@@ -1456,7 +1456,7 @@ index f3ec683b..af3517ea 100644
        UNREACHABLE();
    }
 diff --git a/src/common/message-template.h b/src/common/message-template.h
-index ce7c8efa..309213f6 100644
+index ce7c8efa..bdf2df21 100644
 --- a/src/common/message-template.h
 +++ b/src/common/message-template.h
 @@ -739,6 +739,36 @@ namespace internal {
@@ -1489,7 +1489,7 @@ index ce7c8efa..309213f6 100644
 +    "region % is frozen; borrow it to read it")                                \
 +  T(RegionCrossReference,                                                      \
 +    "a region object cannot reference objects outside its "                    \
-+    "region; copy them in with Region.object() or Region.array()")             \
++    "region; copy them in with region.object() or region.array()")             \
 +  T(RegionCannotMove, "% cannot be moved into a region")                       \
 +  T(RegionNotExtensible,                                                       \
 +    "Cannot add property %, region objects have a fixed shape")                \
@@ -6135,7 +6135,7 @@ index 00000000..bd767012
 +
 +#endif  // V8_D8_D8_PORT_H_
 diff --git a/src/d8/d8.cc b/src/d8/d8.cc
-index 49121fe1..96fbc878 100644
+index 49121fe1..e3b334f2 100644
 --- a/src/d8/d8.cc
 +++ b/src/d8/d8.cc
 @@ -14,6 +14,7 @@
@@ -6353,11 +6353,14 @@ index 49121fe1..96fbc878 100644
  
    // Prevent fuzzers from creating side effects.
    if (!i::v8_flags.fuzzing) {
-@@ -4833,70 +4941,1521 @@ Local<ObjectTemplate> Shell::GetOrCreateGlobalTemplate(Isolate* isolate) {
-   return data->global_template_.Get(isolate);
- }
- 
--void Shell::ChangeDirectoryCallback(
+@@ -4830,73 +4938,1456 @@ Local<ObjectTemplate> Shell::GetOrCreateGlobalTemplate(Isolate* isolate) {
+   if (data->global_template_.IsEmpty()) {
+     data->global_template_.Reset(isolate, CreateGlobalTemplate(isolate));
+   }
+-  return data->global_template_.Get(isolate);
++  return data->global_template_.Get(isolate);
++}
++
 +void Shell::ChangeDirectoryCallback(
 +    const v8::FunctionCallbackInfo<v8::Value>& info) {
 +  DCHECK(i::ValidateCallbackInfo(info));
@@ -6455,13 +6458,6 @@ index 49121fe1..96fbc878 100644
 +                       FunctionTemplate::New(isolate, RegionReserve));
 +  region_template->Set(isolate, "__takeReserved",
 +                       FunctionTemplate::New(isolate, RegionTakeReserved));
-+  region_template->Set(isolate, "object",
-+                       FunctionTemplate::New(isolate, RegionCurrentObject));
-+  region_template->Set(isolate, "array",
-+                       FunctionTemplate::New(isolate, RegionCurrentArray));
-+  region_template->Set(
-+      isolate, "typedArray",
-+      FunctionTemplate::New(isolate, RegionCurrentTypedArray));
 +  {
 +    // Scopes returned by region.enter(): [region id or undefined].
 +    Local<FunctionTemplate> scope_template = FunctionTemplate::New(isolate);
@@ -6491,13 +6487,11 @@ index 49121fe1..96fbc878 100644
 +                         ->dispose_symbol()),
 +      FunctionTemplate::New(isolate, RegionDispose, Local<Value>(), signature,
 +                            0, ConstructorBehavior::kThrow));
-+  region_template->Set(isolate, "spawnCode",
++  region_template->Set(isolate, "__spawnCode",
 +                       FunctionTemplate::New(isolate, RegionSpawnCode));
 +  region_template->Set(isolate, "__port", Ports::CreateTemplate(isolate));
-+  region_template->Set(isolate, "prepareSpawn",
++  region_template->Set(isolate, "__prepareSpawn",
 +                       FunctionTemplate::New(isolate, RegionPrepareSpawn));
-+  region_template->Set(isolate, "toJS",
-+                       FunctionTemplate::New(isolate, RegionToJS));
 +  for (auto [name, callback] :
 +       {std::pair{"freeze", RegionFreeze}, std::pair{"seal", RegionSeal},
 +        std::pair{"thaw", RegionThaw},
@@ -7309,7 +7303,8 @@ index 49121fe1..96fbc878 100644
 +
 +}  // namespace
 +
-+// Region.prepareSpawn(fn) finds out what `fn` needs to run in another isolate:
++// Region.__prepareSpawn(fn) finds out what `fn` needs to run in another
++// isolate:
 +//   { source, functions: { name: source }, captures: { name: value } }
 +// Free variables of `fn` and of the functions it captures are resolved in their
 +// closures: data is returned in `captures`, functions are sent as source and
@@ -7545,7 +7540,7 @@ index 49121fe1..96fbc878 100644
 +  }
 +
 +  // [code id, receiver, arguments, ...captured values]; the code itself is
-+  // available from Region.spawnCode(id) and is the same for every call with
++  // available from Region.__spawnCode(id) and is the same for every call with
 +  // that id.
 +  auto [code, inserted] = data->spawn_code_ids_.try_emplace(
 +      code_key, static_cast<int>(data->spawn_codes_.size()));
@@ -7572,7 +7567,7 @@ index 49121fe1..96fbc878 100644
 +      Array::New(isolate, elements.data(), elements.size()));
 +}
 +
-+// Region.spawnCode(id) -> { source, functions: { name: source }, names,
++// Region.__spawnCode(id) -> { source, functions: { name: source }, names,
 +// places }: places are [file, line, column] or null for the callback, then
 +// for the functions.
 +void Shell::RegionSpawnCode(const v8::FunctionCallbackInfo<v8::Value>& info) {
@@ -7584,7 +7579,7 @@ index 49121fe1..96fbc878 100644
 +               ? info[0].As<Int32>()->Value()
 +               : -1;
 +  if (id < 0 || id >= static_cast<int>(data->spawn_codes_.size())) {
-+    ThrowError(isolate, "Region.spawnCode() expects a code id");
++    ThrowError(isolate, "Region.__spawnCode() expects a code id");
 +    return;
 +  }
 +  const PerIsolateData::SpawnCode& code = data->spawn_codes_[id];
@@ -7656,8 +7651,7 @@ index 49121fe1..96fbc878 100644
 +          i::Cast<i::JSArrayBuffer>(Utils::OpenDirectHandle(*item)));
 +    }
 +  }
-+  // Inside fn the region is the current one, for Region.object() and
-+  // Region.array().
++  // Inside fn the region is the current one, for #{} and #[].
 +  int region = RegionIdOf(info);
 +  i::JSRegionObject::PushCurrent(i_isolate, region);
 +  Local<Value> result;
@@ -7723,22 +7717,6 @@ index 49121fe1..96fbc878 100644
 +  return Array::New(info.GetIsolate(), items.data(), items.size());
 +}
 +
-+int CurrentRegion(const v8::FunctionCallbackInfo<v8::Value>& info,
-+                  const char* name) {
-+  int region = i::JSRegionObject::Current(
-+      reinterpret_cast<i::Isolate*>(info.GetIsolate()));
-+  if (region < 0) {
-+    std::string message = std::string("Region.") + name +
-+                          "() needs a current region: use region.enter() or "
-+                          "region." + name + "()";
-+    info.GetIsolate()->ThrowException(Exception::TypeError(
-+        String::NewFromUtf8(info.GetIsolate(), message.c_str())
-+            .ToLocalChecked()));
-+    return -1;
-+  }
-+  return region;
-+}
-+
 +}  // namespace
 +
 +// region.object(value): a plain object copied into this region.
@@ -7754,26 +7732,6 @@ index 49121fe1..96fbc878 100644
 +  Local<Array> items;
 +  if (!ArgumentsArray(info).ToLocal(&items)) return;
 +  CreateInRegion(info, RegionIdOf(info), items);
-+}
-+
-+// Region.object(value) and Region.array(...items): the same in the current
-+// region.
-+void Shell::RegionCurrentObject(
-+    const v8::FunctionCallbackInfo<v8::Value>& info) {
-+  DCHECK(i::ValidateCallbackInfo(info));
-+  if (!CheckObjectArgument(info, "Region.object")) return;
-+  int region = CurrentRegion(info, "object");
-+  if (region >= 0) CreateInRegion(info, region, info[0]);
-+}
-+
-+void Shell::RegionCurrentArray(
-+    const v8::FunctionCallbackInfo<v8::Value>& info) {
-+  DCHECK(i::ValidateCallbackInfo(info));
-+  int region = CurrentRegion(info, "array");
-+  if (region < 0) return;
-+  Local<Array> items;
-+  if (!ArgumentsArray(info).ToLocal(&items)) return;
-+  CreateInRegion(info, region, items);
 +}
 +
 +namespace {
@@ -7802,23 +7760,16 @@ index 49121fe1..96fbc878 100644
 +    return;
 +  }
 +  info.GetReturnValue().Set(Utils::ToLocal(i::Cast<i::JSObject>(result)));
-+}
-+
+ }
+ 
+-void Shell::ChangeDirectoryCallback(
 +}  // namespace
 +
-+// region.typedArray(Float64Array, length) and Region.typedArray(...) for the
-+// current region.
++// region.typedArray(Float64Array, length).
 +void Shell::RegionNewTypedArray(
-+    const v8::FunctionCallbackInfo<v8::Value>& info) {
-+  DCHECK(i::ValidateCallbackInfo(info));
-+  CreateTypedArrayInRegion(info, RegionIdOf(info), "region.typedArray");
-+}
-+
-+void Shell::RegionCurrentTypedArray(
      const v8::FunctionCallbackInfo<v8::Value>& info) {
    DCHECK(i::ValidateCallbackInfo(info));
-+  int region = CurrentRegion(info, "typedArray");
-+  if (region >= 0) CreateTypedArrayInRegion(info, region, "Region.typedArray");
++  CreateTypedArrayInRegion(info, RegionIdOf(info), "region.typedArray");
 +}
 +
 +// region.enter(): makes the region current until the returned scope is
@@ -7912,25 +7863,10 @@ index 49121fe1..96fbc878 100644
 +  scope->SetInternalField(0, Undefined(info.GetIsolate()));
 +  i::JSRegionObject::PopCurrent(
 +      reinterpret_cast<i::Isolate*>(info.GetIsolate()), region);
-+}
-+
-+// Region.toJS(value) turns a typed array in a region, e.g. received from a
-+// worker, into a typed array view; other values are returned as they are.
-+void Shell::RegionToJS(const v8::FunctionCallbackInfo<v8::Value>& info) {
-+  DCHECK(i::ValidateCallbackInfo(info));
-+  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(info.GetIsolate());
-+  if (info.Length() < 1) return;
-+  i::Handle<i::Object> value;
-+  if (i::JSRegionObject::ToJSValue(
-+          i_isolate,
-+          i::indirect_handle(Utils::OpenDirectHandle(*info[0]), i_isolate))
-+          .ToHandle(&value)) {
-+    info.GetReturnValue().Set(Utils::ToLocal(value));
-+  }
  }
  
  Local<ObjectTemplate> Shell::CreateAsyncHookTemplate(Isolate* isolate) {
-@@ -5376,9 +6935,1128 @@ MaybeLocal<Context> Shell::CreateEvaluationContext(Isolate* isolate) {
+@@ -5376,9 +6867,1129 @@ MaybeLocal<Context> Shell::CreateEvaluationContext(Isolate* isolate) {
    }
  #endif  // V8_ENABLE_HARDWARE_WATCHPOINT_SUPPORT
  
@@ -8193,7 +8129,7 @@ index 49121fe1..96fbc878 100644
 +    const callback = factory(values).apply(values[0], values[1] ?? []);
 +    result = callback(...values.slice(count - argc));
 +  } catch (e) {
-+    if (spawn.pending() === 0 && !spawn.__shielded(id)) {
++    if (spawn.__pending() === 0 && !spawn.__shielded(id)) {
 +      __fail(id, regions, e);
 +    } else {
 +      __idle(id).then(() => __fail(id, regions, e));
@@ -8201,7 +8137,7 @@ index 49121fe1..96fbc878 100644
 +    return;
 +  }
 +  // Like std::thread::scope, a task ends only after the tasks it spawned.
-+  if (typeof result?.then !== 'function' && spawn.pending() === 0 &&
++  if (typeof result?.then !== 'function' && spawn.__pending() === 0 &&
 +      !spawn.__shielded(id)) {
 +    __reply(id, regions, result);
 +    return;
@@ -8600,7 +8536,8 @@ index 49121fe1..96fbc878 100644
 +  const isChannel = (value) =>
 +      (typeof Channel === 'function' && value instanceof Channel) ||
 +      (typeof RwLock === 'function' && value instanceof RwLock);
-+  // Task code and the order of its captures, by the key prepareSpawn() gives.
++  // Task code and the order of its captures, by the key __prepareSpawn()
++  // gives.
 +  const factories = new Map();
 +
 +  // The task factory: captured variables, captured functions, and a function
@@ -8697,11 +8634,11 @@ index 49121fe1..96fbc878 100644
 +  // waits. The task takes its own borrow when it starts.
 +  globalThis.spawn = function spawn(callback, ...args) {
 +    // [code id, receiver, arguments, ...captured values]
-+    const plan = Region.prepareSpawn(callback);
++    const plan = Region.__prepareSpawn(callback);
 +    const key = plan[0];
 +    let factory = factories.get(key);
 +    if (factory === undefined) {
-+      const code = Region.spawnCode(key);
++      const code = Region.__spawnCode(key);
 +      factory = { names: code.names, code: factorySource(code, code.names) };
 +      factories.set(key, factory);
 +    }
@@ -8802,8 +8739,8 @@ index 49121fe1..96fbc878 100644
 +    },
 +  });
 +  spawn.poolSize = 4;
-+  // Tasks spawned by this thread that have not finished yet.
-+  spawn.pending = () => inFlight;
++  // Tasks spawned by this thread that have not finished yet, for the runner.
++  Object.defineProperty(spawn, '__pending', { value: () => inFlight });
 +  // Outside a task nothing is aborted; pool workers replace this.
 +  spawn.aborted = () => false;
 +
@@ -9059,7 +8996,7 @@ index 49121fe1..96fbc878 100644
  namespace {
  int LineFromOffset(Local<debug::Script> script, int offset) {
    debug::Location location = script->GetSourceLocation(offset);
-@@ -6538,6 +9216,7 @@ void SourceGroup::JoinThread(const i::ParkedScope& parked) {
+@@ -6538,6 +9149,7 @@ void SourceGroup::JoinThread(const i::ParkedScope& parked) {
  void SerializationDataQueue::Enqueue(std::unique_ptr<SerializationData> data) {
    base::MutexGuard lock_guard(&mutex_);
    data_.push_back(std::move(data));
@@ -9067,7 +9004,7 @@ index 49121fe1..96fbc878 100644
  }
  
  bool SerializationDataQueue::Dequeue(
-@@ -6547,6 +9226,7 @@ bool SerializationDataQueue::Dequeue(
+@@ -6547,6 +9159,7 @@ bool SerializationDataQueue::Dequeue(
    if (data_.empty()) return false;
    *out_data = std::move(data_[0]);
    data_.erase(data_.begin());
@@ -9075,7 +9012,7 @@ index 49121fe1..96fbc878 100644
    return true;
  }
  
-@@ -6558,6 +9238,7 @@ bool SerializationDataQueue::IsEmpty() {
+@@ -6558,6 +9171,7 @@ bool SerializationDataQueue::IsEmpty() {
  void SerializationDataQueue::Clear() {
    base::MutexGuard lock_guard(&mutex_);
    data_.clear();
@@ -9083,7 +9020,7 @@ index 49121fe1..96fbc878 100644
  }
  
  Worker::Worker(Isolate* parent_isolate, const char* script)
-@@ -6668,6 +9349,12 @@ std::unique_ptr<SerializationData> Worker::GetMessage(Isolate* requester) {
+@@ -6668,6 +9282,12 @@ std::unique_ptr<SerializationData> Worker::GetMessage(Isolate* requester) {
        out_queue_.Dequeue(&result);
        break;
      }
@@ -9096,7 +9033,7 @@ index 49121fe1..96fbc878 100644
      out_semaphore_.ParkedWait(
          reinterpret_cast<i::Isolate*>(requester)->main_thread_local_isolate());
    }
-@@ -6698,6 +9385,10 @@ void Worker::Terminate() {
+@@ -6698,6 +9318,10 @@ void Worker::Terminate() {
    base::MutexGuard lock_guard(&worker_mutex_);
    auto expected = State::kRunning;
    if (!state_.compare_exchange_strong(expected, State::kTerminating)) return;
@@ -9107,7 +9044,7 @@ index 49121fe1..96fbc878 100644
    std::unique_ptr<v8::Task> task(
        new TerminateTask(task_manager_, shared_from_this()));
    task_runner_->PostTask(std::move(task));
-@@ -6791,6 +9482,7 @@ Worker* Worker::GetCurrentWorker() { return current_worker_; }
+@@ -6791,6 +9415,7 @@ Worker* Worker::GetCurrentWorker() { return current_worker_; }
  void Worker::ExecuteInThread() {
    Isolate::CreateParams create_params = GetDefaultIsolateCreateParams();
    isolate_ = Isolate::New(create_params);
@@ -9115,7 +9052,7 @@ index 49121fe1..96fbc878 100644
  
    // TODO(mdanylo): can we omit dump disable here?
  #ifdef V8_DUMPLING
-@@ -6926,6 +9618,7 @@ void Worker::ExecuteInThread() {
+@@ -6926,6 +9551,7 @@ void Worker::ExecuteInThread() {
      platform::NotifyIsolateShutdown(g_default_platform, isolate_);
    }
  
@@ -9123,7 +9060,7 @@ index 49121fe1..96fbc878 100644
    isolate_->Dispose();
    isolate_ = nullptr;
  
-@@ -7190,6 +9883,8 @@ bool Shell::SetOptions(int argc, char* argv[]) {
+@@ -7190,6 +9816,8 @@ bool Shell::SetOptions(int argc, char* argv[]) {
        options.expected_to_throw = true;
      } else if (FlagMatches("--no-fail", &argv[i])) {
        options.no_fail = true;
@@ -9132,7 +9069,7 @@ index 49121fe1..96fbc878 100644
      } else if (FlagMatches("--dump-counters", &argv[i])) {
        options.dump_counters = true;
      } else if (FlagMatches("--dump-counters-nvp", &argv[i])) {
-@@ -7310,6 +10005,9 @@ bool Shell::SetOptions(int argc, char* argv[]) {
+@@ -7310,6 +9938,9 @@ bool Shell::SetOptions(int argc, char* argv[]) {
                                    argv, &i)) {
        // Value is expressed in MB.
        options.max_serializer_memory = atoi(flag_value) * i::MB;
@@ -9142,7 +9079,7 @@ index 49121fe1..96fbc878 100644
      } else if (FlagMatches("--bundle", &argv[i])) {
        options.bundle = true;
  #ifdef V8_FUZZILLI
-@@ -7921,6 +10619,27 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7921,6 +10552,27 @@ class Serializer : public ValueSerializer::Delegate {
      return true;
    }
  
@@ -9170,7 +9107,7 @@ index 49121fe1..96fbc878 100644
   private:
    Maybe<bool> PrepareTransfer(Local<Context> context, Local<Value> transfer) {
      if (transfer->IsArray()) {
-@@ -7929,6 +10648,22 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7929,6 +10581,22 @@ class Serializer : public ValueSerializer::Delegate {
        for (uint32_t i = 0; i < length; ++i) {
          Local<Value> element;
          if (transfer_array->Get(context, i).ToLocal(&element)) {
@@ -9193,7 +9130,7 @@ index 49121fe1..96fbc878 100644
            if (!element->IsArrayBuffer()) {
              ThrowError(isolate_,
                         "Transfer array elements must be an ArrayBuffer");
-@@ -7961,7 +10696,64 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7961,7 +10629,64 @@ class Serializer : public ValueSerializer::Delegate {
      }
    }
  
@@ -9258,7 +9195,7 @@ index 49121fe1..96fbc878 100644
      for (const auto& global_array_buffer : array_buffers_) {
        Local<ArrayBuffer> array_buffer =
            Local<ArrayBuffer>::New(isolate_, global_array_buffer);
-@@ -7987,6 +10779,7 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7987,6 +10712,7 @@ class Serializer : public ValueSerializer::Delegate {
    ValueSerializer serializer_;
    std::unique_ptr<SerializationData> data_;
    std::vector<Global<ArrayBuffer>> array_buffers_;
@@ -9266,7 +9203,7 @@ index 49121fe1..96fbc878 100644
    std::vector<Global<SharedArrayBuffer>> shared_array_buffers_;
    std::vector<Global<WasmModuleObject>> wasm_modules_;
    std::vector<std::shared_ptr<v8::BackingStore>> backing_stores_;
-@@ -8013,6 +10806,21 @@ class Deserializer : public ValueDeserializer::Delegate {
+@@ -8013,6 +10739,21 @@ class Deserializer : public ValueDeserializer::Delegate {
        return MaybeLocal<Value>();
      }
  
@@ -9288,7 +9225,7 @@ index 49121fe1..96fbc878 100644
      uint32_t index = 0;
      for (const auto& backing_store : data_->backing_stores()) {
        Local<ArrayBuffer> array_buffer =
-@@ -8049,6 +10857,21 @@ class Deserializer : public ValueDeserializer::Delegate {
+@@ -8049,6 +10790,21 @@ class Deserializer : public ValueDeserializer::Delegate {
      return nullptr;
    }
  
@@ -9310,7 +9247,7 @@ index 49121fe1..96fbc878 100644
   private:
    Isolate* isolate_;
    ValueDeserializer deserializer_;
-@@ -8309,9 +11132,13 @@ int Shell::Main(int argc, char* argv[]) {
+@@ -8309,9 +11065,13 @@ int Shell::Main(int argc, char* argv[]) {
    // The platform is owned by wrapper platform despite the `std::move` below.
    START_IGNORE_LIFETIME_SAFETY_WARNINGS()
    g_default_platform = g_platform.get();
@@ -9324,7 +9261,7 @@ index 49121fe1..96fbc878 100644
    }
    if (options.stress_delay_tasks) {
      int64_t random_seed = i::v8_flags.fuzzer_random_seed;
-@@ -8438,6 +11265,7 @@ int Shell::Main(int argc, char* argv[]) {
+@@ -8438,6 +11198,7 @@ int Shell::Main(int argc, char* argv[]) {
    }
  
    Isolate* isolate = Isolate::New(create_params);
@@ -9333,7 +9270,7 @@ index 49121fe1..96fbc878 100644
  #ifdef V8_FUZZILLI
  
 diff --git a/src/d8/d8.h b/src/d8/d8.h
-index 0c7ad50a..a59e4cae 100644
+index 0c7ad50a..b4fb6595 100644
 --- a/src/d8/d8.h
 +++ b/src/d8/d8.h
 @@ -8,6 +8,7 @@
@@ -9480,7 +9417,7 @@ index 0c7ad50a..a59e4cae 100644
 +  Global<FunctionTemplate> region_ctor_;
 +  Global<FunctionTemplate> region_borrow_ctor_;
 +  Global<Context> spawn_probe_context_;
-+  // What Region.prepareSpawn() found out about a function, cached by the
++  // What Region.__prepareSpawn() found out about a function, cached by the
 +  // position of the function in its script: compiling and scanning it again
 +  // on every spawn() would cost more than the rest of the call.
 +  // Where the source of a function starts in its script; line -1 if the
@@ -9502,7 +9439,7 @@ index 0c7ad50a..a59e4cae 100644
 +  };
 +  std::map<std::tuple<int, int, int>, SpawnAnalysis> spawn_analyses_;
 +  // The code a task runs: the callback, the functions it captures and the
-+  // names of the captured values, in the order prepareSpawn() returns them.
++  // names of the captured values, in the order __prepareSpawn() returns them.
 +  struct SpawnCode {
 +    Global<String> source;
 +    std::vector<std::pair<std::string, Global<String>>> functions;
@@ -9571,7 +9508,7 @@ index 0c7ad50a..a59e4cae 100644
   private:
    static inline int DeserializationRunCount() {
      return options.stress_deserialize ? 1000 : 1;
-@@ -1007,6 +1135,55 @@ class Shell : public i::AllStatic {
+@@ -1007,6 +1135,48 @@ class Shell : public i::AllStatic {
    static Local<ObjectTemplate> GetOrCreateGlobalTemplate(Isolate* isolate);
    static Local<ObjectTemplate> CreateOSTemplate(Isolate* isolate);
    static Local<FunctionTemplate> CreateWorkerTemplate(Isolate* isolate);
@@ -9580,7 +9517,6 @@ index 0c7ad50a..a59e4cae 100644
 +  static void RegionId(const v8::FunctionCallbackInfo<v8::Value>& info);
 +  static void RegionOwner(const v8::FunctionCallbackInfo<v8::Value>& info);
 +  static void RegionRun(const v8::FunctionCallbackInfo<v8::Value>& info);
-+  static void RegionToJS(const v8::FunctionCallbackInfo<v8::Value>& info);
 +  static void RegionOf(const v8::FunctionCallbackInfo<v8::Value>& info);
 +  static void RegionPrepareSpawn(
 +      const v8::FunctionCallbackInfo<v8::Value>& info);
@@ -9605,12 +9541,6 @@ index 0c7ad50a..a59e4cae 100644
 +  static void RegionNewObject(const v8::FunctionCallbackInfo<v8::Value>& info);
 +  static void RegionNewArray(const v8::FunctionCallbackInfo<v8::Value>& info);
 +  static void RegionNewTypedArray(
-+      const v8::FunctionCallbackInfo<v8::Value>& info);
-+  static void RegionCurrentTypedArray(
-+      const v8::FunctionCallbackInfo<v8::Value>& info);
-+  static void RegionCurrentObject(
-+      const v8::FunctionCallbackInfo<v8::Value>& info);
-+  static void RegionCurrentArray(
 +      const v8::FunctionCallbackInfo<v8::Value>& info);
 +  static void RegionFree(const v8::FunctionCallbackInfo<v8::Value>& info);
 +  static void RegionDispose(const v8::FunctionCallbackInfo<v8::Value>& info);
@@ -12665,7 +12595,7 @@ index 00000000..844041ef
 +#endif  // V8_OBJECTS_JS_REGION_INL_H_
 diff --git a/src/objects/js-region.cc b/src/objects/js-region.cc
 new file mode 100644
-index 00000000..cbc9a5b8
+index 00000000..b8db8eb1
 --- /dev/null
 +++ b/src/objects/js-region.cc
 @@ -0,0 +1,3407 @@
@@ -12873,7 +12803,7 @@ index 00000000..cbc9a5b8
 +
 +  // Drops the stores that neither a live JSRegionTypedArray nor a view refers
 +  // to. A view keeps its store registered, so that it can go back into the
-+  // region without a copy, as views from Region.typedArray() do.
++  // region without a copy, as views from region.typedArray() do.
 +  static void ReleaseUnused(const std::vector<bool>& live) {
 +    base::MutexGuard guard(Mutex());
 +    std::vector<std::shared_ptr<BackingStore>>& stores = Stores();
@@ -14166,7 +14096,7 @@ index 00000000..cbc9a5b8
 +
 +  // The keys array and map for objects with `keys`, shared by every object
 +  // with these keys that this isolate creates in a region: by run(),
-+  // Region.object() and #{}. One map per shape keeps inline caches
++  // region.object() and #{}. One map per shape keeps inline caches
 +  // monomorphic.
 +  static std::pair<DirectHandle<FixedArray>, DirectHandle<Map>> ShapeFor(
 +      Isolate* isolate, const DirectHandleVector<String>& keys) {
@@ -14342,7 +14272,7 @@ index 00000000..cbc9a5b8
 +    int own_store =
 +        RegionBackingStores::Find(buffer->GetBackingStore().get(), region_);
 +    if (own_store >= 0) {
-+      // A view of this region's own bytes, e.g. from Region.typedArray().
++      // A view of this region's own bytes, e.g. from region.typedArray().
 +      store = own_store;
 +      region_offset = byte_offset;
 +    } else if (IsTransferred(buffer)) {

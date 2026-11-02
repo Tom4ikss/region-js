@@ -97,8 +97,8 @@ declare class Region implements Disposable {
   run<T extends RegionData>(fn: () => T, transfer?: ArrayBuffer[]): T;
 
   /** Makes the region current until the scope is disposed:
-   * `using _ = region.enter()`. Region.object() and Region.array() then
-   * create objects in it. run() makes the region current too. */
+   * `using _ = region.enter()`. #{} and #[] literals then create objects in
+   * it. run() makes the region current too. */
   enter(): RegionScope;
   /** A plain object copied into this region. Its shape is fixed. */
   object<T extends { readonly [key: string]: RegionData }>(value: T): T;
