@@ -60,6 +60,9 @@ declare class AbortError extends Error {}
 declare class TimeoutError extends AbortError {}
 /** Every thread waits on channels or locks and none can wake the others. */
 declare class DeadlockError extends Error {}
+/** The `RwLock` is poisoned: a writer was aborted or failed while holding it,
+ * so its value may be half updated. See `RwLock.clearPoison()`. */
+declare class PoisonError extends Error {}
 
 /**
  * A set of objects in shared memory owned by one thread at a time.
@@ -185,9 +188,10 @@ interface SpawnHandle<T> extends PromiseLike<T> {
    * main thread. */
   join(): T;
   /** The task fails with an `AbortError`. A task that has not started never
-   * runs; a running one has its channel and lock waits fail, and code that
-   * waits on nothing can check `spawn.aborted()`. The tasks it spawned are
-   * aborted too. No effect once finished. */
+   * runs; in a running one every `await` throws it, also one that waits for
+   * a promise that never settles, and code that runs without awaiting can
+   * check `spawn.aborted()`. The tasks it spawned are aborted too. No effect
+   * once finished. */
   abort(): void;
   /** Aborts the task with a `TimeoutError` if it has not finished in `ms`. */
   timeout(ms: number): this;
@@ -328,6 +332,11 @@ declare class RwLock<T extends object = any> {
   /** null if the lock cannot be taken right now. */
   tryRead(): RwLockGuard<T> | null;
   tryWrite(): RwLockGuard<T> | null;
+  /** A writer was aborted or failed while holding the lock: taking it fails
+   * with a `PoisonError` until `clearPoison()`. */
+  readonly poisoned: boolean;
+  /** The value was checked: the lock can be taken again. */
+  clearPoison(): void;
 }
 
 // --- d8 shell globals used together with regions ---------------------------

@@ -161,7 +161,8 @@ print('select on a lock:', attempt(() => Channel.selectSync([lock])));
   print('view after release:', view.length, 'reader sees:', r.value.bytes[0]);
 }
 
-// A thread that exits while holding the lock gives it up.
+// A thread that exits while holding the lock gives it up, poisoned: it may
+// have left the value half written.
 {
   const lock7 = new RwLock({ v: 0 });
   const w = new Worker(`onmessage = ({ data }) => {
@@ -173,8 +174,14 @@ print('select on a lock:', attempt(() => Channel.selectSync([lock])));
   print('worker:', w.getMessage());
   print('taken by the worker:', lock7.tryRead());
   w.terminate();
+  try {
+    await lock7.read();
+  } catch (e) {
+    print('after the worker exited:', e.name, lock7.poisoned);
+  }
+  lock7.clearPoison();
   using r = await lock7.read();
-  print('after the worker exited:', r.value.v);
+  print('after clearPoison():', r.value.v);
 }
 
 // The lock travels through channels; one lock on both sides.

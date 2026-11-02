@@ -345,7 +345,7 @@ result.total += <span class="tok-number">1</span>;
   <span class="tok-keyword">throw</span> <span class="tok-keyword">new</span> <span class="tok-fn">RangeError</span>(<span class="tok-string">'индекс за пределами'</span>);
 });
 <span class="tok-fn">print</span>(<span class="tok-string">'главный поток закончил'</span>);</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8; код выхода 1</span></div><pre class="out">главный поток закончил
-<span class="err">undefined:278: RangeError: индекс за пределами</span>
+<span class="err">undefined:315: RangeError: индекс за пределами</span>
       task.outcome = Promise.reject(task.error);
                              ^
 <span class="err">RangeError: индекс за пределами</span>
@@ -389,9 +389,9 @@ start = performance.<span class="tok-fn">now</span>();
 <span class="tok-api">spawn</span>.<span class="tok-api">poolSize</span> = <span class="tok-number">6</span>;
 <span class="tok-fn">six</span>(<span class="tok-string">'пул из 6'</span>);</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8; время у вас будет другим</span></div><pre class="out">результаты совпадают: true
 по очереди: 524 ms
-все сразу:  139 ms (x3.8)
-6 задач, пул из 4: 257 ms
-6 задач, пул из 6: 148 ms</pre></figure>
+все сразу:  140 ms (x3.7)
+6 задач, пул из 4: 260 ms
+6 задач, пул из 6: 140 ms</pre></figure>
 
 <p>Четыре задачи сразу идут примерно в 3,5 раза быстрее, чем по очереди. Ровно в 4 раза не выходит, и дело не в запуске: он стоит несколько микросекунд, а задача считается больше ста миллисекунд. Причину мы отдельно не разбирали.</p>
 <p>Все воркеры пула берут задачи из одной очереди, как рабочие потоки tokio: задача ждёт, только пока заняты все воркеры, и никогда не стоит за долгой задачей, если рядом есть свободный воркер. Воркер, который ждёт в <code>await</code>, тоже свободен: пока одна его задача ждёт канал или таймер, он выполняет другие. Если задач больше, чем воркеров, лишние ждут очереди: шесть задач с пулом из четырёх идут почти вдвое дольше одной. Пул можно увеличить, например под 6 быстрых ядер этой машины: <code>spawn.poolSize = 6</code>. Больше, чем ядер, ставить нет смысла: потоки начнут делить одни и те же ядра. Значения меньше 1 и не числа <code>spawn</code> считает за 1.</p>
@@ -429,7 +429,7 @@ spawn.idle() выполнен
 poolSize здесь: 6 | в задаче: 4</pre></figure>
 
 <h2 id="abort"><a class="anchor" href="#abort" aria-hidden="true" tabindex="-1"></a>Отмена: <code>abort</code>, <code>timeout</code>, <code>JoinSet</code></h2>
-<p><code>handle.abort()</code> отменяет задачу, и её <code>await</code> и <code>join()</code> заканчиваются ошибкой <code>AbortError</code>. Задача, которую ещё не взял воркер, просто не запустится, а регионы, которые она захватила, вернутся тому, кто её запустил. У запущенной задачи ожидания каналов и локов, в том числе блокирующие <code>recvSync</code> и <code>writeSync</code>, заканчиваются той же ошибкой, а новые ожидания падают сразу. Так в tokio задача отменяется на ближайшем <code>.await</code>. Код, который ничего не ждёт, например долгий цикл, остановить снаружи нельзя: JS не прерывает функцию посреди работы. Такой цикл проверяет <code>spawn.aborted()</code> сам.</p>
+<p><code>handle.abort()</code> отменяет задачу, и её <code>await</code> и <code>join()</code> заканчиваются ошибкой <code>AbortError</code>. Задача, которую ещё не взял воркер, просто не запустится, а регионы, которые она захватила, вернутся тому, кто её запустил. В запущенной задаче эту ошибку бросает каждый <code>await</code>: ожидание канала и лока, в том числе блокирующие <code>recvSync</code> и <code>writeSync</code>, и ожидание обычного промиса, даже такого, который никогда не выполнится. Так в tokio и asyncio задача отменяется на ближайшем <code>await</code>. Её <code>catch</code> и <code>finally</code> выполняются до того, как закончится ручка, и регионы задачи в них ещё доступны, но следующий <code>await</code> снова бросает ошибку. Код, который ничего не ждёт, например долгий цикл, остановить снаружи нельзя: JS не прерывает функцию посреди работы. Такой цикл проверяет <code>spawn.aborted()</code> сам.</p>
 <p><code>handle.timeout(ms)</code> отменяет задачу с ошибкой <code>TimeoutError</code>, если она не закончилась за <code>ms</code> миллисекунд. Таймер работает в отдельном потоке, поэтому срабатывает, даже если главный поток стоит в <code>join()</code>. <code>JoinSet</code>, как одноимённый тип в tokio, отдаёт результаты задач в порядке завершения: <code>await set.next()</code> или <code>for await</code> дают объекты вида <code>Promise.allSettled</code>, а выход из блока <code>using</code> отменяет задачи, которые ещё работают.</p>
 
 <figure class="example"><div class="ex-head"><span class="file"><a href="examples/39-spawn-abort.js">examples/39-spawn-abort.js</a></span><button class="copy" type="button">Копировать</button></div><pre class="code"><code><span class="tok-comment">// d8-flags: --module</span>
@@ -489,6 +489,57 @@ loop.<span class="tok-fn">timeout</span>(<span class="tok-number">20</span>);
 готово: 80 мс
 осталось задач: 1</pre></figure>
 
+<p>Если промис, которого ждёт задача, больше никому не нужен, сборщик мусора уносит его вместе с функциями, которые его ждут. Такая задача при отмене заканчивается сразу, но её <code>finally</code> уже не выполнится: эти функции больше никогда не продолжатся.</p>
+<p>Отмена посреди работы может оставить данные изменёнными наполовину. С регионами задачи это видно сразу: тот, кто её отменил, получает <code>AbortError</code> или <code>TimeoutError</code>. Хуже с <code>RwLock</code>, который делят несколько задач: остальные об отмене не знают. Поэтому писатель, отменённый с guard в руках, отравляет лок, и следующий, кто его берёт, получает <code>PoisonError</code> (см. <a href="channels.html#rwlock">RwLock</a>):</p>
+
+<figure class="example"><div class="ex-head"><span class="file"><a href="examples/46-cancel.js">examples/46-cancel.js</a></span><button class="copy" type="button">Копировать</button></div><pre class="code"><code><span class="tok-comment">// d8-flags: --module</span>
+<span class="tok-comment">// Отмена прерывает обычный await, а писатель, отменённый под локом, отравляет лок.</span>
+<span class="tok-keyword">const</span> sleep = (ms) =&gt; <span class="tok-keyword">new</span> <span class="tok-fn">Promise</span>((resolve) =&gt; {
+  <span class="tok-keyword">const</span> end = performance.<span class="tok-fn">now</span>() + ms;
+  <span class="tok-keyword">const</span> tick = () =&gt; (performance.<span class="tok-fn">now</span>() &gt;= end ? <span class="tok-fn">resolve</span>() : <span class="tok-fn">setTimeout</span>(tick, <span class="tok-number">0</span>));
+  <span class="tok-fn">tick</span>();
+});
+
+<span class="tok-keyword">const</span> doc = <span class="tok-keyword">new</span> <span class="tok-api">Region</span>().<span class="tok-api">run</span>(() =&gt; ({ title: <span class="tok-string">''</span>, words: <span class="tok-number">0</span> }));
+<span class="tok-keyword">try</span> {
+  <span class="tok-keyword">await</span> <span class="tok-api">spawn</span>(<span class="tok-keyword">async</span> (doc) =&gt; {
+    doc.title = <span class="tok-string">'final'</span>;
+    <span class="tok-keyword">await</span> <span class="tok-fn">sleep</span>(<span class="tok-number">1000</span>);         <span class="tok-comment">// таймаут прерывает это ожидание</span>
+    doc.words = <span class="tok-number">1000</span>;          <span class="tok-comment">// и сюда задача уже не дойдёт</span>
+  }, doc).<span class="tok-fn">timeout</span>(<span class="tok-number">20</span>);
+} <span class="tok-keyword">catch</span> (e) {
+  <span class="tok-fn">print</span>(<span class="tok-fn">String</span>(e));
+}
+<span class="tok-fn">print</span>(JSON.<span class="tok-fn">stringify</span>(doc));
+
+<span class="tok-keyword">const</span> stats = <span class="tok-keyword">new</span> <span class="tok-fn">RwLock</span>({ inFlight: <span class="tok-number">0</span>, served: <span class="tok-number">0</span> });
+<span class="tok-keyword">const</span> job = <span class="tok-api">spawn</span>(<span class="tok-keyword">async</span> (stats) =&gt; {
+  <span class="tok-keyword">using</span> g = <span class="tok-keyword">await</span> stats.<span class="tok-fn">write</span>();
+  g.value.inFlight++;
+  <span class="tok-keyword">await</span> <span class="tok-fn">sleep</span>(<span class="tok-number">1000</span>);
+  g.value.inFlight--;
+  g.value.served++;
+}, stats).<span class="tok-fn">timeout</span>(<span class="tok-number">20</span>);
+<span class="tok-keyword">try</span> {
+  <span class="tok-keyword">await</span> job;
+} <span class="tok-keyword">catch</span> (e) {
+  <span class="tok-fn">print</span>(<span class="tok-fn">String</span>(e));
+}
+<span class="tok-fn">print</span>(<span class="tok-string">'poisoned:'</span>, stats.poisoned);
+<span class="tok-keyword">try</span> {
+  <span class="tok-keyword">await</span> stats.<span class="tok-fn">read</span>();
+} <span class="tok-keyword">catch</span> (e) {
+  <span class="tok-fn">print</span>(<span class="tok-fn">String</span>(e));
+}
+stats.<span class="tok-fn">clearPoison</span>();           <span class="tok-comment">// данные проверены</span>
+<span class="tok-keyword">using</span> g = <span class="tok-keyword">await</span> stats.<span class="tok-fn">read</span>();
+<span class="tok-fn">print</span>(JSON.<span class="tok-fn">stringify</span>(g.value));</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8 --module</span></div><pre class="out"><span class="err">TimeoutError: spawn() task did not finish in 20 ms</span>
+{"title":"final","words":0}
+<span class="err">TimeoutError: spawn() task did not finish in 20 ms</span>
+poisoned: true
+<span class="err">PoisonError: the RwLock is poisoned: a writer did not finish (released at 46-cancel.js:27:17); check its value, then call clearPoison()</span>
+{"inFlight":1,"served":0}</pre></figure>
+
 <p>Задача, которая поймала <code>AbortError</code> и вернула значение, всё равно закончится отменой. Guard'ы <code>RwLock</code>, взятые через <code>using</code>, при этом отпускаются как обычно. Вместе с задачей отменяются задачи, которые она запустила, и их задачи тоже, а новые она запустить уже не может: они отменяются сразу. Отменённая задача, как и раньше, заканчивается только после своих вложенных.</p>
 
 <h2 id="scope"><a class="anchor" href="#scope" aria-hidden="true" tabindex="-1"></a>Блок задач: <code>spawn.scope</code></h2>
@@ -536,7 +587,7 @@ loop.<span class="tok-fn">timeout</span>(<span class="tok-number">20</span>);
 <span class="err">RangeError: batch 5: negative qty</span></pre></figure>
 
 <p>Задача, отменённая через свою ручку (<code>handle.abort()</code>), блок не роняет: <code>AbortError</code> считается намеренной отменой. <code>TimeoutError</code> из <code>handle.timeout(ms)</code> роняет. <code>s.fail(error)</code> роняет блок вручную. Блоки вкладываются: <code>spawn.scope</code> внутри задачи отменяет свои задачи вместе с ней. Сам <code>s</code> передать в задачу нельзя, задачи запускает только функция блока.</p>
-<p>Блок не отменяет задачу, которая ждёт не канал и не лок: ожидание обычного промиса или долгий цикл <code>abort</code> не прерывает, и блок честно ждёт их конца. Такой код проверяет <code>spawn.aborted()</code>.</p>
+<p>Долгий цикл без <code>await</code> отмена не прерывает, и блок честно ждёт его конца. Такой код проверяет <code>spawn.aborted()</code>.</p>
 
 <h2 id="how"><a class="anchor" href="#how" aria-hidden="true" tabindex="-1"></a>Как это работает и сколько стоит</h2>
 <p>При первом вызове движок разбирает исходный текст функции, находит её внешние имена и ищет их значения в замыкании. Захваченные функции разбираются так же, по цепочке. Из всего этого собирается код задачи: объявления захваченных переменных, тексты функций и сама функция. Разбор запоминается для этого места в коде, и в следующий раз остаётся только прочитать текущие значения переменных. Данные упаковываются в регион и через очередь задач уходят в свободный воркер пула, без <code>postMessage</code>. Код задачи воркер получает один раз, а потом ему хватает её номера.</p>
@@ -559,8 +610,8 @@ loop.<span class="tok-fn">timeout</span>(<span class="tok-number">20</span>);
   ms = performance.<span class="tok-fn">now</span>() - start;
   <span class="tok-fn">print</span>(<span class="tok-string">`${</span>M<span class="tok-string">} задач сразу (await): ${</span>ms.<span class="tok-fn">toFixed</span>(<span class="tok-number">0</span>)<span class="tok-string">} ms, последний результат ${</span>results[M - <span class="tok-number">1</span>]<span class="tok-string">}`</span>);
 })();</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8; время у вас будет другим</span></div><pre class="out">воркеров в пуле: 4
-100000 задач по очереди (join): 376 ms, 4 µs на задачу
-20000 задач сразу (await): 76 ms, последний результат 20000</pre></figure>
+100000 задач по очереди (join): 375 ms, 4 µs на задачу
+20000 задач сразу (await): 77 ms, последний результат 20000</pre></figure>
 
 <p>Задачи, запущенные все сразу, стоят примерно столько же, около 4 мкс на штуку. Почему запуск вообще стал таким дешёвым, рассказано на странице <a href="inside.html#fast-spawn">«Как это устроено»</a>.</p>
 <p>Для задач от миллисекунды и дольше эти накладные расходы почти не видны. Для мелких задач они могут оказаться больше самой работы. Как с этим быть, показано на странице <a href="practices.html#batch">«Как делать и как не делать»</a>.</p>

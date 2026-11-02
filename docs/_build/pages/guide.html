@@ -244,6 +244,7 @@
 </tbody>
 </table>
 </div>
+<p>Задачи и общие данные бросают свои классы, наследники <code>Error</code>: <code>AbortError</code> (задачу отменили), <code>TimeoutError</code> (наследник <code>AbortError</code>, задача не успела за <code>timeout(ms)</code>), <code>DeadlockError</code> (все потоки ждут друг друга) и <code>PoisonError</code> (<code>RwLock</code> отравлен писателем, который не закончил работу, см. <a href="channels.html#rwlock">RwLock</a>).</p>
 <p>Ошибки формы данных — обычные <code>TypeError</code>, без <code>region</code> и <code>reason</code>:</p>
 <div class="table-wrap">
 <table>

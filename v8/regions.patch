@@ -280,6 +280,45 @@ index d1be4eba..98c19f66 100644
      // We cannot enter here with either JSArray's or JSTypedArray's.
      CSA_DCHECK(this, Word32BinaryNot(IsJSArrayInstanceType(array_type)));
      CSA_DCHECK(this, Word32BinaryNot(IsJSTypedArrayInstanceType(array_type)));
+diff --git a/src/builtins/builtins-async-function-gen.cc b/src/builtins/builtins-async-function-gen.cc
+index 05ac5947..223073ef 100644
+--- a/src/builtins/builtins-async-function-gen.cc
++++ b/src/builtins/builtins-async-function-gen.cc
+@@ -50,12 +50,11 @@ void AsyncFunctionBuiltinsAssembler::AsyncFunctionAwaitResumeClosure(
+                            SmiConstant(JSGeneratorObject::kGeneratorClosed)));
+ 
+   // Remember the {resume_mode} for the {async_function_object}.
+-  StoreObjectFieldNoWriteBarrier(async_function_object,
+-                                 offsetof(JSGeneratorObject, resume_mode_),
+-                                 SmiConstant(resume_mode));
++  TNode<Object> value = SetAwaitResumeMode(context, async_function_object,
++                                           sent_value, resume_mode);
+ 
+   // Resume the {receiver} using our trampoline.
+-  CallBuiltin(Builtin::kResumeGeneratorTrampoline, context, sent_value,
++  CallBuiltin(Builtin::kResumeGeneratorTrampoline, context, value,
+               async_function_object);
+ 
+   // The resulting Promise is a throwaway, so it doesn't matter what it
+diff --git a/src/builtins/builtins-async-generator-gen.cc b/src/builtins/builtins-async-generator-gen.cc
+index b8b0529d..07932026 100644
+--- a/src/builtins/builtins-async-generator-gen.cc
++++ b/src/builtins/builtins-async-generator-gen.cc
+@@ -229,11 +229,10 @@ void AsyncGeneratorBuiltinsAssembler::AsyncGeneratorAwaitResume(
+   CSA_SLOW_DCHECK(this, IsGeneratorSuspended(async_generator_object));
+ 
+   // Remember the {resume_mode} for the {async_generator_object}.
+-  StoreObjectFieldNoWriteBarrier(async_generator_object,
+-                                 offsetof(JSGeneratorObject, resume_mode_),
+-                                 SmiConstant(resume_mode));
++  TNode<Object> sent_value = SetAwaitResumeMode(
++      context, async_generator_object, value, resume_mode);
+ 
+-  CallBuiltin(Builtin::kResumeGeneratorTrampoline, context, value,
++  CallBuiltin(Builtin::kResumeGeneratorTrampoline, context, sent_value,
+               async_generator_object);
+ 
+   TailCallBuiltin(Builtin::kAsyncGeneratorResumeNext, context,
 diff --git a/src/builtins/builtins-definitions.h b/src/builtins/builtins-definitions.h
 index 34cc7706..72d9d441 100644
 --- a/src/builtins/builtins-definitions.h
@@ -388,6 +427,26 @@ index 3de7f820..ad83afa5 100644
    // Check StringPrimitiveWithNoCustomIteration case.
    {
      Label if_fast(this), check_next(this);
+diff --git a/src/builtins/builtins-microtask-queue-gen.cc b/src/builtins/builtins-microtask-queue-gen.cc
+index 725786e0..ea008333 100644
+--- a/src/builtins/builtins-microtask-queue-gen.cc
++++ b/src/builtins/builtins-microtask-queue-gen.cc
+@@ -497,11 +497,10 @@ void MicrotaskQueueBuiltinsAssembler::RunSingleMicrotask(
+     BIND(&kind_async_function_await);
+     {
+       ScopedExceptionHandler handler(this, &if_exception, &var_exception);
+-      StoreObjectFieldNoWriteBarrier(generator,
+-                                     offsetof(JSGeneratorObject, resume_mode_),
+-                                     SmiConstant(JSGeneratorObject::kNext));
+-      CallBuiltin(Builtin::kResumeGeneratorTrampoline, microtask_context, value,
+-                  generator);
++      TNode<Object> sent_value = SetAwaitResumeMode(
++          microtask_context, generator, value, JSGeneratorObject::kNext);
++      CallBuiltin(Builtin::kResumeGeneratorTrampoline, microtask_context,
++                  sent_value, generator);
+     }
+     Goto(&done);
+ 
 diff --git a/src/builtins/builtins-object.cc b/src/builtins/builtins-object.cc
 index 7677d9c3..fc762f96 100644
 --- a/src/builtins/builtins-object.cc
@@ -900,8 +959,41 @@ index 36439464..29842b91 100644
      case Builtin::kFunctionPrototypeBind:
      case Builtin::kInterpreterEntryTrampolineForProfiling:
      // Tiering builtins are set directly into the dispatch table and never
+diff --git a/src/builtins/promise-reaction-job.tq b/src/builtins/promise-reaction-job.tq
+index 768997fd..ed1142eb 100644
+--- a/src/builtins/promise-reaction-job.tq
++++ b/src/builtins/promise-reaction-job.tq
+@@ -71,6 +71,8 @@ extern builtin ResumeGeneratorTrampoline(Context, JSAny, JSGeneratorObject):
+     JSAny;
+ extern builtin AsyncGeneratorResumeNext(Context, JSAsyncGeneratorObject): JSAny;
+ 
++extern macro RegionAwaitAbortError(Context): Object;
++
+ transitioning macro ResumeGenerator(
+     implicit context: Context)(generator: JSGeneratorObject, argument: JSAny,
+     reactionType: constexpr PromiseReactionType): void {
+@@ -80,11 +82,18 @@ transitioning macro ResumeGenerator(
+     static_assert(reactionType == kPromiseReactionReject);
+     generator.resume_mode = SmiConstant(kGeneratorResumeModeThrow);
+   }
++  // The await of an aborted d8 spawn() task throws the task's error.
++  let sent: JSAny = argument;
++  const abortError = RegionAwaitAbortError(context);
++  if (abortError != Undefined) {
++    generator.resume_mode = SmiConstant(kGeneratorResumeModeThrow);
++    sent = UnsafeCast<JSAny>(abortError);
++  }
+   if (Is<JSAsyncGeneratorObject>(generator)) {
+     const asyncGen = %RawDownCast<JSAsyncGeneratorObject>(generator);
+     asyncGen.is_awaiting = SmiConstant(0);
+   }
+-  ResumeGeneratorTrampoline(context, argument, generator);
++  ResumeGeneratorTrampoline(context, sent, generator);
+   if (Is<JSAsyncGeneratorObject>(generator)) {
+     const asyncGen = %RawDownCast<JSAsyncGeneratorObject>(generator);
+     AsyncGeneratorResumeNext(context, asyncGen);
 diff --git a/src/codegen/code-stub-assembler.cc b/src/codegen/code-stub-assembler.cc
-index 976c1b3e..ea8b260b 100644
+index 976c1b3e..e5e7cb99 100644
 --- a/src/codegen/code-stub-assembler.cc
 +++ b/src/codegen/code-stub-assembler.cc
 @@ -40,6 +40,7 @@
@@ -931,7 +1023,7 @@ index 976c1b3e..ea8b260b 100644
    const bool kHandlePrivateNames = mode == HasPropertyLookupMode::kHasProperty;
    TryPrototypeChainLookup(object, object, key, lookup_property_in_holder,
                            lookup_element_in_holder, &return_false,
-@@ -21983,6 +21996,193 @@ void CodeStubAssembler::SharedValueBarrier(
+@@ -21983,6 +21996,225 @@ void CodeStubAssembler::SharedValueBarrier(
    BIND(&done);
  }
  
@@ -974,6 +1066,38 @@ index 976c1b3e..ea8b260b 100644
 +         denied);
 +  Goto(&allowed);
 +  BIND(&allowed);
++}
++
++TNode<Object> CodeStubAssembler::RegionAwaitAbortError(
++    TNode<Context> context) {
++  TVARIABLE(Object, var_error, UndefinedConstant());
++  Label done(this), check(this, Label::kDeferred);
++  TNode<Uint8T> aborted = Load<Uint8T>(ExternalConstant(
++      ExternalReference::region_task_aborted_address(isolate())));
++  Branch(Word32Equal(aborted, Int32Constant(0)), &done, &check);
++  BIND(&check);
++  var_error = CallRuntime(Runtime::kRegionAwaitAbortError, context);
++  Goto(&done);
++  BIND(&done);
++  return var_error.value();
++}
++
++TNode<Object> CodeStubAssembler::SetAwaitResumeMode(
++    TNode<Context> context, TNode<JSGeneratorObject> generator,
++    TNode<Object> value, int resume_mode) {
++  TVARIABLE(Object, var_value, value);
++  TVARIABLE(Smi, var_mode, SmiConstant(resume_mode));
++  Label done(this), aborted(this, Label::kDeferred);
++  TNode<Object> error = RegionAwaitAbortError(context);
++  Branch(IsUndefined(error), &done, &aborted);
++  BIND(&aborted);
++  var_value = error;
++  var_mode = SmiConstant(JSGeneratorObject::kThrow);
++  Goto(&done);
++  BIND(&done);
++  StoreObjectFieldNoWriteBarrier(
++      generator, offsetof(JSGeneratorObject, resume_mode_), var_mode.value());
++  return var_value.value();
 +}
 +
 +void CodeStubAssembler::GotoIfNotStorableInRegion(TNode<Smi> region,
@@ -1126,10 +1250,10 @@ index 976c1b3e..ea8b260b 100644
    TVARIABLE(ArrayList, result);
    Label empty(this), nonempty(this), done(this);
 diff --git a/src/codegen/code-stub-assembler.h b/src/codegen/code-stub-assembler.h
-index f214a151..6e1b2fc3 100644
+index f214a151..01d62ff7 100644
 --- a/src/codegen/code-stub-assembler.h
 +++ b/src/codegen/code-stub-assembler.h
-@@ -2805,6 +2805,44 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
+@@ -2805,6 +2805,54 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
    void SharedValueBarrier(TNode<Context> context,
                            TVariable<Object>* var_shared_value);
  
@@ -1148,6 +1272,16 @@ index f214a151..6e1b2fc3 100644
 +  // The length of a region array that this isolate may read, or a jump to
 +  // |if_not|: not a region array, or a region it may not read.
 +  TNode<Smi> TryLoadRegionArrayLength(TNode<HeapObject> object, Label* if_not);
++  // Undefined, or the error that an await resuming now throws instead of
++  // giving its value: the code that awaited belongs to an aborted d8 spawn()
++  // task. Calls the runtime only while this isolate has one.
++  TNode<Object> RegionAwaitAbortError(TNode<Context> context);
++  // Sets |resume_mode| on |generator|, about to resume an await with
++  // |value|, and gives the value to resume it with: with an error from
++  // RegionAwaitAbortError, the mode is kThrow and the value that error.
++  TNode<Object> SetAwaitResumeMode(TNode<Context> context,
++                                   TNode<JSGeneratorObject> generator,
++                                   TNode<Object> value, int resume_mode);
 +  // Element |index| of a region array that this isolate may read, or a jump
 +  // to |if_not|: not a region array, an index outside its length, a region it
 +  // may not read, or a typed array, which is read as a fresh view elsewhere.
@@ -1175,7 +1309,7 @@ index f214a151..6e1b2fc3 100644
    TNode<IntPtrT> TimesSystemPointerSize(TNode<IntPtrT> value) {
      return Signed(TimesSystemPointerSize(implicit_cast<TNode<WordT>>(value)));
 diff --git a/src/codegen/external-reference.cc b/src/codegen/external-reference.cc
-index 9ae5654b..20a1da18 100644
+index 9ae5654b..ba152043 100644
 --- a/src/codegen/external-reference.cc
 +++ b/src/codegen/external-reference.cc
 @@ -36,6 +36,7 @@
@@ -1186,7 +1320,7 @@ index 9ae5654b..20a1da18 100644
  #include "src/objects/module.h"
  #include "src/objects/object-type.h"
  #include "src/objects/objects-inl.h"
-@@ -535,6 +536,40 @@ ExternalReference ExternalReference::force_slow_path(Isolate* isolate) {
+@@ -535,6 +536,45 @@ ExternalReference ExternalReference::force_slow_path(Isolate* isolate) {
    return ExternalReference(isolate->force_slow_path_address());
  }
  
@@ -1224,10 +1358,15 @@ index 9ae5654b..20a1da18 100644
 +  return ExternalReference(isolate->region_allocation_region_address());
 +}
 +
++ExternalReference ExternalReference::region_task_aborted_address(
++    Isolate* isolate) {
++  return ExternalReference(isolate->region_task_aborted_address());
++}
++
  FUNCTION_REFERENCE(new_deoptimizer_function, Deoptimizer::New)
  
  FUNCTION_REFERENCE(compute_output_frames_function,
-@@ -813,6 +848,22 @@ ExternalReference ExternalReference::address_of_builtin_subclassing_flag() {
+@@ -813,6 +853,22 @@ ExternalReference ExternalReference::address_of_builtin_subclassing_flag() {
    return ExternalReference(&v8_flags.builtin_subclassing);
  }
  
@@ -1251,10 +1390,10 @@ index 9ae5654b..20a1da18 100644
    return ExternalReference(&v8_flags.js_pr_3883);
  }
 diff --git a/src/codegen/external-reference.h b/src/codegen/external-reference.h
-index 8226ac48..2a2edb0d 100644
+index 8226ac48..4673e167 100644
 --- a/src/codegen/external-reference.h
 +++ b/src/codegen/external-reference.h
-@@ -32,6 +32,18 @@ enum class IsolateFieldId : uint8_t;
+@@ -32,6 +32,19 @@ enum class IsolateFieldId : uint8_t;
      "Address of the InterpreterEntryTrampoline instruction start")             \
    V(interpreter_dispatch_table_address, "Interpreter::dispatch_table_address") \
    V(force_slow_path, "Isolate::force_slow_path_address()")                     \
@@ -1270,10 +1409,11 @@ index 8226ac48..2a2edb0d 100644
 +    "Isolate::region_allocation_info()->limit_address()")                      \
 +  V(region_allocation_region_address,                                          \
 +    "Isolate::region_allocation_region_address()")                             \
++  V(region_task_aborted_address, "Isolate::region_task_aborted_address()")     \
    V(isolate_root, "Isolate::isolate_root()")                                   \
    V(address_of_jslimit, "StackGuard::address_of_jslimit()")                    \
    V(address_of_no_heap_write_interrupt_request,                                \
-@@ -81,6 +93,10 @@ enum class IsolateFieldId : uint8_t;
+@@ -81,6 +94,10 @@ enum class IsolateFieldId : uint8_t;
    V(abort_with_sandbox_violation, "abort_with_sandbox_violation")              \
    V(address_of_log_or_trace_osr, "v8_flags.log_or_trace_osr")                  \
    V(address_of_builtin_subclassing_flag, "v8_flags.builtin_subclassing")       \
@@ -2798,10 +2938,10 @@ index 8aab5f56..0bc22f26 100644
        CheckValueInputIs(node, 1, Type::Any());
 diff --git a/src/d8/d8-channel.cc b/src/d8/d8-channel.cc
 new file mode 100644
-index 00000000..d9f775e0
+index 00000000..89c1b721
 --- /dev/null
 +++ b/src/d8/d8-channel.cc
-@@ -0,0 +1,1656 @@
+@@ -0,0 +1,1772 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -2924,6 +3064,10 @@ index 00000000..d9f775e0
 +  // per read guard.
 +  Isolate* writer = nullptr;
 +  std::vector<Isolate*> readers;
++  // Set when a writer was aborted, failed or went away while holding the
++  // lock, with where its guard was released; cleared by clearPoison().
++  bool poisoned = false;
++  std::string poisoned_at;
 +  // Acquires waiting in arrival order; cancelled ones are skipped.
 +  std::deque<std::shared_ptr<ChannelWaiter>> queue;
 +};
@@ -2982,8 +3126,14 @@ index 00000000..d9f775e0
 +struct IsolateChannels {
 +  Global<FunctionTemplate> ctor;
 +  Global<FunctionTemplate> lock_ctor;
-+  // RwLock guards this isolate holds: the lock, and whether for writing.
-+  std::vector<std::pair<std::shared_ptr<ChannelState>, bool>> held;
++  // RwLock guards this isolate holds: the lock, whether for writing, and
++  // the spawn() task that took it, or -1.
++  struct Held {
++    std::shared_ptr<ChannelState> state;
++    bool write;
++    double task;
++  };
++  std::vector<Held> held;
 +  std::unordered_map<uint64_t, PendingWait> pending;
 +  std::unordered_set<ChannelHandle*> handles;
 +  uint64_t next_id = 1;
@@ -3113,6 +3263,20 @@ index 00000000..d9f775e0
 +    return -1;
 +  }
 +  return data.As<Value>().As<Number>()->Value();
++}
++
++// The error of `task` of `isolate` if it was aborted. Any thread.
++bool AbortedTaskReason(Isolate* isolate, double task, std::string* name,
++                       std::string* message) {
++  if (task < 0 || !any_aborted.load(std::memory_order_relaxed)) return false;
++  base::MutexGuard guard(channels_mutex.Pointer());
++  auto it = AbortedTasks().find(isolate);
++  if (it == AbortedTasks().end()) return false;
++  auto entry = it->second.find(task);
++  if (entry == it->second.end()) return false;
++  if (name) *name = entry->second.name;
++  if (message) *message = entry->second.message;
++  return true;
 +}
 +
 +// Throws and returns true if the running task was aborted: it may not start
@@ -3463,15 +3627,30 @@ index 00000000..d9f775e0
 +// reader borrows it. Returns the lock's object.
 +MaybeLocal<Value> TakeGrant(Isolate* isolate,
 +                            const std::shared_ptr<ChannelState>& state,
-+                            bool write) {
++                            bool write, double task) {
 +  LockData* lock = state->lock.get();
 +  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
++  std::string poisoned_at;
++  {
++    base::MutexGuard guard(channels_mutex.Pointer());
++    if (lock->poisoned) {
++      poisoned_at = lock->poisoned_at;
++      UngrantLocked(state, isolate, write);
++    }
++  }
++  if (!poisoned_at.empty()) {
++    isolate->ThrowException(NewTaskError(
++        isolate, "PoisonError",
++        "the RwLock is poisoned: a writer did not finish (" + poisoned_at +
++            "); check its value, then call clearPoison()"));
++    return {};
++  }
 +  if (write) {
 +    CHECK(i::RegionRegistry::Claim(lock->region, lock->generation, i_isolate));
 +  } else {
 +    CHECK(i::RegionRegistry::Borrow(lock->region, i_isolate, true));
 +  }
-+  DataOf(isolate).held.emplace_back(state, write);
++  DataOf(isolate).held.push_back({state, write, task});
 +  i::Handle<i::Object> root;
 +  if (!i::JSRegionObject::ToJSValue(
 +           i_isolate, i::handle(lock->root->GetPersisted(i_isolate, 0), i_isolate))
@@ -3482,11 +3661,15 @@ index 00000000..d9f775e0
 +}
 +
 +// Gives up a guard taken by TakeGrant. An isolate that is going away keeps
-+// its views, which go with it.
++// its views, which go with it. A writer that was aborted, failed or went away
++// may have left the value half updated: with `poisoned_at`, saying where,
++// the lock is poisoned, as in Rust when a writer panics.
 +void ReleaseHeld(Isolate* isolate, const std::shared_ptr<ChannelState>& state,
-+                 bool write, bool dying) {
++                 bool write, bool dying, std::string poisoned_at = {}) {
 +  LockData* lock = state->lock.get();
 +  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
++  if (!write) poisoned_at.clear();
++  if (write && dying) poisoned_at = "its thread went away";
 +  if (write) {
 +    // Views of the region's bytes must not outlive write access.
 +    if (!dying) i::JSRegionObject::DetachViews(i_isolate, lock->region);
@@ -3495,6 +3678,10 @@ index 00000000..d9f775e0
 +    i::RegionRegistry::Unborrow(lock->region, i_isolate, !dying);
 +  }
 +  base::MutexGuard guard(channels_mutex.Pointer());
++  if (!poisoned_at.empty()) {
++    lock->poisoned = true;
++    lock->poisoned_at = std::move(poisoned_at);
++  }
 +  UngrantLocked(state, isolate, write);
 +}
 +
@@ -3591,7 +3778,8 @@ index 00000000..d9f775e0
 +    std::shared_ptr<ChannelState> state = std::move(waiter->granted);
 +    TryCatch try_catch(isolate_);
 +    Local<Value> root;
-+    if (TakeGrant(isolate_, state, waiter->kind == ChannelWaiter::Kind::kWrite)
++    if (TakeGrant(isolate_, state, waiter->kind == ChannelWaiter::Kind::kWrite,
++                  waiter->task)
 +            .ToLocal(&root)) {
 +      USE(resolver->Resolve(context, root));
 +    } else if (try_catch.HasCaught() && !try_catch.HasTerminated()) {
@@ -3987,7 +4175,7 @@ index 00000000..d9f775e0
 +    if (!WaitBlocking(waiter, [&] { waiter->granted = nullptr; })) return;
 +  }
 +  Local<Value> root;
-+  if (!TakeGrant(isolate, state, write).ToLocal(&root)) return;
++  if (!TakeGrant(isolate, state, write, task).ToLocal(&root)) return;
 +  if (mode != 0) {
 +    info.GetReturnValue().Set(root);
 +    return;
@@ -4004,14 +4192,46 @@ index 00000000..d9f775e0
 +  std::shared_ptr<ChannelState> state = ThisLock(info);
 +  if (!state) return;
 +  bool write = info[0]->IsTrue();
++  double task = CurrentTask(isolate);
 +  auto& held = DataOf(isolate).held;
-+  auto it = std::find(held.begin(), held.end(), std::pair{state, write});
++  auto same = [&](const IsolateChannels::Held& guard) {
++    return guard.state == state && guard.write == write;
++  };
++  auto it = std::find_if(held.begin(), held.end(), [&](const auto& guard) {
++    return same(guard) && guard.task == task;
++  });
++  if (it == held.end()) it = std::find_if(held.begin(), held.end(), same);
 +  if (it == held.end()) {
 +    ThrowTypeError(isolate, "this thread holds no such guard of the lock");
 +    return;
 +  }
 +  held.erase(it);
-+  ReleaseHeld(isolate, state, write, false);
++  std::string poisoned_at;
++  if (write && AbortedTaskReason(isolate, task, nullptr, nullptr)) {
++    poisoned_at = RegionEventText(isolate, "released");
++    if (poisoned_at.empty()) poisoned_at = "released by an aborted task";
++  }
++  ReleaseHeld(isolate, state, write, false, std::move(poisoned_at));
++}
++
++// RwLock.__releaseTask(task, failed): gives up the guards that an ended
++// task still holds. Its write guards poison their locks if it failed.
++void LockReleaseTask(const FunctionCallbackInfo<Value>& info) {
++  Isolate* isolate = info.GetIsolate();
++  if (!info[0]->IsNumber()) return;
++  double task = info[0].As<Number>()->Value();
++  bool failed = info[1]->IsTrue();
++  bool aborted = AbortedTaskReason(isolate, task, nullptr, nullptr);
++  auto& held = DataOf(isolate).held;
++  for (size_t i = held.size(); i-- > 0;) {
++    if (held[i].task != task) continue;
++    IsolateChannels::Held guard = std::move(held[i]);
++    held.erase(held.begin() + i);
++    ReleaseHeld(isolate, guard.state, guard.write, false,
++                !failed   ? std::string()
++                : aborted ? "its task was aborted while holding it"
++                          : "its task failed while holding it");
++  }
 +}
 +
 +}  // namespace
@@ -4044,6 +4264,27 @@ index 00000000..d9f775e0
 +  return ctor;
 +}
 +
++namespace {
++
++// lock.poisoned: whether a writer was aborted while holding the lock.
++void LockPoisoned(const FunctionCallbackInfo<Value>& info) {
++  std::shared_ptr<ChannelState> state = ThisLock(info);
++  if (!state) return;
++  base::MutexGuard guard(channels_mutex.Pointer());
++  info.GetReturnValue().Set(state->lock->poisoned);
++}
++
++// lock.clearPoison(): the value was checked; guards can be taken again.
++void LockClearPoison(const FunctionCallbackInfo<Value>& info) {
++  std::shared_ptr<ChannelState> state = ThisLock(info);
++  if (!state) return;
++  base::MutexGuard guard(channels_mutex.Pointer());
++  state->lock->poisoned = false;
++  state->lock->poisoned_at.clear();
++}
++
++}  // namespace
++
 +// static
 +Local<FunctionTemplate> Channels::CreateLockTemplate(Isolate* isolate) {
 +  Local<FunctionTemplate> ctor = FunctionTemplate::New(isolate, LockNew);
@@ -4051,12 +4292,20 @@ index 00000000..d9f775e0
 +  ctor->InstanceTemplate()->SetInternalFieldCount(1);
 +  Local<Signature> signature = Signature::New(isolate, ctor);
 +  for (auto [name, callback] : {std::pair{"__acquire", LockAcquire},
-+                                std::pair{"__release", LockRelease}}) {
++                                std::pair{"__release", LockRelease},
++                                std::pair{"clearPoison", LockClearPoison}}) {
 +    ctor->PrototypeTemplate()->Set(
 +        String::NewFromUtf8(isolate, name).ToLocalChecked(),
 +        FunctionTemplate::New(isolate, callback, Local<Value>(), signature, 0,
 +                              ConstructorBehavior::kThrow));
 +  }
++  ctor->Set(isolate, "__releaseTask",
++            FunctionTemplate::New(isolate, LockReleaseTask));
++  ctor->PrototypeTemplate()->SetAccessorProperty(
++      String::NewFromUtf8Literal(isolate, "poisoned"),
++      FunctionTemplate::New(isolate, LockPoisoned, Local<Value>(), signature, 0,
++                            ConstructorBehavior::kThrow));
++  i::RegionRegistry::SetTaskAbortHook(AbortedTaskReason);
 +  DataOf(isolate).lock_ctor.Reset(isolate, ctor);
 +  return ctor;
 +}
@@ -4174,6 +4423,9 @@ index 00000000..d9f775e0
 +    base::MutexGuard guard(channels_mutex.Pointer());
 +    AbortedTasks()[isolate].insert_or_assign(task, AbortReason{name, message});
 +    any_aborted.store(true, std::memory_order_relaxed);
++    // Its awaits throw from now on.
++    i::RegionRegistry::SetHasAbortedTasks(
++        reinterpret_cast<i::Isolate*>(isolate), true);
 +    // A blocked thread cannot run the task below: its wait ends here.
 +    for (ChannelWaiter* waiter : BlockingWaiters().Snapshot()) {
 +      if (waiter->isolate != isolate || waiter->task != task ||
@@ -4200,7 +4452,11 @@ index 00000000..d9f775e0
 +  auto it = AbortedTasks().find(isolate);
 +  if (it == AbortedTasks().end()) return;
 +  it->second.erase(task);
-+  if (it->second.empty()) AbortedTasks().erase(it);
++  if (it->second.empty()) {
++    AbortedTasks().erase(it);
++    i::RegionRegistry::SetHasAbortedTasks(
++        reinterpret_cast<i::Isolate*>(isolate), false);
++  }
 +  any_aborted.store(!AbortedTasks().empty(), std::memory_order_relaxed);
 +}
 +
@@ -4239,7 +4495,7 @@ index 00000000..d9f775e0
 +  data.pending.clear();
 +  // Guards still held are released, so the lock does not stay taken.
 +  while (!data.held.empty()) {
-+    auto [state, write] = std::move(data.held.back());
++    auto [state, write, task] = std::move(data.held.back());
 +    data.held.pop_back();
 +    ReleaseHeld(isolate, state, write, true);
 +  }
@@ -5772,7 +6028,7 @@ index 00000000..bd767012
 +
 +#endif  // V8_D8_D8_PORT_H_
 diff --git a/src/d8/d8.cc b/src/d8/d8.cc
-index 49121fe1..30197263 100644
+index 49121fe1..e8254e4f 100644
 --- a/src/d8/d8.cc
 +++ b/src/d8/d8.cc
 @@ -14,6 +14,7 @@
@@ -5990,27 +6246,11 @@ index 49121fe1..30197263 100644
  
    // Prevent fuzzers from creating side effects.
    if (!i::v8_flags.fuzzing) {
-@@ -4815,88 +4923,1417 @@ Local<ObjectTemplate> Shell::CreateGlobalTemplate(Isolate* isolate) {
-     global_template->Set(isolate, "async_hooks",
-                          Shell::CreateAsyncHookTemplate(isolate));
+@@ -4830,73 +4938,1416 @@ Local<ObjectTemplate> Shell::GetOrCreateGlobalTemplate(Isolate* isolate) {
+   if (data->global_template_.IsEmpty()) {
+     data->global_template_.Reset(isolate, CreateGlobalTemplate(isolate));
    }
--
--  return global_template;
-+
-+  return global_template;
-+}
-+
-+Local<ObjectTemplate> Shell::GetOrCreateGlobalTemplate(Isolate* isolate) {
-+  // Creating the global template is fairly expensive compared to the rest of
-+  // the context setup, e.g. in REPRL mode, which creates a new context for
-+  // every script. None of the templates depend on the context, so all contexts
-+  // of an isolate (including realms) share one global template. In particular,
-+  // all d8.dom objects of an isolate are instances of the same templates (see
-+  // SetDomNodeCtor), no matter in which context they were created.
-+  PerIsolateData* data = PerIsolateData::Get(isolate);
-+  if (data->global_template_.IsEmpty()) {
-+    data->global_template_.Reset(isolate, CreateGlobalTemplate(isolate));
-+  }
+-  return data->global_template_.Get(isolate);
 +  return data->global_template_.Get(isolate);
 +}
 +
@@ -6105,6 +6345,8 @@ index 49121fe1..30197263 100644
 +                       FunctionTemplate::New(isolate, RegionInfo));
 +  region_template->Set(isolate, "__task",
 +                       FunctionTemplate::New(isolate, RegionTask));
++  region_template->Set(isolate, "__interrupt",
++                       FunctionTemplate::New(isolate, RegionInterrupt));
 +  region_template->Set(isolate, "object",
 +                       FunctionTemplate::New(isolate, RegionCurrentObject));
 +  region_template->Set(isolate, "array",
@@ -6457,6 +6699,18 @@ index 49121fe1..30197263 100644
 +  if (!data.IsEmpty() && data->IsValue() && data.As<Value>()->IsNumber()) {
 +    info.GetReturnValue().Set(data.As<Value>());
 +  }
++}
++
++// Region.__interrupt(task, error): the awaits of an aborted task that wait
++// for a promise still pending throw `error` now. Gives how many did.
++void Shell::RegionInterrupt(const v8::FunctionCallbackInfo<v8::Value>& info) {
++  DCHECK(i::ValidateCallbackInfo(info));
++  if (info.Length() < 2 || !info[0]->IsNumber()) return;
++  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(info.GetIsolate());
++  int count = i::RegionRegistry::InterruptTaskAwaits(
++      i_isolate, info[0].As<Number>()->Value(),
++      Utils::OpenDirectHandle(*info[1]));
++  info.GetReturnValue().Set(count);
 +}
 +
 +void Shell::RegionInfo(const v8::FunctionCallbackInfo<v8::Value>& info) {
@@ -7338,18 +7592,7 @@ index 49121fe1..30197263 100644
 +  info.GetReturnValue().Set(Utils::ToLocal(i::Cast<i::JSObject>(result)));
  }
  
--Local<ObjectTemplate> Shell::GetOrCreateGlobalTemplate(Isolate* isolate) {
--  // Creating the global template is fairly expensive compared to the rest of
--  // the context setup, e.g. in REPRL mode, which creates a new context for
--  // every script. None of the templates depend on the context, so all contexts
--  // of an isolate (including realms) share one global template. In particular,
--  // all d8.dom objects of an isolate are instances of the same templates (see
--  // SetDomNodeCtor), no matter in which context they were created.
--  PerIsolateData* data = PerIsolateData::Get(isolate);
--  if (data->global_template_.IsEmpty()) {
--    data->global_template_.Reset(isolate, CreateGlobalTemplate(isolate));
--  }
--  return data->global_template_.Get(isolate);
+-void Shell::ChangeDirectoryCallback(
 +}  // namespace
 +
 +// region.typedArray(Float64Array, length) and Region.typedArray(...) for the
@@ -7358,9 +7601,8 @@ index 49121fe1..30197263 100644
 +    const v8::FunctionCallbackInfo<v8::Value>& info) {
 +  DCHECK(i::ValidateCallbackInfo(info));
 +  CreateTypedArrayInRegion(info, RegionIdOf(info), "region.typedArray");
- }
- 
--void Shell::ChangeDirectoryCallback(
++}
++
 +void Shell::RegionCurrentTypedArray(
      const v8::FunctionCallbackInfo<v8::Value>& info) {
    DCHECK(i::ValidateCallbackInfo(info));
@@ -7477,7 +7719,7 @@ index 49121fe1..30197263 100644
  }
  
  Local<ObjectTemplate> Shell::CreateAsyncHookTemplate(Isolate* isolate) {
-@@ -5376,9 +6813,995 @@ MaybeLocal<Context> Shell::CreateEvaluationContext(Isolate* isolate) {
+@@ -5376,9 +6827,1050 @@ MaybeLocal<Context> Shell::CreateEvaluationContext(Isolate* isolate) {
    }
  #endif  // V8_ENABLE_HARDWARE_WATCHPOINT_SUPPORT
  
@@ -7512,6 +7754,8 @@ index 49121fe1..30197263 100644
 +const __borrows = new Map();
 +// Region ids each running task holds; only tasks with regions are listed.
 +const __running = new Map();
++// The regions of each task that has not replied yet, or null.
++const __live = new Map();
 +{
 +  Region.prototype.borrow = function () {
 +    const token = __rawBorrow.call(this);
@@ -7592,8 +7836,10 @@ index 49121fe1..30197263 100644
 +  return transfer;
 +};
 +
-+// Releases borrows that no running task of this worker can still own.
-+const __endTask = (id, regions) => {
++// Releases borrows that no running task of this worker can still own, and
++// lock guards the task left: those of a failed writer poison their locks.
++const __endTask = (id, regions, failed = false) => {
++  if (typeof RwLock === 'function') RwLock.__releaseTask(id, failed);
 +  if (regions) {
 +    __running.delete(id);
 +    for (const token of regions.borrows) token.release();
@@ -7610,6 +7856,7 @@ index 49121fe1..30197263 100644
 +};
 +
 +const __reply = (id, regions, value) => {
++  if (!__live.has(id)) return;
 +  const aborted = __port.aborted(id);
 +  if (aborted) {
 +    __fail(id, regions, { name: aborted[0], message: aborted[1] });
@@ -7621,6 +7868,7 @@ index 49121fe1..30197263 100644
 +        (typeof value !== 'object' && typeof value !== 'function') ||
 +        Region.__info(value) >= 0) {
 +      __port.reply([id, value], __returning(regions, value));
++      __live.delete(id);
 +      return;
 +    }
 +    // The result is local to this task, so its typed arrays can move. It is
@@ -7631,16 +7879,19 @@ index 49121fe1..30197263 100644
 +    const transfer = __returning(regions, null) ?? [];
 +    transfer.push(out);
 +    __port.reply([id, box, 1], transfer);
++    __live.delete(id);
 +  } catch (e) {
 +    __fail(id, regions, e, false);
 +  }
 +};
 +
 +const __fail = (id, regions, e, end = true) => {
-+  if (end) __endTask(id, regions);
++  if (!__live.has(id)) return;
++  if (end) __endTask(id, regions, true);
 +  const aborted = __port.aborted(id);
 +  if (aborted) e = { name: aborted[0], message: aborted[1] };
 +  __port.reply(__failure(id, e), __returning(regions, null));
++  __live.delete(id);
 +};
 +
 +// Whether the running task was aborted, for code that does not wait on
@@ -7659,8 +7910,24 @@ index 49121fe1..30197263 100644
 +onmessage = ({ data }) => {
 +  __port = data;
 +  onmessage = () => {};
-+  // Aborting a task aborts the tasks it spawned.
-+  __port.serve(__onTask, (id) => spawn.__abortChildren(id));
++  // Aborting a task throws at its awaits that wait for nothing that would
++  // fail by itself, and aborts the tasks it spawned.
++  __port.serve(__onTask, (id, name, message) => {
++    const ErrorType = globalThis[name];
++    let error;
++    if (typeof ErrorType === 'function') {
++      error = new ErrorType(message);
++    } else {
++      error = new Error(message);
++      error.name = name;
++    }
++    // A task with no await left cannot run again: its awaits were for
++    // promises nothing else refers to, and were collected. It ends here.
++    if (Region.__interrupt(id, error) === 0 && __live.has(id)) {
++      spawn.idle().then(() => __fail(id, __live.get(id), error));
++    }
++    spawn.__abortChildren(id);
++  });
 +};
 +
 +// The task id is kept as continuation data while the task runs, so that its
@@ -7695,6 +7962,7 @@ index 49121fe1..30197263 100644
 +    }
 +  }
 +  if (regions) __running.set(id, regions.ids);
++  __live.set(id, regions);
 +
 +  let result;
 +  try {
@@ -7719,9 +7987,20 @@ index 49121fe1..30197263 100644
 +    __reply(id, regions, result);
 +    return;
 +  }
-+  Promise.resolve(result).then(
-+      (value) => spawn.idle().then(() => __reply(id, regions, value)),
-+      (e) => spawn.idle().then(() => __fail(id, regions, e)));
++  __settle(id, regions, result);
++}
++
++// Awaits the result, so that aborting the task interrupts the wait even for
++// a promise that is not of an async function and never settles.
++async function __settle(id, regions, result) {
++  let value;
++  try {
++    value = await result;
++  } catch (e) {
++    spawn.idle().then(() => __fail(id, regions, e));
++    return;
++  }
++  spawn.idle().then(() => __reply(id, regions, value));
 +}`;
 +
 +  const noop = () => {};
@@ -7920,8 +8199,9 @@ index 49121fe1..30197263 100644
 +      return outcomeOf(this.#task).then(onFulfilled, onRejected);
 +    }
 +    // The task fails with an AbortError. One that has not started never
-+    // runs; a running one has its channel and lock waits fail, and code that
-+    // waits on nothing can check spawn.aborted().
++    // runs; in a running one every await throws it, also one that waits for
++    // a promise that never settles. Code that runs without awaiting can
++    // check spawn.aborted().
 +    abort() {
 +      this.#pool.abort(this.#task, 'AbortError', 'spawn() task was aborted');
 +    }
@@ -8003,14 +8283,19 @@ index 49121fe1..30197263 100644
 +    #error = undefined;
 +    static {
 +      // Waits for every task; after that no task can start in the scope.
-+      endScope = async (scope) => {
-+        while (scope.#running.size > 0) {
-+          await new Promise((resolve) => { scope.#idle = resolve; });
++      // Without await: in an aborted task an await throws at once.
++      endScope = (scope) => new Promise((resolve) => {
++        const check = () => {
++          if (scope.#running.size > 0) {
++            scope.#idle = check;
++            return;
++          }
 +          scope.#idle = null;
-+        }
-+        scope.#ended = true;
-+        return scope.#failed ? { error: scope.#error } : null;
-+      };
++          scope.#ended = true;
++          resolve(scope.#failed ? { error: scope.#error } : null);
++        };
++        check();
++      });
 +    }
 +    // A task that ends with the scope: the scope fails if it fails, and
 +    // waits for it. Its handle can be awaited and joined as usual.
@@ -8277,20 +8562,24 @@ index 49121fe1..30197263 100644
 +  // The first failure, of `body` or of a task, aborts the other tasks and
 +  // closes the channels made with s.channel(); the scope then fails with it.
 +  // Otherwise it gives what `body` returned.
-+  spawn.scope = async function scope(body) {
++  spawn.scope = function scope(body) {
 +    if (typeof body !== 'function') {
-+      throw new TypeError('spawn.scope() expects a function');
++      return Promise.reject(new TypeError('spawn.scope() expects a function'));
 +    }
 +    const s = new SpawnScope();
-+    let value;
++    let ran;
 +    try {
-+      value = await body(s);
++      ran = Promise.resolve(body(s));
 +    } catch (e) {
-+      s.fail(e);
++      ran = Promise.reject(e);
 +    }
-+    const failure = await endScope(s);
-+    if (failure) throw failure.error;
-+    return value;
++    let value;
++    return ran.then((result) => { value = result; }, (e) => s.fail(e))
++        .then(() => endScope(s))
++        .then((failure) => {
++          if (failure) throw failure.error;
++          return value;
++        });
 +  };
 +
 +  // Copies `data` into a new sealed region, like Arc::new: every thread reads
@@ -8439,13 +8728,21 @@ index 49121fe1..30197263 100644
 +    const kWait = 0, kBlock = 1, kTry = 2;
 +    const method = (value) =>
 +        ({ value, writable: true, configurable: true, enumerable: false });
-+    const acquire = (write, mode) => function() {
-+      const value = nativeAcquire.call(this, write, mode);
-+      if (mode === kWait) {
-+        return value.then((value) => new RwLockGuard(this, write, value));
-+      }
-+      return value === null ? null : new RwLockGuard(this, write, value);
-+    };
++    const acquire = (write, mode) => mode === kWait
++        ? function() {
++            let value;
++            try {
++              value = nativeAcquire.call(this, write, mode);
++            } catch (e) {
++              // A poisoned lock or an aborted task: read() and write() reject.
++              return Promise.reject(e);
++            }
++            return value.then((value) => new RwLockGuard(this, write, value));
++          }
++        : function() {
++            const value = nativeAcquire.call(this, write, mode);
++            return value === null ? null : new RwLockGuard(this, write, value);
++          };
 +    Object.defineProperties(RwLock.prototype, {
 +      read: method(acquire(false, kWait)),
 +      write: method(acquire(true, kWait)),
@@ -8473,7 +8770,7 @@ index 49121fe1..30197263 100644
  namespace {
  int LineFromOffset(Local<debug::Script> script, int offset) {
    debug::Location location = script->GetSourceLocation(offset);
-@@ -6538,6 +8961,7 @@ void SourceGroup::JoinThread(const i::ParkedScope& parked) {
+@@ -6538,6 +9030,7 @@ void SourceGroup::JoinThread(const i::ParkedScope& parked) {
  void SerializationDataQueue::Enqueue(std::unique_ptr<SerializationData> data) {
    base::MutexGuard lock_guard(&mutex_);
    data_.push_back(std::move(data));
@@ -8481,7 +8778,7 @@ index 49121fe1..30197263 100644
  }
  
  bool SerializationDataQueue::Dequeue(
-@@ -6547,6 +8971,7 @@ bool SerializationDataQueue::Dequeue(
+@@ -6547,6 +9040,7 @@ bool SerializationDataQueue::Dequeue(
    if (data_.empty()) return false;
    *out_data = std::move(data_[0]);
    data_.erase(data_.begin());
@@ -8489,7 +8786,7 @@ index 49121fe1..30197263 100644
    return true;
  }
  
-@@ -6558,6 +8983,7 @@ bool SerializationDataQueue::IsEmpty() {
+@@ -6558,6 +9052,7 @@ bool SerializationDataQueue::IsEmpty() {
  void SerializationDataQueue::Clear() {
    base::MutexGuard lock_guard(&mutex_);
    data_.clear();
@@ -8497,7 +8794,7 @@ index 49121fe1..30197263 100644
  }
  
  Worker::Worker(Isolate* parent_isolate, const char* script)
-@@ -6668,6 +9094,12 @@ std::unique_ptr<SerializationData> Worker::GetMessage(Isolate* requester) {
+@@ -6668,6 +9163,12 @@ std::unique_ptr<SerializationData> Worker::GetMessage(Isolate* requester) {
        out_queue_.Dequeue(&result);
        break;
      }
@@ -8510,7 +8807,7 @@ index 49121fe1..30197263 100644
      out_semaphore_.ParkedWait(
          reinterpret_cast<i::Isolate*>(requester)->main_thread_local_isolate());
    }
-@@ -6705,6 +9137,8 @@ void Worker::Terminate() {
+@@ -6705,6 +9206,8 @@ void Worker::Terminate() {
    // returning to the event queue. Since we checked the state before, and we are
    // holding the {worker_mutex_}, it's safe to access the isolate.
    isolate_->TerminateExecution();
@@ -8519,7 +8816,7 @@ index 49121fe1..30197263 100644
  }
  
  void Worker::EnterTerminatedState() {
-@@ -6791,6 +9225,7 @@ Worker* Worker::GetCurrentWorker() { return current_worker_; }
+@@ -6791,6 +9294,7 @@ Worker* Worker::GetCurrentWorker() { return current_worker_; }
  void Worker::ExecuteInThread() {
    Isolate::CreateParams create_params = GetDefaultIsolateCreateParams();
    isolate_ = Isolate::New(create_params);
@@ -8527,7 +8824,7 @@ index 49121fe1..30197263 100644
  
    // TODO(mdanylo): can we omit dump disable here?
  #ifdef V8_DUMPLING
-@@ -6926,6 +9361,7 @@ void Worker::ExecuteInThread() {
+@@ -6926,6 +9430,7 @@ void Worker::ExecuteInThread() {
      platform::NotifyIsolateShutdown(g_default_platform, isolate_);
    }
  
@@ -8535,7 +8832,7 @@ index 49121fe1..30197263 100644
    isolate_->Dispose();
    isolate_ = nullptr;
  
-@@ -7190,6 +9626,8 @@ bool Shell::SetOptions(int argc, char* argv[]) {
+@@ -7190,6 +9695,8 @@ bool Shell::SetOptions(int argc, char* argv[]) {
        options.expected_to_throw = true;
      } else if (FlagMatches("--no-fail", &argv[i])) {
        options.no_fail = true;
@@ -8544,7 +8841,7 @@ index 49121fe1..30197263 100644
      } else if (FlagMatches("--dump-counters", &argv[i])) {
        options.dump_counters = true;
      } else if (FlagMatches("--dump-counters-nvp", &argv[i])) {
-@@ -7310,6 +9748,9 @@ bool Shell::SetOptions(int argc, char* argv[]) {
+@@ -7310,6 +9817,9 @@ bool Shell::SetOptions(int argc, char* argv[]) {
                                    argv, &i)) {
        // Value is expressed in MB.
        options.max_serializer_memory = atoi(flag_value) * i::MB;
@@ -8554,7 +8851,7 @@ index 49121fe1..30197263 100644
      } else if (FlagMatches("--bundle", &argv[i])) {
        options.bundle = true;
  #ifdef V8_FUZZILLI
-@@ -7921,6 +10362,27 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7921,6 +10431,27 @@ class Serializer : public ValueSerializer::Delegate {
      return true;
    }
  
@@ -8582,7 +8879,7 @@ index 49121fe1..30197263 100644
   private:
    Maybe<bool> PrepareTransfer(Local<Context> context, Local<Value> transfer) {
      if (transfer->IsArray()) {
-@@ -7929,6 +10391,22 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7929,6 +10460,22 @@ class Serializer : public ValueSerializer::Delegate {
        for (uint32_t i = 0; i < length; ++i) {
          Local<Value> element;
          if (transfer_array->Get(context, i).ToLocal(&element)) {
@@ -8605,7 +8902,7 @@ index 49121fe1..30197263 100644
            if (!element->IsArrayBuffer()) {
              ThrowError(isolate_,
                         "Transfer array elements must be an ArrayBuffer");
-@@ -7961,7 +10439,64 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7961,7 +10508,64 @@ class Serializer : public ValueSerializer::Delegate {
      }
    }
  
@@ -8670,7 +8967,7 @@ index 49121fe1..30197263 100644
      for (const auto& global_array_buffer : array_buffers_) {
        Local<ArrayBuffer> array_buffer =
            Local<ArrayBuffer>::New(isolate_, global_array_buffer);
-@@ -7987,6 +10522,7 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7987,6 +10591,7 @@ class Serializer : public ValueSerializer::Delegate {
    ValueSerializer serializer_;
    std::unique_ptr<SerializationData> data_;
    std::vector<Global<ArrayBuffer>> array_buffers_;
@@ -8678,7 +8975,7 @@ index 49121fe1..30197263 100644
    std::vector<Global<SharedArrayBuffer>> shared_array_buffers_;
    std::vector<Global<WasmModuleObject>> wasm_modules_;
    std::vector<std::shared_ptr<v8::BackingStore>> backing_stores_;
-@@ -8013,6 +10549,21 @@ class Deserializer : public ValueDeserializer::Delegate {
+@@ -8013,6 +10618,21 @@ class Deserializer : public ValueDeserializer::Delegate {
        return MaybeLocal<Value>();
      }
  
@@ -8700,7 +8997,7 @@ index 49121fe1..30197263 100644
      uint32_t index = 0;
      for (const auto& backing_store : data_->backing_stores()) {
        Local<ArrayBuffer> array_buffer =
-@@ -8049,6 +10600,21 @@ class Deserializer : public ValueDeserializer::Delegate {
+@@ -8049,6 +10669,21 @@ class Deserializer : public ValueDeserializer::Delegate {
      return nullptr;
    }
  
@@ -8722,7 +9019,7 @@ index 49121fe1..30197263 100644
   private:
    Isolate* isolate_;
    ValueDeserializer deserializer_;
-@@ -8309,9 +10875,13 @@ int Shell::Main(int argc, char* argv[]) {
+@@ -8309,9 +10944,13 @@ int Shell::Main(int argc, char* argv[]) {
    // The platform is owned by wrapper platform despite the `std::move` below.
    START_IGNORE_LIFETIME_SAFETY_WARNINGS()
    g_default_platform = g_platform.get();
@@ -8736,7 +9033,7 @@ index 49121fe1..30197263 100644
    }
    if (options.stress_delay_tasks) {
      int64_t random_seed = i::v8_flags.fuzzer_random_seed;
-@@ -8438,6 +11008,7 @@ int Shell::Main(int argc, char* argv[]) {
+@@ -8438,6 +11077,7 @@ int Shell::Main(int argc, char* argv[]) {
    }
  
    Isolate* isolate = Isolate::New(create_params);
@@ -8745,7 +9042,7 @@ index 49121fe1..30197263 100644
  #ifdef V8_FUZZILLI
  
 diff --git a/src/d8/d8.h b/src/d8/d8.h
-index 0c7ad50a..909fec34 100644
+index 0c7ad50a..aeb4bb36 100644
 --- a/src/d8/d8.h
 +++ b/src/d8/d8.h
 @@ -8,6 +8,7 @@
@@ -8972,7 +9269,7 @@ index 0c7ad50a..909fec34 100644
    static std::unique_ptr<SerializationData> SerializeValue(
        Isolate* isolate, Local<Value> value, Local<Value> transfer);
    static MaybeLocal<Value> DeserializeValue(
-@@ -1007,6 +1131,48 @@ class Shell : public i::AllStatic {
+@@ -1007,6 +1131,50 @@ class Shell : public i::AllStatic {
    static Local<ObjectTemplate> GetOrCreateGlobalTemplate(Isolate* isolate);
    static Local<ObjectTemplate> CreateOSTemplate(Isolate* isolate);
    static Local<FunctionTemplate> CreateWorkerTemplate(Isolate* isolate);
@@ -8994,6 +9291,8 @@ index 0c7ad50a..909fec34 100644
 +      const v8::FunctionCallbackInfo<v8::Value>& info);
 +  static void RegionInfo(const v8::FunctionCallbackInfo<v8::Value>& info);
 +  static void RegionTask(const v8::FunctionCallbackInfo<v8::Value>& info);
++  static void RegionInterrupt(
++      const v8::FunctionCallbackInfo<v8::Value>& info);
 +  static void RegionEnter(const v8::FunctionCallbackInfo<v8::Value>& info);
 +  static void RegionScopeExit(const v8::FunctionCallbackInfo<v8::Value>& info);
 +  static void RegionNewObject(const v8::FunctionCallbackInfo<v8::Value>& info);
@@ -9164,10 +9463,10 @@ index e98604b7..f204e252 100644
    // Since there are no other threads left, we can lock this mutex without any
    // ceremony. This signals to the tear down code that we are in a safepoint.
 diff --git a/src/execution/isolate.h b/src/execution/isolate.h
-index 793be1a7..b00ea27a 100644
+index 793be1a7..a3f0c828 100644
 --- a/src/execution/isolate.h
 +++ b/src/execution/isolate.h
-@@ -1796,6 +1796,56 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
+@@ -1796,6 +1796,66 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
    bool force_slow_path() const { return force_slow_path_; }
    bool* force_slow_path_address() { return &force_slow_path_; }
  
@@ -9221,10 +9520,20 @@ index 793be1a7..b00ea27a 100644
 +    return region_bytes_since_collection_;
 +  }
 +
++  // Nonzero while a d8 spawn() task that runs here is aborted: an await that
++  // resumes then asks RegionRegistry::AwaitAbortError whether to throw
++  // instead. Set from any thread, read by the await builtins.
++  uint8_t* region_task_aborted_address() {
++    return reinterpret_cast<uint8_t*>(&region_task_aborted_);
++  }
++  void set_region_task_aborted(bool aborted) {
++    region_task_aborted_.store(aborted, std::memory_order_relaxed);
++  }
++
    bool jitless() const { return jitless_; }
  
    void SetStackSize(size_t v);
-@@ -2823,6 +2873,13 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
+@@ -2823,6 +2883,15 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
    std::unique_ptr<PersistentHandlesList> persistent_handles_list_;
  
    bool force_slow_path_ = false;
@@ -9235,6 +9544,8 @@ index 793be1a7..b00ea27a 100644
 +  intptr_t region_allocation_region_ = -1;
 +  std::atomic<int> region_holder_slot_{-1};
 +  size_t region_bytes_since_collection_ = 0;
++  std::atomic<uint8_t> region_task_aborted_{0};
++  static_assert(sizeof(std::atomic<uint8_t>) == 1);
  
    // Certain objects may be allocated in RO space if suitable for the snapshot.
    bool enable_ro_allocation_for_snapshot_ = false;
@@ -10734,7 +11045,7 @@ index c4045bb9..0620388f 100644
    friend class IC;
    friend class NamedLoadHandlerCompiler;
 diff --git a/src/init/bootstrapper.cc b/src/init/bootstrapper.cc
-index 8c98628e..0a90a05d 100644
+index 8c98628e..131ae58d 100644
 --- a/src/init/bootstrapper.cc
 +++ b/src/init/bootstrapper.cc
 @@ -261,6 +261,7 @@ class Genesis {
@@ -10773,12 +11084,12 @@ index 8c98628e..0a90a05d 100644
  
    InitializeGlobal_queueMicrotask();
  }
-@@ -5815,6 +5830,42 @@ void Genesis::InitializeGlobal_sharedarraybuffer() {
+@@ -5815,6 +5830,43 @@ void Genesis::InitializeGlobal_sharedarraybuffer() {
                          isolate()->shared_array_buffer_fun(), DONT_ENUM);
  }
  
 +// Errors of ownership regions: OwnershipError extends TypeError, TimeoutError
-+// extends AbortError, AbortError and DeadlockError extend Error.
++// extends AbortError, AbortError, DeadlockError and PoisonError extend Error.
 +void Genesis::InitializeGlobal_regions() {
 +  if (!v8_flags.harmony_regions) return;
 +  Factory* factory = isolate()->factory();
@@ -10811,6 +11122,7 @@ index 8c98628e..0a90a05d 100644
 +  install("TimeoutError", Context::REGION_TIMEOUT_ERROR_FUNCTION_INDEX,
 +          abort_error);
 +  install("DeadlockError", Context::REGION_DEADLOCK_ERROR_FUNCTION_INDEX, {});
++  install("PoisonError", Context::REGION_POISON_ERROR_FUNCTION_INDEX, {});
 +}
 +
  
@@ -11752,10 +12064,10 @@ index 5a0a666c..473044be 100644
  #ifdef V8_TEMPORAL_SUPPORT
  #include "src/objects/js-temporal-objects.h"
 diff --git a/src/objects/contexts.h b/src/objects/contexts.h
-index 1859939e..a35c6147 100644
+index 1859939e..33da1da7 100644
 --- a/src/objects/contexts.h
 +++ b/src/objects/contexts.h
-@@ -319,6 +319,18 @@ enum ContextLookupFlags {
+@@ -319,6 +319,19 @@ enum ContextLookupFlags {
    V(REGEXP_RESULT_INDICES_MAP_INDEX, Map, regexp_result_indices_map)           \
    V(REGEXP_SEARCH_FUNCTION_INDEX, JSFunction, regexp_search_function)          \
    V(REGEXP_SPLIT_FUNCTION_INDEX, JSFunction, regexp_split_function)            \
@@ -11769,6 +12081,7 @@ index 1859939e..a35c6147 100644
 +    region_deadlock_error_function)                                            \
 +  V(REGION_OWNERSHIP_ERROR_FUNCTION_INDEX, Object,                             \
 +    region_ownership_error_function)                                           \
++  V(REGION_POISON_ERROR_FUNCTION_INDEX, Object, region_poison_error_function)  \
 +  V(REGION_TIMEOUT_ERROR_FUNCTION_INDEX, Object,                               \
 +    region_timeout_error_function)                                             \
    V(INITIAL_REGEXP_STRING_ITERATOR_PROTOTYPE_MAP_INDEX, Map,                   \
@@ -11935,6 +12248,20 @@ index deb7420b..780042aa 100644
  
        case LookupIterator::ACCESS_CHECK:
          if (!it->HasAccess()) {
+diff --git a/src/objects/js-promise.h b/src/objects/js-promise.h
+index 9c6f4043..0e1c4b10 100644
+--- a/src/objects/js-promise.h
++++ b/src/objects/js-promise.h
+@@ -127,6 +127,9 @@ V8_OBJECT class JSPromise : public JSObjectWithEmbedderSlots {
+   SmiBitFieldMember<Flags> flags_;
+ 
+  private:
++  // Throws at the awaits of aborted d8 spawn() tasks.
++  friend class RegionRegistry;
++
+   // https://tc39.es/ecma262/#sec-triggerpromisereactions
+   static Handle<Object> TriggerPromiseReactions(Isolate* isolate,
+                                                 DirectHandle<Object> reactions,
 diff --git a/src/objects/js-region-inl.h b/src/objects/js-region-inl.h
 new file mode 100644
 index 00000000..844041ef
@@ -12031,10 +12358,10 @@ index 00000000..844041ef
 +#endif  // V8_OBJECTS_JS_REGION_INL_H_
 diff --git a/src/objects/js-region.cc b/src/objects/js-region.cc
 new file mode 100644
-index 00000000..85eeffc8
+index 00000000..cd62e58c
 --- /dev/null
 +++ b/src/objects/js-region.cc
-@@ -0,0 +1,3217 @@
+@@ -0,0 +1,3342 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -12072,6 +12399,9 @@ index 00000000..85eeffc8
 +#include "src/objects/backing-store.h"
 +#include "src/objects/js-array-buffer-inl.h"
 +#include "src/objects/js-array-inl.h"
++#include "src/objects/js-generator-inl.h"
++#include "src/objects/js-promise-inl.h"
++#include "src/objects/promise-inl.h"
 +#include "src/objects/js-region-inl.h"
 +#include "src/objects/keys.h"
 +#include "src/objects/lookup-inl.h"
@@ -13140,6 +13470,8 @@ index 00000000..85eeffc8
 +                  ? Context::REGION_TIMEOUT_ERROR_FUNCTION_INDEX
 +              : strcmp(name, "DeadlockError") == 0
 +                  ? Context::REGION_DEADLOCK_ERROR_FUNCTION_INDEX
++              : strcmp(name, "PoisonError") == 0
++                  ? Context::REGION_POISON_ERROR_FUNCTION_INDEX
 +                  : -1;
 +  Factory* factory = isolate->factory();
 +  DirectHandle<String> text =
@@ -13153,6 +13485,126 @@ index 00000000..85eeffc8
 +                      factory->NewStringFromAsciiChecked(name))
 +      .Check();
 +  return error;
++}
++
++namespace {
++std::atomic<RegionRegistry::TaskAbortHook> task_abort_hook{nullptr};
++}  // namespace
++
++// static
++void RegionRegistry::SetTaskAbortHook(TaskAbortHook hook) {
++  task_abort_hook.store(hook, std::memory_order_relaxed);
++}
++
++// static
++void RegionRegistry::SetHasAbortedTasks(Isolate* isolate, bool aborted) {
++  isolate->set_region_task_aborted(aborted);
++}
++
++// static
++DirectHandle<Object> RegionRegistry::AwaitAbortError(Isolate* isolate) {
++  TaskAbortHook hook = task_abort_hook.load(std::memory_order_relaxed);
++  Tagged<Object> task =
++      isolate->isolate_data()->continuation_preserved_embedder_data();
++  if (hook == nullptr || !IsNumber(task)) {
++    return isolate->factory()->undefined_value();
++  }
++  std::string name;
++  std::string message;
++  if (!hook(reinterpret_cast<v8::Isolate*>(isolate), Object::NumberValue(task),
++            &name, &message)) {
++    return isolate->factory()->undefined_value();
++  }
++  return NewTaskError(isolate, name.c_str(), message.c_str());
++}
++
++// static
++int RegionRegistry::InterruptTaskAwaits(Isolate* isolate, double task,
++                                        DirectHandle<Object> error) {
++#ifdef V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA
++  Tagged<Object> function_await =
++      isolate->root(RootIndex::kAsyncFunctionAwaitResolveClosureSharedFun);
++  Tagged<Object> generator_await =
++      isolate->root(RootIndex::kAsyncGeneratorAwaitResolveClosureSharedFun);
++  // The generator an await resumes, directly or through its closures; null
++  // for other reactions.
++  auto awaiting = [&](Tagged<Object> handler) -> Tagged<JSGeneratorObject> {
++    if (IsJSGeneratorObject(handler)) return Cast<JSGeneratorObject>(handler);
++    if (!IsJSFunction(handler)) return {};
++    Tagged<JSFunction> function = Cast<JSFunction>(handler);
++    if (function->shared() != function_await &&
++        function->shared() != generator_await) {
++      return {};
++    }
++    return Cast<JSGeneratorObject>(
++        function->context()->GetNoCell(Context::EXTENSION_INDEX));
++  };
++  // The awaits of the task on pending promises, and the promises that its
++  // suspended async functions and generators settle: an await of one of
++  // those waits for another await of the task, which throws first.
++  std::vector<std::pair<Address, Address>> found;
++  std::unordered_set<Address> settled_by_task;
++  {
++    HeapObjectIterator iterator(isolate->heap());
++    for (Tagged<HeapObject> object = iterator.Next(); !object.is_null();
++         object = iterator.Next()) {
++      if (!IsJSPromise(object)) continue;
++      Tagged<JSPromise> promise = Cast<JSPromise>(object);
++      if (promise->status() != Promise::kPending) continue;
++      for (Tagged<Object> next = promise->reactions(); IsPromiseReaction(next);
++           next = Cast<PromiseReaction>(next)->next()) {
++        Tagged<PromiseReaction> reaction = Cast<PromiseReaction>(next);
++        Tagged<Object> data = reaction->continuation_preserved_embedder_data();
++        if (!IsNumber(data) || Object::NumberValue(data) != task) continue;
++        Tagged<JSGeneratorObject> generator =
++            awaiting(reaction->fulfill_handler());
++        if (generator.is_null()) continue;
++        found.emplace_back(promise.ptr(), reaction.ptr());
++        if (IsJSAsyncFunctionObject(generator)) {
++          settled_by_task.insert(
++              Cast<JSAsyncFunctionObject>(generator)->promise().ptr());
++        } else if (IsJSAsyncGeneratorObject(generator)) {
++          Tagged<Object> request =
++              Cast<JSAsyncGeneratorObject>(generator)->queue();
++          while (IsAsyncGeneratorRequest(request)) {
++            settled_by_task.insert(
++                Cast<AsyncGeneratorRequest>(request)->promise().ptr());
++            request = Cast<AsyncGeneratorRequest>(request)->next();
++          }
++        }
++      }
++    }
++  }
++  std::vector<std::pair<DirectHandle<JSPromise>, DirectHandle<PromiseReaction>>>
++      awaits;
++  for (auto [promise, reaction] : found) {
++    if (settled_by_task.contains(promise)) continue;
++    awaits.emplace_back(
++        direct_handle(Cast<JSPromise>(Tagged<Object>(promise)), isolate),
++        direct_handle(Cast<PromiseReaction>(Tagged<Object>(reaction)),
++                      isolate));
++  }
++  for (auto& [promise, reaction] : awaits) {
++    // Off the list of the promise, then rejected alone.
++    Tagged<Object> head = promise->reactions();
++    if (head == *reaction) {
++      promise->set_reactions_or_result(
++          Cast<UnionOf<PromiseReaction, JSAny>>(reaction->next()));
++    } else {
++      Tagged<PromiseReaction> previous = Cast<PromiseReaction>(head);
++      while (previous->next() != *reaction) {
++        previous = Cast<PromiseReaction>(previous->next());
++      }
++      previous->set_next(reaction->next());
++    }
++    reaction->set_next(Smi::zero());
++    JSPromise::TriggerPromiseReactions(isolate, reaction, error,
++                                       PromiseReaction::kReject);
++  }
++  return static_cast<int>(found.size());
++#else
++  return 0;
++#endif  // V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA
 +}
 +
 +namespace {
@@ -15254,10 +15706,10 @@ index 00000000..85eeffc8
 +}  // namespace v8
 diff --git a/src/objects/js-region.h b/src/objects/js-region.h
 new file mode 100644
-index 00000000..8f5634fb
+index 00000000..aeaeadd0
 --- /dev/null
 +++ b/src/objects/js-region.h
-@@ -0,0 +1,520 @@
+@@ -0,0 +1,538 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -15342,11 +15794,29 @@ index 00000000..8f5634fb
 +  static DirectHandle<JSObject> NewOwnershipError(Isolate* isolate, int region,
 +                                                  const char* reason,
 +                                                  const char* message);
-+  // An AbortError, TimeoutError or DeadlockError for d8 tasks and channels;
-+  // an Error with that name if the class is missing.
++  // An AbortError, TimeoutError, DeadlockError or PoisonError for d8 tasks,
++  // channels and locks; an Error with that name if the class is missing.
 +  static DirectHandle<JSObject> NewTaskError(Isolate* isolate,
 +                                             const char* name,
 +                                             const char* message);
++
++  // Aborted d8 spawn() tasks. While an isolate has one, every await that
++  // resumes there asks `hook` whether the code that awaited belongs to an
++  // aborted task, by the continuation data it awaited with, and if so throws
++  // the error of the task instead of giving the awaited value.
++  using TaskAbortHook = bool (*)(v8::Isolate* isolate, double task,
++                                 std::string* name, std::string* message);
++  static void SetTaskAbortHook(TaskAbortHook hook);
++  static void SetHasAbortedTasks(Isolate* isolate, bool aborted);
++  // Undefined, or the error for an await that resumes now.
++  static DirectHandle<Object> AwaitAbortError(Isolate* isolate);
++  // The awaits of `task` that wait for a promise that is still pending
++  // resume now, throwing `error`, as if the promise had been rejected; the
++  // promise no longer resumes them. An await for an async function of the
++  // task that waits too is left to it. Gives how many awaits the task has:
++  // with none, its code can never run again, unless it does not await.
++  static int InterruptTaskAwaits(Isolate* isolate, double task,
++                                 DirectHandle<Object> error);
 +
 +  // Where a region was last moved (sent, or thawed by an owner that other
 +  // threads were reading it from), frozen, freed or put in a lock, as in
@@ -16567,7 +17037,7 @@ index 2ab60bab..433e7430 100644
          result = JSObject::GetPropertyAttributesWithInterceptor(&it);
          if (result.IsNothing()) return MaybeDirectHandle<Object>();
 diff --git a/src/runtime/runtime-object.cc b/src/runtime/runtime-object.cc
-index 96c1c2f4..b75a46e3 100644
+index 96c1c2f4..9b2349e1 100644
 --- a/src/runtime/runtime-object.cc
 +++ b/src/runtime/runtime-object.cc
 @@ -3,6 +3,7 @@
@@ -16590,7 +17060,7 @@ index 96c1c2f4..b75a46e3 100644
  #include "src/objects/property-descriptor-object.h"
  #include "src/objects/property-descriptor.h"
  #include "src/objects/property-details.h"
-@@ -87,6 +91,123 @@ Maybe<bool> Runtime::DeleteObjectProperty(Isolate* isolate,
+@@ -87,6 +91,130 @@ Maybe<bool> Runtime::DeleteObjectProperty(Isolate* isolate,
  }
  
  // https://tc39.es/ecma262/#sec-object.keys
@@ -16702,6 +17172,13 @@ index 96c1c2f4..b75a46e3 100644
 +  return Smi::FromInt(RegionAllocator::MarkedCount());
 +}
 +
++// See RegionRegistry::AwaitAbortError.
++RUNTIME_FUNCTION(Runtime_RegionAwaitAbortError) {
++  HandleScope scope(isolate);
++  DCHECK_EQ(0, args.length());
++  return *RegionRegistry::AwaitAbortError(isolate);
++}
++
 +RUNTIME_FUNCTION(Runtime_RegionPageCount) {
 +  DCHECK_EQ(1, args.length());
 +  int region = args.smi_value_at(0);
@@ -16714,7 +17191,7 @@ index 96c1c2f4..b75a46e3 100644
  RUNTIME_FUNCTION(Runtime_ObjectKeys) {
    HandleScope scope(isolate);
    DirectHandle<Object> object = args.at(0);
-@@ -221,6 +342,7 @@ RUNTIME_FUNCTION(Runtime_HasOwnConstDataProperty) {
+@@ -221,6 +349,7 @@ RUNTIME_FUNCTION(Runtime_HasOwnConstDataProperty) {
        case LookupIterator::ACCESS_CHECK:
        case LookupIterator::JSPROXY:
        case LookupIterator::WASM_OBJECT:
@@ -16723,10 +17200,10 @@ index 96c1c2f4..b75a46e3 100644
        case LookupIterator::ACCESSOR:
        case LookupIterator::MODULE_NAMESPACE:
 diff --git a/src/runtime/runtime.h b/src/runtime/runtime.h
-index 8be2dd32..1015b868 100644
+index 8be2dd32..4fb063e6 100644
 --- a/src/runtime/runtime.h
 +++ b/src/runtime/runtime.h
-@@ -395,6 +395,18 @@ constexpr bool CanTriggerGC(T... properties) {
+@@ -395,6 +395,19 @@ constexpr bool CanTriggerGC(T... properties) {
    F(HasOwnConstDataProperty, 2, 1)                                     \
    F(ObjectIsExtensible, 1, 1)                                          \
    F(ObjectKeys, 1, 1)                                                  \
@@ -16742,6 +17219,7 @@ index 8be2dd32..1015b868 100644
 +  F(RegionReusedPageCount, 0, 1)                                       \
 +  F(RegionMarkedCount, 0, 1)                                           \
 +  F(RegionPageCount, 1, 1)                                             \
++  F(RegionAwaitAbortError, 0, 1)                                       \
    F(ObjectValues, 1, 1)                                                \
    F(ObjectValuesSkipFastPath, 1, 1)                                    \
    F(OptimizeObjectForAddingMultipleProperties, 2, 1)                   \

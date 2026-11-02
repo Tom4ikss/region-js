@@ -68,7 +68,8 @@ spawn.poolSize = 4;
   print('lock after:', r.value.n);
 }
 
-// A task that holds a guard and is aborted gives the lock back.
+// A task that holds a write guard and is aborted gives the lock back
+// poisoned: its value may be half updated.
 {
   const lock = new RwLock({ n: 0 });
   const never = new Channel();
@@ -80,6 +81,8 @@ spawn.poolSize = 4;
   busy(30);
   task.abort();
   print('aborted while holding:', await outcome(task));
+  print('poisoned:', lock.poisoned);
+  lock.clearPoison();
   using r = await lock.read();
   print('lock released:', r.value.n);
 }
