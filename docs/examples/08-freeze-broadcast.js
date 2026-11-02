@@ -8,7 +8,7 @@ print('frozen:', region.frozen);
 try {
   config.retries = 5;
 } catch (e) {
-  print('владелец пишет:', e.message);
+  print('владелец пишет:', String(e));
 }
 
 const workers = [0, 1, 2].map(
@@ -17,7 +17,7 @@ const workers = [0, 1, 2].map(
       `
       onmessage = ({ data: { config } }) => {
         let unborrowed;
-        try { unborrowed = config.api; } catch (e) { unborrowed = e.message; }
+        try { unborrowed = config.api; } catch (e) { unborrowed = String(e); }
         let reply;
         {
           // Читать замороженный регион можно только под билетом.

@@ -6,7 +6,7 @@ await ch.send(order);
 try {
   print(order.status);
 } catch (e) {
-  print('отправитель после send:', e.message);
+  print('отправитель после send:', String(e));
 }
 
 // Регион лежит в канале, пока его не заберут.

@@ -74,7 +74,8 @@ def run_examples(run):
             flags, expected_exit = example_options(path)
             proc = subprocess.run([D8] + D8_FLAGS + flags + [path], capture_output=True,
                                   text=True, timeout=60)
-            text = (proc.stdout + proc.stderr)
+            # Stack traces name the file by its absolute path.
+            text = (proc.stdout + proc.stderr).replace(EXAMPLES + os.sep, '')
             lines = [l for l in text.splitlines() if l.strip() != WARNING]
             text = '\n'.join(lines).rstrip() + '\n'
             if proc.returncode != expected_exit:

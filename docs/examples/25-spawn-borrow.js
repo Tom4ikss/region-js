@@ -14,7 +14,7 @@ await spawn(() => {
     try {
       print('задача читает позже:', prices.apple);
     } catch (e) {
-      print('задача читает позже:', e.message);
+      print('задача читает позже:', String(e));
     }
     ticket.release();
   };

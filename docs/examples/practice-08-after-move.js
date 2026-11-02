@@ -10,7 +10,7 @@ const task = spawn(() => {
 try {
   print('сразу после spawn:', cart.total);
 } catch (e) {
-  print('сразу после spawn:', e.message);
+  print('сразу после spawn:', String(e));
 }
 
 // Хорошо: дождаться задачи. Регион вернулся, объект тот же.
@@ -31,7 +31,7 @@ try {
   try {
     cart.total = 0;
   } catch (e) {
-    print('запись после postMessage:', e.message);
+    print('запись после postMessage:', String(e));
   }
   const back = worker.getMessage().cart;
   print('вернулся тот же объект:', back === cart, '| total =', cart.total);

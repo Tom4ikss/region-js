@@ -19,19 +19,19 @@ worker.postMessage({ order }, [region]); // регион в transfer list = пе
 try {
   print(order.status);
 } catch (e) {
-  print('главный поток:', e.message);
+  print('главный поток:', String(e));
 }
 print(worker.getMessage());
 
 try {
   order.status = 'cancelled';
 } catch (e) {
-  print('главный поток пишет:', e.message);
+  print('главный поток пишет:', String(e));
 }
 try {
   Object.keys(order); // перечисление ключей и JSON.stringify проверяют владельца так же
 } catch (e) {
-  print('главный поток, Object.keys:', e.message);
+  print('главный поток, Object.keys:', String(e));
 }
 print('владелец региона теперь isolate', region.owner);
 worker.terminate();

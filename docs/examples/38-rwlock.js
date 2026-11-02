@@ -18,12 +18,12 @@ let kept;
   try {
     r.value.hits = 0;
   } catch (e) {
-    print('запись под read():', e.message);
+    print('запись под read():', String(e));
   }
 }
 // Лок отпущен: сохранённая ссылка больше не работает.
 try {
   print(kept.hits);
 } catch (e) {
-  print('после отпуска:', e.message);
+  print('после отпуска:', String(e));
 }

@@ -15,7 +15,7 @@ print('view после free:', samples.length);
 try {
   print(tree.name);
 } catch (e) {
-  print('обращение после free:', e.message);
+  print('обращение после free:', String(e));
 }
 
 // using освобождает регион в конце блока.
@@ -27,6 +27,6 @@ let leaked;
 try {
   leaked.draft;
 } catch (e) {
-  print('после блока using:', e.message);
+  print('после блока using:', String(e));
 }
 print('живых регионов:', Region.stats().regions, '| освобождённых:', Region.stats().freed);

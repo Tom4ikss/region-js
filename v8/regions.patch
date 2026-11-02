@@ -1306,7 +1306,7 @@ index f3ec683b..af3517ea 100644
        UNREACHABLE();
    }
 diff --git a/src/common/message-template.h b/src/common/message-template.h
-index ce7c8efa..7a7df92c 100644
+index ce7c8efa..309213f6 100644
 --- a/src/common/message-template.h
 +++ b/src/common/message-template.h
 @@ -739,6 +739,36 @@ namespace internal {
@@ -1314,31 +1314,31 @@ index ce7c8efa..7a7df92c 100644
    T(WasmExceptionError, "wasm exception")                                      \
    T(WasmObjectsAreOpaque, "WebAssembly objects are opaque")                    \
 +  T(RegionNotOwner,                                                            \
-+    "OwnershipError: region % is owned by isolate %, not by isolate %")       \
++    "region % belongs to another thread (isolate %, this is isolate %)")       \
 +  T(RegionInTransit,                                                           \
-+    "OwnershipError: region % is being moved between isolates")              \
++    "region % was sent to another thread and has not been received yet")       \
 +  T(RegionFrozen,                                                              \
-+    "OwnershipError: region % is frozen; thaw it before writing")            \
-+  T(RegionFreed, "OwnershipError: region % was freed")                         \
-+  T(RegionSealed, "OwnershipError: region % is sealed and cannot change")      \
++    "region % is frozen; thaw it before writing")                              \
++  T(RegionFreed, "region % was freed")                                         \
++  T(RegionSealed, "region % is sealed and cannot change")                      \
 +  T(RegionLocked,                                                              \
-+    "OwnershipError: region % is in an RwLock; use it through lock.read() or " \
++    "region % is in an RwLock; use it through lock.read() or "                 \
 +    "lock.write()")                                                            \
 +  T(RegionReadLocked,                                                          \
-+    "OwnershipError: region % is locked for reading; use lock.write() to "     \
++    "region % is locked for reading; use lock.write() to "                     \
 +    "change it")                                                               \
 +  T(RegionLiteralNoRegion,                                                     \
-+    "#{} and #[] need a current region: use region.enter() or region.run()")  \
++    "#{} and #[] need a current region: use region.enter() or region.run()")   \
 +  T(RegionLiteralUnsupported,                                                  \
 +    "In 'use region' code {} and [] are #{} and #[], which allow no spread, "  \
-+    "holes, methods, accessors, __proto__, computed or numeric keys")         \
++    "holes, methods, accessors, __proto__, computed or numeric keys")          \
 +  T(RegionLiteralPlainValue,                                                   \
 +    "#{} and #[] hold primitives and objects of their region; write nested "   \
 +    "objects as #{} and arrays as #[]")                                        \
 +  T(RegionBorrowRequired,                                                      \
-+    "OwnershipError: region % is frozen; borrow it to read it")                \
++    "region % is frozen; borrow it to read it")                                \
 +  T(RegionCrossReference,                                                      \
-+    "OwnershipError: a region object cannot reference objects outside its "    \
++    "a region object cannot reference objects outside its "                    \
 +    "region; copy them in with Region.object() or Region.array()")             \
 +  T(RegionCannotMove, "% cannot be moved into a region")                       \
 +  T(RegionNotExtensible,                                                       \
@@ -2798,10 +2798,10 @@ index 8aab5f56..0bc22f26 100644
        CheckValueInputIs(node, 1, Type::Any());
 diff --git a/src/d8/d8-channel.cc b/src/d8/d8-channel.cc
 new file mode 100644
-index 00000000..681794d5
+index 00000000..d9f775e0
 --- /dev/null
 +++ b/src/d8/d8-channel.cc
-@@ -0,0 +1,1659 @@
+@@ -0,0 +1,1656 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -3102,12 +3102,7 @@ index 00000000..681794d5
 +}
 +
 +Local<Value> AbortError(Isolate* isolate, const AbortReason& reason) {
-+  Local<Value> error = Exception::Error(
-+      String::NewFromUtf8(isolate, reason.message.c_str()).ToLocalChecked());
-+  USE(error.As<Object>()->Set(
-+      isolate->GetCurrentContext(), String::NewFromUtf8Literal(isolate, "name"),
-+      String::NewFromUtf8(isolate, reason.name.c_str()).ToLocalChecked()));
-+  return error;
++  return NewTaskError(isolate, reason.name.c_str(), reason.message);
 +}
 +
 +// The spawn() task the running code belongs to: pool workers set it as
@@ -3926,7 +3921,7 @@ index 00000000..681794d5
 +  }
 +  int region = i::Cast<i::JSRegionObject>(*root)->region_id();
 +  if (i::RegionRegistry::IsLocked(region)) {
-+    ThrowTypeError(isolate, "the region is already in an RwLock");
++    ThrowRegionError(isolate, region, "the region is already in an RwLock");
 +    return;
 +  }
 +  if (!i::RegionRegistry::IsOwner(region, i_isolate)) {
@@ -3940,6 +3935,8 @@ index 00000000..681794d5
 +      region, i::RegionRegistry::Generation(region));
 +  if (!created) i::RegionRegistry::AddHandle(region);
 +  i::RegionRegistry::SetLocked(region, true);
++  i::RegionRegistry::Remember(region, i::RegionRegistry::Event::kLocked,
++                              RegionEventText(isolate, "put in an RwLock"));
 +  state->lock->root = std::make_unique<i::SharedObjectConveyorHandles>(i_isolate);
 +  state->lock->root->Persist(i::Cast<i::HeapObject>(*root));
 +  // The region now belongs to the lock: this thread uses it through guards.
@@ -4541,10 +4538,10 @@ index 00000000..9446d334
 +#endif  // V8_D8_D8_CHANNEL_H_
 diff --git a/src/d8/d8-port.cc b/src/d8/d8-port.cc
 new file mode 100644
-index 00000000..70596750
+index 00000000..093daf4e
 --- /dev/null
 +++ b/src/d8/d8-port.cc
-@@ -0,0 +1,1129 @@
+@@ -0,0 +1,1133 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -4790,18 +4787,19 @@ index 00000000..70596750
 +      return false;
 +    }
 +    if (i::RegionRegistry::IsLocked(region)) {
-+      ThrowTypeError(isolate, "Region is in an RwLock and cannot be moved");
++      ThrowRegionError(isolate, region,
++                       "Region is in an RwLock and cannot be moved");
 +      return false;
 +    }
 +    if (i::RegionRegistry::IsSealed(region)) {
-+      ThrowTypeError(isolate,
-+                     "Region is sealed: its objects are shared, send them "
-+                     "without a transfer list");
++      ThrowRegionError(isolate, region,
++                       "Region is sealed: its objects are shared, send them "
++                       "without a transfer list");
 +      return false;
 +    }
 +    if (!i::RegionRegistry::IsOwner(region, i_isolate) &&
 +        !i::RegionRegistry::IsFrozenBy(region, i_isolate)) {
-+      ThrowTypeError(isolate,
++      ThrowRegionError(isolate, region,
 +                     i::RegionRegistry::IsFreed(region) ? "Region was freed"
 +                     : i::RegionRegistry::IsFrozen(region)
 +                         ? "Region was frozen by another isolate"
@@ -4812,7 +4810,10 @@ index 00000000..70596750
 +      regions.push_back(region);
 +    }
 +  }
++  std::string sent =
++      regions.empty() ? std::string() : RegionEventText(isolate, "sent");
 +  for (int region : regions) {
++    i::RegionRegistry::Remember(region, i::RegionRegistry::Event::kMoved, sent);
 +    i::RegionRegistry::AddHandle(region);
 +    bool frozen = i::RegionRegistry::IsFrozen(region);
 +    if (frozen) {
@@ -4878,7 +4879,7 @@ index 00000000..70596750
 +                                             i_isolate)
 +            : i::RegionRegistry::Claim(moved.id, moved.generation, i_isolate);
 +    if (!claimed) {
-+      ThrowTypeError(isolate, "Region is not in transit");
++      ThrowRegionError(isolate, moved.id, "Region is not in transit");
 +      return {};
 +    }
 +    moved.claimed = true;
@@ -5771,7 +5772,7 @@ index 00000000..bd767012
 +
 +#endif  // V8_D8_D8_PORT_H_
 diff --git a/src/d8/d8.cc b/src/d8/d8.cc
-index 49121fe1..36dd2d17 100644
+index 49121fe1..9e4db773 100644
 --- a/src/d8/d8.cc
 +++ b/src/d8/d8.cc
 @@ -14,6 +14,7 @@
@@ -5792,7 +5793,15 @@ index 49121fe1..36dd2d17 100644
  #include "src/d8/d8-console.h"
  #include "src/d8/d8-platforms.h"
  #include "src/d8/d8.h"
-@@ -72,10 +76,12 @@
+@@ -65,6 +69,7 @@
+ #include "src/deoptimizer/deoptimizer.h"
+ #include "src/diagnostics/basic-block-profiler.h"
+ #include "src/execution/execution.h"
++#include "src/execution/frames-inl.h"
+ #include "src/execution/microtask-queue.h"
+ #include "src/execution/v8threads.h"
+ #include "src/execution/vm-state-inl.h"
+@@ -72,10 +77,12 @@
  #include "src/handles/maybe-handles.h"
  #include "src/heap/parked-scope-inl.h"
  #include "src/init/v8.h"
@@ -5805,7 +5814,7 @@ index 49121fe1..36dd2d17 100644
  #include "src/objects/managed-inl.h"
  #include "src/objects/objects-inl.h"
  #include "src/objects/objects.h"
-@@ -2298,14 +2304,16 @@ bool Shell::ExecuteModule(Isolate* isolate, const char* file_name) {
+@@ -2298,14 +2305,16 @@ bool Shell::ExecuteModule(Isolate* isolate, const char* file_name) {
      return false;
    }
  
@@ -5826,7 +5835,7 @@ index 49121fe1..36dd2d17 100644
      Shell::CompleteMessageLoop(isolate);
    }
  
-@@ -2400,7 +2408,51 @@ PerIsolateData::PerIsolateData(Isolate* isolate) : isolate_(isolate) {
+@@ -2400,7 +2409,51 @@ PerIsolateData::PerIsolateData(Isolate* isolate) : isolate_(isolate) {
    ignore_unhandled_promises_ = false;
  }
  
@@ -5878,7 +5887,7 @@ index 49121fe1..36dd2d17 100644
    isolate_->SetData(0, nullptr);  // Not really needed, just to be sure...
    if (i::v8_flags.expose_async_hooks) {
      delete async_hooks_wrapper_;  // This uses the isolate
-@@ -2483,10 +2535,37 @@ void PerIsolateData::SetDomNodeCtor(Local<FunctionTemplate> ctor) {
+@@ -2483,10 +2536,37 @@ void PerIsolateData::SetDomNodeCtor(Local<FunctionTemplate> ctor) {
    dom_node_ctor_.Reset(isolate_, ctor);
  }
  
@@ -5918,7 +5927,7 @@ index 49121fe1..36dd2d17 100644
  }
  
  void PerIsolateData::RegisterWorker(std::shared_ptr<Worker> worker) {
-@@ -2519,6 +2598,11 @@ std::pair<Local<Context>, Local<Function>> PerIsolateData::GetWorkerOnMessage(
+@@ -2519,6 +2599,11 @@ std::pair<Local<Context>, Local<Function>> PerIsolateData::GetWorkerOnMessage(
    return {it->second.first.Get(isolate_), it->second.second.Get(isolate_)};
  }
  
@@ -5930,7 +5939,7 @@ index 49121fe1..36dd2d17 100644
  void PerIsolateData::UnregisterWorker(const std::shared_ptr<Worker>& worker) {
    registered_workers_.erase(worker);
    worker_message_callbacks_.erase(worker);
-@@ -4209,7 +4293,12 @@ void Shell::WorkerGetMessage(const v8::FunctionCallbackInfo<v8::Value>& info) {
+@@ -4209,7 +4294,12 @@ void Shell::WorkerGetMessage(const v8::FunctionCallbackInfo<v8::Value>& info) {
      return;
    }
  
@@ -5943,7 +5952,7 @@ index 49121fe1..36dd2d17 100644
    if (data) {
      Local<Value> value;
      if (Shell::DeserializeValue(isolate, std::move(data)).ToLocal(&value)) {
-@@ -4366,11 +4455,21 @@ void Shell::WorkerOnMessageSetter(
+@@ -4366,11 +4456,21 @@ void Shell::WorkerOnMessageSetter(
    }
  
    Local<Value> callback = info[0];
@@ -5966,7 +5975,7 @@ index 49121fe1..36dd2d17 100644
  }
  
  void Shell::WorkerTerminate(const v8::FunctionCallbackInfo<v8::Value>& info) {
-@@ -4804,99 +4903,1211 @@ Local<ObjectTemplate> Shell::CreateGlobalTemplate(Isolate* isolate) {
+@@ -4804,6 +4904,14 @@ Local<ObjectTemplate> Shell::CreateGlobalTemplate(Isolate* isolate) {
    global_template->Set(isolate, "performance",
                         Shell::CreatePerformanceTemplate(isolate));
    global_template->Set(isolate, "Worker", Shell::CreateWorkerTemplate(isolate));
@@ -5981,11 +5990,14 @@ index 49121fe1..36dd2d17 100644
  
    // Prevent fuzzers from creating side effects.
    if (!i::v8_flags.fuzzing) {
-     global_template->Set(isolate, "os", Shell::CreateOSTemplate(isolate));
+@@ -4811,92 +4919,1421 @@ Local<ObjectTemplate> Shell::CreateGlobalTemplate(Isolate* isolate) {
    }
--  global_template->Set(isolate, "d8", Shell::CreateD8Template(isolate));
-+  global_template->Set(isolate, "d8", Shell::CreateD8Template(isolate));
-+
+   global_template->Set(isolate, "d8", Shell::CreateD8Template(isolate));
+ 
+-  if (i::v8_flags.expose_async_hooks) {
+-    global_template->Set(isolate, "async_hooks",
+-                         Shell::CreateAsyncHookTemplate(isolate));
+-  }
 +  if (i::v8_flags.expose_async_hooks) {
 +    global_template->Set(isolate, "async_hooks",
 +                         Shell::CreateAsyncHookTemplate(isolate));
@@ -6186,6 +6198,168 @@ index 49121fe1..36dd2d17 100644
 +  return region_template;
 +}
 +
++void ThrowRegionError(Isolate* isolate, int region, std::string_view message,
++                      const char* reason) {
++  if (isolate->IsExecutionTerminating()) return;
++  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
++  if (reason == nullptr) {
++    reason = i::RegionRegistry::IsFreed(region)       ? "freed"
++             : i::RegionRegistry::IsLocked(region)    ? "locked"
++             : i::RegionRegistry::IsInTransit(region) ? "in-transit"
++             : i::RegionRegistry::IsSealed(region)    ? "sealed"
++             : i::RegionRegistry::IsFrozen(region)    ? "frozen"
++             : !i::RegionRegistry::IsOwner(region, i_isolate) ? "not-owner"
++                                                             : "not-frozen";
++  }
++  std::string text(message.substr(0, String::kMaxLength));
++  i_isolate->Throw(*i::RegionRegistry::NewOwnershipError(i_isolate, region,
++                                                         reason, text.c_str()));
++}
++
++Local<Value> NewTaskError(Isolate* isolate, const char* name,
++                          std::string_view message) {
++  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
++  std::string text(message.substr(0, String::kMaxLength));
++  return Utils::ToLocal(i::Cast<i::Object>(
++      i::RegionRegistry::NewTaskError(i_isolate, name, text.c_str())));
++}
++
++namespace {
++
++// Where the running script is: "at main.js:12:5", or "by isolate 2" for code
++// without a script, as in tasks whose code comes from several scripts. This runs on every transfer, so what a frame says is
++// cached by its code and offset until the next GC, which may move code.
++class ScriptLocations {
++ public:
++  static void Append(i::Isolate* isolate, std::string* text) {
++    thread_local ScriptLocations* cache = nullptr;
++    // Ids are not reused, unlike the addresses of disposed isolates.
++    if (cache == nullptr || cache->isolate_id_ != isolate->id()) {
++      delete cache;
++      cache = new ScriptLocations(isolate);
++    }
++    cache->AppendFor(text);
++  }
++
++ private:
++  struct Entry {
++    i::Address code = i::kNullAddress;
++    int offset = -1;
++    // " at main.js:12:5"; empty if the frame has no script, then `function`
++    // may name evaluated task code.
++    std::string location;
++    std::string function;
++  };
++
++  explicit ScriptLocations(i::Isolate* isolate)
++      : isolate_(isolate),
++        isolate_id_(isolate->id()),
++        epoch_(isolate->heap()->gc_count()) {}
++
++  void AppendFor(std::string* text) {
++    if (isolate_->heap()->gc_count() != epoch_) {
++      epoch_ = isolate_->heap()->gc_count();
++      entries_.fill({});
++    }
++    i::HandleScope scope(isolate_);
++    std::string function;
++    for (i::JavaScriptStackFrameIterator it(isolate_); !it.done();
++         it.Advance()) {
++      i::JavaScriptFrame* frame = it.frame();
++      i::Address code;
++      int offset = 0;
++      if (frame->is_unoptimized_js()) {
++        i::UnoptimizedJSFrame* unoptimized = i::UnoptimizedJSFrame::cast(frame);
++        code = unoptimized->GetBytecodeArray().ptr();
++        offset = unoptimized->GetBytecodeOffset();
++      } else {
++        code = frame->pc();
++      }
++      Entry& entry =
++          entries_[base::hash_combine(code, offset) % entries_.size()];
++      if (entry.code != code || entry.offset != offset) {
++        entry.code = code;
++        entry.offset = offset;
++        Describe(frame, &entry);
++      }
++      if (!entry.location.empty()) {
++        *text += entry.location;
++        return;
++      }
++      if (function.empty()) function = entry.function;
++    }
++    std::string thread = "isolate " + std::to_string(isolate_->id());
++    *text += function.empty() ? " by " + thread
++                              : " by " + function + "() on " + thread;
++  }
++
++  void Describe(i::JavaScriptFrame* frame, Entry* entry) {
++    entry->location.clear();
++    entry->function.clear();
++    // Unoptimized code has no inlined functions of other scripts.
++    if (frame->is_unoptimized_js()) {
++      i::Tagged<i::Object> script = frame->function()->shared()->script();
++      if (!i::IsScript(script)) return;
++      if (FileOf(i::Cast<i::Script>(script)).empty()) {
++        // Task code is evaluated, and named after its script if it all comes
++        // from one.
++        if (i::Cast<i::Script>(script)->is_eval()) {
++          entry->function = frame->function()->shared()->DebugNameCStr().get();
++          if (entry->function.starts_with("__") || entry->function == "eval") {
++            entry->function.clear();
++          }
++        }
++        return;
++      }
++    }
++    i::FrameSummaries summaries = frame->Summarize();
++    for (int k = summaries.size() - 1; k >= 0; k--) {
++      i::FrameSummary& summary = summaries.frames[k];
++      i::DirectHandle<i::Object> object = summary.script();
++      if (!i::IsScript(*object)) continue;
++      i::DirectHandle<i::Script> script = i::Cast<i::Script>(object);
++      const std::string& file = FileOf(*script);
++      if (file.empty()) continue;
++      summary.EnsureSourcePositionsAvailable();
++      i::Script::PositionInfo position;
++      i::Script::GetPositionInfo(script, summary.SourcePosition(), &position);
++      entry->location = " at " + file + ":" + std::to_string(position.line + 1) +
++                        ":" + std::to_string(position.column + 1);
++      return;
++    }
++  }
++
++  // The base name of the script; empty for the d8 prelude, which has no
++  // name, and for the pool worker, which is "unnamed".
++  const std::string& FileOf(i::Tagged<i::Script> script) {
++    auto [it, inserted] = names_.try_emplace(script->id());
++    if (inserted) {
++      i::Tagged<i::Object> name = script->GetNameOrSourceURL();
++      std::string file;
++      if (i::IsString(name)) file = i::Cast<i::String>(name)->ToCString().get();
++      if (file != "unnamed") it->second = file.substr(file.find_last_of('/') + 1);
++    }
++    return it->second;
++  }
++
++  i::Isolate* isolate_;
++  int isolate_id_;
++  i::GCEpoch epoch_;
++  std::array<Entry, 64> entries_;
++  std::unordered_map<int, std::string> names_;
++};
++
++}  // namespace
++
++std::string RegionEventText(Isolate* isolate, const char* what) {
++  std::string text;
++  if (!Shell::options.region_history) return text;
++  text.reserve(48);
++  text += what;
++  ScriptLocations::Append(reinterpret_cast<i::Isolate*>(isolate), &text);
++  return text;
++}
++
 +namespace {
 +
 +int RegionIdOf(const v8::FunctionCallbackInfo<v8::Value>& info) {
@@ -6322,6 +6496,8 @@ index 49121fe1..36dd2d17 100644
 +  i::RegionRegistry::FreeResult result =
 +      i::RegionRegistry::Free(region, i_isolate);
 +  if (result == i::RegionRegistry::FreeResult::kFreed) {
++    i::RegionRegistry::Remember(region, i::RegionRegistry::Event::kFreed,
++                                RegionEventText(isolate, "freed"));
 +    i::JSRegionObject::DetachViews(i_isolate, region);
 +    i::JSRegionObject::ReleaseBackingStores(region);
 +  }
@@ -6341,18 +6517,20 @@ index 49121fe1..36dd2d17 100644
 +      std::string message =
 +          "Region is still borrowed by " +
 +          std::to_string(i::RegionRegistry::Readers(region)) + " reader(s)";
-+      ThrowError(isolate, message.c_str());
++      ThrowRegionError(isolate, region, message, "borrowed");
 +      return;
 +    }
 +    case i::RegionRegistry::FreeResult::kLocked:
-+      ThrowError(isolate, "Region is in an RwLock and cannot be freed");
++      ThrowRegionError(isolate, region,
++                       "Region is in an RwLock and cannot be freed");
 +      return;
 +    case i::RegionRegistry::FreeResult::kSealed:
-+      ThrowError(isolate,
-+                 "Region is sealed; the GC frees it once nothing refers to it");
++      ThrowRegionError(
++          isolate, region,
++          "Region is sealed; the GC frees it once nothing refers to it");
 +      return;
 +    case i::RegionRegistry::FreeResult::kNotOwner:
-+      ThrowError(isolate,
++      ThrowRegionError(isolate, region,
 +                 i::RegionRegistry::IsFreed(region) ? "Region was already freed"
 +                 : i::RegionRegistry::IsInTransit(region)
 +                     ? "Region is being moved and cannot be freed"
@@ -6408,16 +6586,21 @@ index 49121fe1..36dd2d17 100644
 +  int region = RegionIdOf(info);
 +  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(info.GetIsolate());
 +  if (i::RegionRegistry::IsLocked(region)) {
-+    ThrowError(info.GetIsolate(),
-+               "Region is in an RwLock; readers share it through lock.read()");
++    ThrowRegionError(
++        info.GetIsolate(), region,
++        "Region is in an RwLock; readers share it through lock.read()");
 +    return;
 +  }
 +  // Writable typed array views would let the owner change frozen bytes.
 +  if (i::RegionRegistry::IsOwner(region, i_isolate)) {
 +    i::JSRegionObject::DetachViews(i_isolate, region);
 +  }
-+  if (i::RegionRegistry::Freeze(region, i_isolate)) return;
-+  ThrowError(info.GetIsolate(),
++  if (i::RegionRegistry::Freeze(region, i_isolate)) {
++    i::RegionRegistry::Remember(region, i::RegionRegistry::Event::kFrozen,
++                                RegionEventText(info.GetIsolate(), "frozen"));
++    return;
++  }
++  ThrowRegionError(info.GetIsolate(), region,
 +             i::RegionRegistry::IsFreed(region)    ? "Region was freed"
 +             : i::RegionRegistry::IsFrozen(region) ? "Region is already frozen"
 +                                                   : "Region is not owned by this isolate");
@@ -6432,7 +6615,8 @@ index 49121fe1..36dd2d17 100644
 +  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
 +  if (i::RegionRegistry::IsSealed(region)) return;
 +  if (i::RegionRegistry::IsLocked(region)) {
-+    ThrowError(isolate, "Region is in an RwLock and cannot be sealed");
++    ThrowRegionError(isolate, region,
++                     "Region is in an RwLock and cannot be sealed");
 +    return;
 +  }
 +  // As in freeze(): writable views would let the owner change sealed bytes.
@@ -6440,11 +6624,13 @@ index 49121fe1..36dd2d17 100644
 +    i::JSRegionObject::DetachViews(i_isolate, region);
 +  }
 +  if (i::RegionRegistry::Seal(region, i_isolate)) {
++    i::RegionRegistry::Remember(region, i::RegionRegistry::Event::kFrozen,
++                                RegionEventText(isolate, "sealed"));
 +    // Immutable views taken while frozen stay; they are no longer tracked.
 +    i::JSRegionObject::DetachFrozenViewsIfUnused(i_isolate, region);
 +    return;
 +  }
-+  ThrowError(isolate,
++  ThrowRegionError(isolate, region,
 +             i::RegionRegistry::IsFreed(region)    ? "Region was freed"
 +             : i::RegionRegistry::IsFrozen(region) ? "Region was frozen by another isolate"
 +                                                   : "Region is not owned by this isolate");
@@ -6457,6 +6643,8 @@ index 49121fe1..36dd2d17 100644
 +  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
 +  switch (i::RegionRegistry::Thaw(region, i_isolate)) {
 +    case i::RegionRegistry::ThawResult::kThawed:
++      i::RegionRegistry::Remember(region, i::RegionRegistry::Event::kMoved,
++                                  RegionEventText(isolate, "thawed"));
 +      // Views taken while frozen are immutable and would outlive the freeze;
 +      // reading the field again gives a writable one.
 +      i::JSRegionObject::DetachViews(i_isolate, region);
@@ -6465,11 +6653,11 @@ index 49121fe1..36dd2d17 100644
 +      std::string message =
 +          "Region is still borrowed by " +
 +          std::to_string(i::RegionRegistry::Readers(region)) + " reader(s)";
-+      ThrowError(isolate, message.c_str());
++      ThrowRegionError(isolate, region, message, "borrowed");
 +      return;
 +    }
 +    case i::RegionRegistry::ThawResult::kNotFrozenByIsolate:
-+      ThrowError(isolate, i::RegionRegistry::IsFreed(region)
++      ThrowRegionError(isolate, region, i::RegionRegistry::IsFreed(region)
 +                              ? "Region was freed"
 +                          : i::RegionRegistry::IsSealed(region)
 +                              ? "Region is sealed and cannot be thawed"
@@ -6492,7 +6680,8 @@ index 49121fe1..36dd2d17 100644
 +  }
 +  if (!i::RegionRegistry::Borrow(region,
 +                                 reinterpret_cast<i::Isolate*>(isolate))) {
-+    ThrowError(isolate, i::RegionRegistry::IsFreed(region) ? "Region was freed"
++    ThrowRegionError(isolate, region,
++                     i::RegionRegistry::IsFreed(region) ? "Region was freed"
 +                        : i::RegionRegistry::IsLocked(region)
 +                            ? "Region is in an RwLock; read it through "
 +                              "lock.read()"
@@ -6686,6 +6875,30 @@ index 49121fe1..36dd2d17 100644
 +    data->SetSpawnProbeContext(probe);
 +  }
 +  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
++  auto place_of = [i_isolate](Local<Function> function) {
++    PerIsolateData::SourcePlace place;
++    i::DirectHandle<i::Object> raw = Utils::OpenDirectHandle(*function);
++    if (!i::IsJSFunction(*raw)) return place;
++    i::Tagged<i::SharedFunctionInfo> shared =
++        i::Cast<i::JSFunction>(*raw)->shared();
++    if (!i::IsScript(shared->script())) return place;
++    i::DirectHandle<i::Script> script(i::Cast<i::Script>(shared->script()),
++                                      i_isolate);
++    i::Tagged<i::Object> name = script->GetNameOrSourceURL();
++    if (!i::IsString(name) || i::Cast<i::String>(name)->length() == 0) {
++      return place;
++    }
++    // Function.prototype.toString() starts at the function token.
++    i::Script::PositionInfo position;
++    if (!i::Script::GetPositionInfo(script, shared->function_token_position(),
++                                    &position)) {
++      return place;
++    }
++    place.file = i::Cast<i::String>(name)->ToCString().get();
++    place.line = position.line;
++    place.column = position.column;
++    return place;
++  };
 +
 +  struct Pending {
 +    std::string name;  // Empty for the callback itself.
@@ -6698,6 +6911,8 @@ index 49121fe1..36dd2d17 100644
 +  Local<Value> arguments_list;
 +  Local<String> root_source;
 +  std::vector<std::pair<std::string, Local<String>>> function_sources;
++  // The callback's place, then those of function_sources.
++  std::vector<PerIsolateData::SourcePlace> places(1);
 +  std::string error;
 +  // Identifies the code the worker compiles: the analyses of the callback and
 +  // of the functions it captures.
@@ -6710,7 +6925,7 @@ index 49121fe1..36dd2d17 100644
 +        current.name.empty() ? "spawn() callback" : "captured function " + current.name;
 +    using Analysis = PerIsolateData::SpawnAnalysis;
 +    Analysis* analysis = nullptr;
-+    Analysis uncached{-1, {}, {}, Analysis::Failure::kNotCompiled};
++    Analysis uncached{-1, {}, {}, Analysis::Failure::kNotCompiled, {}};
 +    std::optional<std::tuple<int, int, int>> key;
 +    {
 +      i::DirectHandle<i::Object> raw = Utils::OpenDirectHandle(*current.function);
@@ -6762,7 +6977,8 @@ index 49121fe1..36dd2d17 100644
 +                     !compiled             ? Analysis::Failure::kNotCompiled
 +                     : uses_dynamic_scope  ? Analysis::Failure::kDynamicScope
 +                     : uses_classes        ? Analysis::Failure::kClasses
-+                                           : Analysis::Failure::kNone};
++                                           : Analysis::Failure::kNone,
++                     place_of(current.function)};
 +      for (const std::string& name : names) {
 +        bool in_probe =
 +            probe->Global()
@@ -6856,8 +7072,10 @@ index 49121fe1..36dd2d17 100644
 +
 +    if (current.name.empty()) {
 +      root_source = source;
++      places[0] = analysis->place;
 +    } else if (error.empty()) {
 +      function_sources.emplace_back(current.name, source);
++      places.push_back(analysis->place);
 +    }
 +  }
 +
@@ -6878,6 +7096,7 @@ index 49121fe1..36dd2d17 100644
 +      entry.functions.emplace_back(name, Global<String>(isolate, source));
 +    }
 +    for (const auto& [name, value] : captures) entry.names.push_back(name);
++    entry.places = std::move(places);
 +    data->spawn_codes_.push_back(std::move(entry));
 +  }
 +  std::vector<Local<Value>> elements;
@@ -6893,7 +7112,9 @@ index 49121fe1..36dd2d17 100644
 +      Array::New(isolate, elements.data(), elements.size()));
 +}
 +
-+// Region.spawnCode(id) -> { source, functions: { name: source }, names }
++// Region.spawnCode(id) -> { source, functions: { name: source }, names,
++// places }: places are [file, line, column] or null for the callback, then
++// for the functions.
 +void Shell::RegionSpawnCode(const v8::FunctionCallbackInfo<v8::Value>& info) {
 +  DCHECK(i::ValidateCallbackInfo(info));
 +  Isolate* isolate = info.GetIsolate();
@@ -6928,6 +7149,21 @@ index 49121fe1..36dd2d17 100644
 +  result
 +      ->Set(context, String::NewFromUtf8Literal(isolate, "names"),
 +            Array::New(isolate, names.data(), names.size()))
++      .Check();
++  std::vector<Local<Value>> places;
++  for (const PerIsolateData::SourcePlace& place : code.places) {
++    if (place.line < 0) {
++      places.push_back(Null(isolate));
++      continue;
++    }
++    Local<Value> parts[] = {
++        String::NewFromUtf8(isolate, place.file.c_str()).ToLocalChecked(),
++        Integer::New(isolate, place.line), Integer::New(isolate, place.column)};
++    places.push_back(Array::New(isolate, parts, 3));
++  }
++  result
++      ->Set(context, String::NewFromUtf8Literal(isolate, "places"),
++            Array::New(isolate, places.data(), places.size()))
 +      .Check();
 +  info.GetReturnValue().Set(result);
 +}
@@ -7019,10 +7255,7 @@ index 49121fe1..36dd2d17 100644
 +  }
 +  return true;
 +}
- 
--  if (i::v8_flags.expose_async_hooks) {
--    global_template->Set(isolate, "async_hooks",
--                         Shell::CreateAsyncHookTemplate(isolate));
++
 +MaybeLocal<Array> ArgumentsArray(
 +    const v8::FunctionCallbackInfo<v8::Value>& info) {
 +  std::vector<Local<Value>> items;
@@ -7042,11 +7275,10 @@ index 49121fe1..36dd2d17 100644
 +        String::NewFromUtf8(info.GetIsolate(), message.c_str())
 +            .ToLocalChecked()));
 +    return -1;
-   }
++  }
 +  return region;
 +}
- 
--  return global_template;
++
 +}  // namespace
 +
 +// region.object(value): a plain object copied into this region.
@@ -7054,18 +7286,8 @@ index 49121fe1..36dd2d17 100644
 +  DCHECK(i::ValidateCallbackInfo(info));
 +  if (!CheckObjectArgument(info, "region.object")) return;
 +  CreateInRegion(info, RegionIdOf(info), info[0]);
- }
- 
--Local<ObjectTemplate> Shell::GetOrCreateGlobalTemplate(Isolate* isolate) {
--  // Creating the global template is fairly expensive compared to the rest of
--  // the context setup, e.g. in REPRL mode, which creates a new context for
--  // every script. None of the templates depend on the context, so all contexts
--  // of an isolate (including realms) share one global template. In particular,
--  // all d8.dom objects of an isolate are instances of the same templates (see
--  // SetDomNodeCtor), no matter in which context they were created.
--  PerIsolateData* data = PerIsolateData::Get(isolate);
--  if (data->global_template_.IsEmpty()) {
--    data->global_template_.Reset(isolate, CreateGlobalTemplate(isolate));
++}
++
 +// region.array(...items): an array of the items in this region.
 +void Shell::RegionNewArray(const v8::FunctionCallbackInfo<v8::Value>& info) {
 +  DCHECK(i::ValidateCallbackInfo(info));
@@ -7083,7 +7305,8 @@ index 49121fe1..36dd2d17 100644
 +  int region = CurrentRegion(info, "object");
 +  if (region >= 0) CreateInRegion(info, region, info[0]);
 +}
-+
+ 
+-  return global_template;
 +void Shell::RegionCurrentArray(
 +    const v8::FunctionCallbackInfo<v8::Value>& info) {
 +  DCHECK(i::ValidateCallbackInfo(info));
@@ -7092,8 +7315,18 @@ index 49121fe1..36dd2d17 100644
 +  Local<Array> items;
 +  if (!ArgumentsArray(info).ToLocal(&items)) return;
 +  CreateInRegion(info, region, items);
-+}
-+
+ }
+ 
+-Local<ObjectTemplate> Shell::GetOrCreateGlobalTemplate(Isolate* isolate) {
+-  // Creating the global template is fairly expensive compared to the rest of
+-  // the context setup, e.g. in REPRL mode, which creates a new context for
+-  // every script. None of the templates depend on the context, so all contexts
+-  // of an isolate (including realms) share one global template. In particular,
+-  // all d8.dom objects of an isolate are instances of the same templates (see
+-  // SetDomNodeCtor), no matter in which context they were created.
+-  PerIsolateData* data = PerIsolateData::Get(isolate);
+-  if (data->global_template_.IsEmpty()) {
+-    data->global_template_.Reset(isolate, CreateGlobalTemplate(isolate));
 +namespace {
 +
 +// A typed array whose bytes belong to `region` from the start.
@@ -7129,14 +7362,14 @@ index 49121fe1..36dd2d17 100644
 +// region.typedArray(Float64Array, length) and Region.typedArray(...) for the
 +// current region.
 +void Shell::RegionNewTypedArray(
-+    const v8::FunctionCallbackInfo<v8::Value>& info) {
-+  DCHECK(i::ValidateCallbackInfo(info));
+     const v8::FunctionCallbackInfo<v8::Value>& info) {
+   DCHECK(i::ValidateCallbackInfo(info));
 +  CreateTypedArrayInRegion(info, RegionIdOf(info), "region.typedArray");
 +}
 +
 +void Shell::RegionCurrentTypedArray(
-     const v8::FunctionCallbackInfo<v8::Value>& info) {
-   DCHECK(i::ValidateCallbackInfo(info));
++    const v8::FunctionCallbackInfo<v8::Value>& info) {
++  DCHECK(i::ValidateCallbackInfo(info));
 +  int region = CurrentRegion(info, "typedArray");
 +  if (region >= 0) CreateTypedArrayInRegion(info, region, "Region.typedArray");
 +}
@@ -7151,9 +7384,10 @@ index 49121fe1..36dd2d17 100644
 +  int region = RegionIdOf(info);
 +  if (!i::RegionRegistry::IsOwner(region,
 +                                  reinterpret_cast<i::Isolate*>(isolate))) {
-+    ThrowError(isolate, i::RegionRegistry::IsFreed(region)
-+                            ? "Region was freed"
-+                            : "Region is not owned by this isolate");
++    ThrowRegionError(isolate, region,
++                     i::RegionRegistry::IsFreed(region)
++                         ? "Region was freed"
++                         : "Region is not owned by this isolate");
      return;
    }
 -  SafeUtf8Value directory(isolate, info[0]);
@@ -7249,7 +7483,7 @@ index 49121fe1..36dd2d17 100644
  }
  
  Local<ObjectTemplate> Shell::CreateAsyncHookTemplate(Isolate* isolate) {
-@@ -5376,9 +6587,801 @@ MaybeLocal<Context> Shell::CreateEvaluationContext(Isolate* isolate) {
+@@ -5376,9 +6813,873 @@ MaybeLocal<Context> Shell::CreateEvaluationContext(Isolate* isolate) {
    }
  #endif  // V8_ENABLE_HARDWARE_WATCHPOINT_SUPPORT
  
@@ -7304,8 +7538,23 @@ index 49121fe1..36dd2d17 100644
 +    return token;
 +  };
 +}
++// The frames of the error in the task's own code, without the frames of
++// the pool and of task code that has no script.
++const __frames = (e) => {
++  let stack;
++  try { stack = e?.stack; } catch { return ''; }
++  if (typeof stack !== 'string') return '';
++  return stack.split('\\n')
++      .filter((line) => line.startsWith('    at ') &&
++          !/\\((?:unnamed|<anonymous>):|^ {4}at (?:unnamed|<anonymous>):|eval at /
++              .test(line))
++      // An arrow function in task code is named after the eval.
++      .map((line) => line.replace(/^ {4}at eval \\((.*)\\)$/, '    at $1'))
++      .join('\\n');
++};
 +const __failure = (id, e) =>
-+    [id, undefined, e?.name ?? 'Error', String(e?.message ?? e)];
++    [id, undefined, e?.name ?? 'Error', String(e?.message ?? e), __frames(e),
++     e?.region, e?.reason];
 +
 +// Like std::thread::scope: a task gets the regions it was given for its
 +// whole run. Moved regions go back with its reply, frozen ones are borrowed
@@ -7401,11 +7650,14 @@ index 49121fe1..36dd2d17 100644
 +};
 +
 +// Whether the running task was aborted, for code that does not wait on
-+// channels or locks, whose waits fail by themselves.
-+spawn.aborted = () => {
-+  const id = Region.__task();
-+  return id !== undefined && __port.aborted(id) !== undefined;
-+};
++// channels or locks, whose waits fail by themselves. A worker that starts
++// while d8 exits has no spawn() and gets no tasks.
++if (typeof spawn === 'function') {
++  spawn.aborted = () => {
++    const id = Region.__task();
++    return id !== undefined && __port.aborted(id) !== undefined;
++  };
++}
 +
 +// Tasks come through a task port, handed over by the first message; the
 +// no-op handler then keeps the worker running.
@@ -7506,6 +7758,14 @@ index 49121fe1..36dd2d17 100644
 +      task.error = isError ? new ErrorType(reply[3]) : new Error(reply[3]);
 +      // AbortError, TimeoutError and classes the caller does not have.
 +      if (!isError && reply[2]) task.error.name = reply[2];
++      if (reply[5] !== undefined) {
++        Object.defineProperty(task.error, 'region', { value: reply[5],
++            writable: true, configurable: true });
++        Object.defineProperty(task.error, 'reason', { value: reply[6],
++            writable: true, configurable: true });
++      }
++      // Where the task failed, instead of where its reply arrived.
++      task.error.stack = String(task.error) + (reply[4] ? '\n' + reply[4] : '');
 +    }
 +    if (task.resolve) {
 +      if (task.ok) task.resolve(task.value);
@@ -7740,18 +8000,64 @@ index 49121fe1..36dd2d17 100644
 +  // The task factory: captured variables, captured functions, and a function
 +  // that creates the callback, so that an arrow callback gets its captured
 +  // this and arguments.
-+  const factorySource = (code, names) => {
-+    const lines = ['(function (__values) {'];
-+    names.forEach((name, i) => {
-+      lines.push('let ' + name + ' = __values[' + (i + 2) + '];');
++  //
++  // If all of the code that comes from a named script comes from one, each
++  // of its functions starts on its line in the script and the factory is
++  // named after it: stack traces in the task point into the script. Functions
++  // without a script, as from eval, go last.
++  const factorySource = (code, names, placed = true) => {
++    const pieces = [{
++      head: 'function __makeSpawned() { return (', source: code.source,
++      tail: '); }', place: code.places[0],
++    }];
++    Object.entries(code.functions).forEach(([name, source], i) => {
++      pieces.push({
++        head: 'const ' + name + ' = (', source, tail: ');',
++        place: code.places[i + 1],
++      });
 +    });
-+    for (const [name, source] of Object.entries(code.functions)) {
-+      lines.push('const ' + name + ' = (' + source + '\n);');
++    const file = pieces.find((piece) => piece.place)?.place[0];
++    placed &&= file !== undefined &&
++        pieces.every((piece) => !piece.place || piece.place[0] === file);
++    if (placed) {
++      pieces.sort((a, b) => !a.place || !b.place ? !a.place - !b.place
++          : a.place[1] - b.place[1] || a.place[2] - b.place[2]);
 +    }
-+    lines.push('return function __makeSpawned() { return (' + code.source +
-+               '\n); };');
-+    lines.push('})');
-+    return lines.join('\n');
++    let text = '(function (__values) {';
++    names.forEach((name, i) => {
++      text += ' let ' + name + ' = __values[' + (i + 2) + '];';
++    });
++    let line = 0;
++    let column = text.length;
++    for (const piece of pieces) {
++      if (placed && piece.place) {
++        const [, wantLine, wantColumn] = piece.place;
++        // A function nested in another one cannot keep its place.
++        if (wantLine < line) return factorySource(code, names, false);
++        if (wantLine > line) {
++          text += '\n'.repeat(wantLine - line);
++          line = wantLine;
++          column = 0;
++        }
++        const pad = wantColumn - column - piece.head.length;
++        if (pad > 0) {
++          text += ' '.repeat(pad);
++          column += pad;
++        }
++      } else {
++        text += '\n';
++        line++;
++        column = 0;
++      }
++      const added = piece.head + piece.source + piece.tail;
++      text += added;
++      const breaks = added.split('\n');
++      line += breaks.length - 1;
++      column = breaks.length > 1 ? breaks.at(-1).length : column + added.length;
++    }
++    text += '\nreturn __makeSpawned;\n})';
++    if (placed) text += '\n//# sourceURL=' + file;
++    return text;
 +  };
 +
 +  // Finds which value cannot be copied, for a clearer error.
@@ -8051,7 +8357,7 @@ index 49121fe1..36dd2d17 100644
  namespace {
  int LineFromOffset(Local<debug::Script> script, int offset) {
    debug::Location location = script->GetSourceLocation(offset);
-@@ -6538,6 +8541,7 @@ void SourceGroup::JoinThread(const i::ParkedScope& parked) {
+@@ -6538,6 +8839,7 @@ void SourceGroup::JoinThread(const i::ParkedScope& parked) {
  void SerializationDataQueue::Enqueue(std::unique_ptr<SerializationData> data) {
    base::MutexGuard lock_guard(&mutex_);
    data_.push_back(std::move(data));
@@ -8059,7 +8365,7 @@ index 49121fe1..36dd2d17 100644
  }
  
  bool SerializationDataQueue::Dequeue(
-@@ -6547,6 +8551,7 @@ bool SerializationDataQueue::Dequeue(
+@@ -6547,6 +8849,7 @@ bool SerializationDataQueue::Dequeue(
    if (data_.empty()) return false;
    *out_data = std::move(data_[0]);
    data_.erase(data_.begin());
@@ -8067,7 +8373,7 @@ index 49121fe1..36dd2d17 100644
    return true;
  }
  
-@@ -6558,6 +8563,7 @@ bool SerializationDataQueue::IsEmpty() {
+@@ -6558,6 +8861,7 @@ bool SerializationDataQueue::IsEmpty() {
  void SerializationDataQueue::Clear() {
    base::MutexGuard lock_guard(&mutex_);
    data_.clear();
@@ -8075,7 +8381,7 @@ index 49121fe1..36dd2d17 100644
  }
  
  Worker::Worker(Isolate* parent_isolate, const char* script)
-@@ -6668,6 +8674,12 @@ std::unique_ptr<SerializationData> Worker::GetMessage(Isolate* requester) {
+@@ -6668,6 +8972,12 @@ std::unique_ptr<SerializationData> Worker::GetMessage(Isolate* requester) {
        out_queue_.Dequeue(&result);
        break;
      }
@@ -8088,7 +8394,7 @@ index 49121fe1..36dd2d17 100644
      out_semaphore_.ParkedWait(
          reinterpret_cast<i::Isolate*>(requester)->main_thread_local_isolate());
    }
-@@ -6705,6 +8717,8 @@ void Worker::Terminate() {
+@@ -6705,6 +9015,8 @@ void Worker::Terminate() {
    // returning to the event queue. Since we checked the state before, and we are
    // holding the {worker_mutex_}, it's safe to access the isolate.
    isolate_->TerminateExecution();
@@ -8097,7 +8403,7 @@ index 49121fe1..36dd2d17 100644
  }
  
  void Worker::EnterTerminatedState() {
-@@ -6791,6 +8805,7 @@ Worker* Worker::GetCurrentWorker() { return current_worker_; }
+@@ -6791,6 +9103,7 @@ Worker* Worker::GetCurrentWorker() { return current_worker_; }
  void Worker::ExecuteInThread() {
    Isolate::CreateParams create_params = GetDefaultIsolateCreateParams();
    isolate_ = Isolate::New(create_params);
@@ -8105,7 +8411,7 @@ index 49121fe1..36dd2d17 100644
  
    // TODO(mdanylo): can we omit dump disable here?
  #ifdef V8_DUMPLING
-@@ -6926,6 +8941,7 @@ void Worker::ExecuteInThread() {
+@@ -6926,6 +9239,7 @@ void Worker::ExecuteInThread() {
      platform::NotifyIsolateShutdown(g_default_platform, isolate_);
    }
  
@@ -8113,7 +8419,16 @@ index 49121fe1..36dd2d17 100644
    isolate_->Dispose();
    isolate_ = nullptr;
  
-@@ -7310,6 +9326,9 @@ bool Shell::SetOptions(int argc, char* argv[]) {
+@@ -7190,6 +9504,8 @@ bool Shell::SetOptions(int argc, char* argv[]) {
+       options.expected_to_throw = true;
+     } else if (FlagMatches("--no-fail", &argv[i])) {
+       options.no_fail = true;
++    } else if (FlagMatches("--no-region-history", &argv[i])) {
++      options.region_history = false;
+     } else if (FlagMatches("--dump-counters", &argv[i])) {
+       options.dump_counters = true;
+     } else if (FlagMatches("--dump-counters-nvp", &argv[i])) {
+@@ -7310,6 +9626,9 @@ bool Shell::SetOptions(int argc, char* argv[]) {
                                    argv, &i)) {
        // Value is expressed in MB.
        options.max_serializer_memory = atoi(flag_value) * i::MB;
@@ -8123,7 +8438,7 @@ index 49121fe1..36dd2d17 100644
      } else if (FlagMatches("--bundle", &argv[i])) {
        options.bundle = true;
  #ifdef V8_FUZZILLI
-@@ -7921,6 +9940,27 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7921,6 +10240,27 @@ class Serializer : public ValueSerializer::Delegate {
      return true;
    }
  
@@ -8151,7 +8466,7 @@ index 49121fe1..36dd2d17 100644
   private:
    Maybe<bool> PrepareTransfer(Local<Context> context, Local<Value> transfer) {
      if (transfer->IsArray()) {
-@@ -7929,6 +9969,22 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7929,6 +10269,22 @@ class Serializer : public ValueSerializer::Delegate {
        for (uint32_t i = 0; i < length; ++i) {
          Local<Value> element;
          if (transfer_array->Get(context, i).ToLocal(&element)) {
@@ -8174,7 +8489,7 @@ index 49121fe1..36dd2d17 100644
            if (!element->IsArrayBuffer()) {
              ThrowError(isolate_,
                         "Transfer array elements must be an ArrayBuffer");
-@@ -7961,7 +10017,58 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7961,7 +10317,64 @@ class Serializer : public ValueSerializer::Delegate {
      }
    }
  
@@ -8187,18 +8502,20 @@ index 49121fe1..36dd2d17 100644
 +  bool PrepareRegionTransfer(int region) {
 +    i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate_);
 +    if (i::RegionRegistry::IsLocked(region)) {
-+      ThrowError(isolate_, "Region is in an RwLock and cannot be moved");
++      ThrowRegionError(isolate_, region,
++                       "Region is in an RwLock and cannot be moved");
 +      return false;
 +    }
 +    if (i::RegionRegistry::IsSealed(region)) {
-+      ThrowError(isolate_,
-+                 "Region is sealed: its objects are shared, send them without "
-+                 "a transfer list");
++      ThrowRegionError(
++          isolate_, region,
++          "Region is sealed: its objects are shared, send them without "
++          "a transfer list");
 +      return false;
 +    }
 +    if (!i::RegionRegistry::IsOwner(region, i_isolate) &&
 +        !i::RegionRegistry::IsFrozenBy(region, i_isolate)) {
-+      ThrowError(isolate_,
++      ThrowRegionError(isolate_, region,
 +                 i::RegionRegistry::IsFreed(region) ? "Region was freed"
 +                 : i::RegionRegistry::IsFrozen(region)
 +                     ? "Region was frozen by another isolate"
@@ -8215,7 +8532,11 @@ index 49121fe1..36dd2d17 100644
 +
    Maybe<bool> FinalizeTransfer() {
 +    i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate_);
++    std::string sent =
++        regions_.empty() ? std::string() : RegionEventText(isolate_, "sent");
 +    for (int region : regions_) {
++      i::RegionRegistry::Remember(region, i::RegionRegistry::Event::kMoved,
++                                  sent);
 +      i::RegionRegistry::AddHandle(region);
 +      bool frozen = i::RegionRegistry::IsFrozen(region);
 +      if (frozen) {
@@ -8233,7 +8554,7 @@ index 49121fe1..36dd2d17 100644
      for (const auto& global_array_buffer : array_buffers_) {
        Local<ArrayBuffer> array_buffer =
            Local<ArrayBuffer>::New(isolate_, global_array_buffer);
-@@ -7987,6 +10094,7 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7987,6 +10400,7 @@ class Serializer : public ValueSerializer::Delegate {
    ValueSerializer serializer_;
    std::unique_ptr<SerializationData> data_;
    std::vector<Global<ArrayBuffer>> array_buffers_;
@@ -8241,7 +8562,7 @@ index 49121fe1..36dd2d17 100644
    std::vector<Global<SharedArrayBuffer>> shared_array_buffers_;
    std::vector<Global<WasmModuleObject>> wasm_modules_;
    std::vector<std::shared_ptr<v8::BackingStore>> backing_stores_;
-@@ -8013,6 +10121,21 @@ class Deserializer : public ValueDeserializer::Delegate {
+@@ -8013,6 +10427,21 @@ class Deserializer : public ValueDeserializer::Delegate {
        return MaybeLocal<Value>();
      }
  
@@ -8253,7 +8574,7 @@ index 49121fe1..36dd2d17 100644
 +                                               i_isolate)
 +              : i::RegionRegistry::Claim(moved.id, moved.generation, i_isolate);
 +      if (!claimed) {
-+        ThrowError(isolate_, "Region is not in transit");
++        ThrowRegionError(isolate_, moved.id, "Region is not in transit");
 +        return MaybeLocal<Value>();
 +      }
 +      moved.claimed = true;
@@ -8263,7 +8584,7 @@ index 49121fe1..36dd2d17 100644
      uint32_t index = 0;
      for (const auto& backing_store : data_->backing_stores()) {
        Local<ArrayBuffer> array_buffer =
-@@ -8049,6 +10172,21 @@ class Deserializer : public ValueDeserializer::Delegate {
+@@ -8049,6 +10478,21 @@ class Deserializer : public ValueDeserializer::Delegate {
      return nullptr;
    }
  
@@ -8285,7 +8606,7 @@ index 49121fe1..36dd2d17 100644
   private:
    Isolate* isolate_;
    ValueDeserializer deserializer_;
-@@ -8309,9 +10447,13 @@ int Shell::Main(int argc, char* argv[]) {
+@@ -8309,9 +10753,13 @@ int Shell::Main(int argc, char* argv[]) {
    // The platform is owned by wrapper platform despite the `std::move` below.
    START_IGNORE_LIFETIME_SAFETY_WARNINGS()
    g_default_platform = g_platform.get();
@@ -8299,7 +8620,7 @@ index 49121fe1..36dd2d17 100644
    }
    if (options.stress_delay_tasks) {
      int64_t random_seed = i::v8_flags.fuzzer_random_seed;
-@@ -8438,6 +10580,7 @@ int Shell::Main(int argc, char* argv[]) {
+@@ -8438,6 +10886,7 @@ int Shell::Main(int argc, char* argv[]) {
    }
  
    Isolate* isolate = Isolate::New(create_params);
@@ -8308,7 +8629,7 @@ index 49121fe1..36dd2d17 100644
  #ifdef V8_FUZZILLI
  
 diff --git a/src/d8/d8.h b/src/d8/d8.h
-index 0c7ad50a..4a21d437 100644
+index 0c7ad50a..909fec34 100644
 --- a/src/d8/d8.h
 +++ b/src/d8/d8.h
 @@ -8,6 +8,7 @@
@@ -8327,7 +8648,29 @@ index 0c7ad50a..4a21d437 100644
  #include "src/base/platform/wrappers.h"
  #include "src/base/unique-array.h"
  #include "src/d8/async-hooks-wrapper.h"
-@@ -208,9 +210,13 @@ class SourceGroup {
+@@ -62,6 +64,21 @@ inline Local<Value> ThrowException(Isolate* isolate, Local<Value> exception) {
+   return isolate->ThrowException(exception);
+ }
+ 
++// Throws an OwnershipError for `region`. Its `reason` is the one given, or
++// else follows from the state of the region: "freed", "locked", "in-transit",
++// "sealed", "frozen", "not-owner" or "not-frozen".
++void ThrowRegionError(Isolate* isolate, int region, std::string_view message,
++                      const char* reason = nullptr);
++
++// An AbortError, TimeoutError or DeadlockError with `message`.
++Local<Value> NewTaskError(Isolate* isolate, const char* name,
++                          std::string_view message);
++
++// `what` ("sent", "frozen", ...) and where the running script is, for
++// i::RegionRegistry::Remember(): "frozen at main.js:12:5", or "frozen by
++// isolate 2" for code without a script. Empty with --no-region-history.
++std::string RegionEventText(Isolate* isolate, const char* what);
++
+ // Converts a v8::Value to a UTF-8 string safely.
+ // Unlike v8::String::Utf8Value, this does not swallow user exceptions or
+ // terminate silently on string conversion failure.
+@@ -208,9 +225,13 @@ class SourceGroup {
    int end_offset_;
  };
  
@@ -8341,7 +8684,7 @@ index 0c7ad50a..4a21d437 100644
    SerializationData(const SerializationData&) = delete;
    SerializationData& operator=(const SerializationData&) = delete;
  
-@@ -232,6 +238,20 @@ class SerializationData {
+@@ -232,6 +253,20 @@ class SerializationData {
    const std::optional<v8::SharedValueConveyor>& shared_value_conveyor() {
      return shared_value_conveyor_;
    }
@@ -8362,7 +8705,7 @@ index 0c7ad50a..4a21d437 100644
  
   private:
    struct DataDeleter {
-@@ -246,6 +266,9 @@ class SerializationData {
+@@ -246,6 +281,9 @@ class SerializationData {
        shared_immutable_backing_stores_;
    std::vector<CompiledWasmModule> compiled_wasm_modules_;
    std::optional<v8::SharedValueConveyor> shared_value_conveyor_;
@@ -8372,7 +8715,7 @@ index 0c7ad50a..4a21d437 100644
  
   private:
    friend class Serializer;
-@@ -256,10 +279,15 @@ class SerializationDataQueue {
+@@ -256,10 +294,15 @@ class SerializationDataQueue {
    void Enqueue(std::unique_ptr<SerializationData> data);
    bool Dequeue(std::unique_ptr<SerializationData>* data);
    bool IsEmpty();
@@ -8388,7 +8731,7 @@ index 0c7ad50a..4a21d437 100644
    std::vector<std::unique_ptr<SerializationData>> data_;
  };
  
-@@ -388,6 +416,11 @@ class PerIsolateData {
+@@ -388,6 +431,11 @@ class PerIsolateData {
      return reinterpret_cast<PerIsolateData*>(isolate->GetData(0));
    }
  
@@ -8400,7 +8743,7 @@ index 0c7ad50a..4a21d437 100644
    class V8_NODISCARD RealmScope {
     public:
      explicit RealmScope(Isolate* isolate, const Global<Context>& context);
-@@ -432,8 +465,25 @@ class PerIsolateData {
+@@ -432,8 +480,25 @@ class PerIsolateData {
    Local<FunctionTemplate> GetDomNodeCtor() const;
    void SetDomNodeCtor(Local<FunctionTemplate> ctor);
  
@@ -8426,7 +8769,7 @@ index 0c7ad50a..4a21d437 100644
    void SubscribeWorkerOnMessage(const std::shared_ptr<Worker>& worker,
                                  Local<Context> context,
                                  Local<Function> callback);
-@@ -457,6 +507,33 @@ class PerIsolateData {
+@@ -457,6 +522,44 @@ class PerIsolateData {
    std::unordered_set<DynamicImportData*> import_data_;
    Global<FunctionTemplate> test_api_object_ctor_;
    Global<FunctionTemplate> dom_node_ctor_;
@@ -8436,6 +8779,14 @@ index 0c7ad50a..4a21d437 100644
 +  // What Region.prepareSpawn() found out about a function, cached by the
 +  // position of the function in its script: compiling and scanning it again
 +  // on every spawn() would cost more than the rest of the call.
++  // Where the source of a function starts in its script; line -1 if the
++  // script has no name. Task code keeps these positions, so that stack traces
++  // in tasks point into the script.
++  struct SourcePlace {
++    std::string file;
++    int line = -1;
++    int column = 0;
++  };
 +  struct SpawnAnalysis {
 +    int id;
 +    Global<String> source;
@@ -8443,6 +8794,7 @@ index 0c7ad50a..4a21d437 100644
 +    std::vector<std::pair<std::string, bool>> names;
 +    enum class Failure { kNone, kNotCompiled, kDynamicScope, kClasses };
 +    Failure failure;
++    SourcePlace place;
 +  };
 +  std::map<std::tuple<int, int, int>, SpawnAnalysis> spawn_analyses_;
 +  // The code a task runs: the callback, the functions it captures and the
@@ -8451,6 +8803,8 @@ index 0c7ad50a..4a21d437 100644
 +    Global<String> source;
 +    std::vector<std::pair<std::string, Global<String>>> functions;
 +    std::vector<std::string> names;
++    // The callback's, then those of `functions`.
++    std::vector<SourcePlace> places;
 +  };
 +  std::unordered_map<std::string, int> spawn_code_ids_;
 +  Global<FunctionTemplate> region_scope_ctor_;
@@ -8460,7 +8814,17 @@ index 0c7ad50a..4a21d437 100644
    // See Shell::GetOrCreateLeafInterfaceTypeTemplate.
    Global<FunctionTemplate> leaf_interface_type_template_;
    // The template of the global object of all contexts that d8 creates in this
-@@ -641,6 +718,9 @@ class ShellOptions {
+@@ -574,6 +677,9 @@ class ShellOptions {
+   bool test_shell = false;
+   DisallowReassignment<bool> expected_to_throw = {"throws", false};
+   DisallowReassignment<bool> no_fail = {"no-fail", false};
++  // Remember where regions were sent, frozen, freed or locked, for the
++  // texts of OwnershipError.
++  DisallowReassignment<bool> region_history = {"region-history", true};
+   DisallowReassignment<bool> dump_counters = {"dump-counters", false};
+   DisallowReassignment<bool> dump_counters_nvp = {"dump-counters-nvp", false};
+   DisallowReassignment<bool> dump_system_memory_stats = {
+@@ -641,6 +747,9 @@ class ShellOptions {
    DisallowReassignment<bool> expose_fast_api = {"expose-fast-api", false};
    DisallowReassignment<size_t> max_serializer_memory = {"max-serializer-memory",
                                                          1 * i::MB};
@@ -8470,7 +8834,7 @@ index 0c7ad50a..4a21d437 100644
    DisallowReassignment<bool> bundle = {"bundle", false};
  };
  
-@@ -713,6 +793,21 @@ class Shell : public i::AllStatic {
+@@ -713,6 +822,21 @@ class Shell : public i::AllStatic {
  
    static bool HandleUnhandledPromiseRejections(Isolate* isolate);
  
@@ -8492,7 +8856,7 @@ index 0c7ad50a..4a21d437 100644
    static std::unique_ptr<SerializationData> SerializeValue(
        Isolate* isolate, Local<Value> value, Local<Value> transfer);
    static MaybeLocal<Value> DeserializeValue(
-@@ -1007,6 +1102,48 @@ class Shell : public i::AllStatic {
+@@ -1007,6 +1131,48 @@ class Shell : public i::AllStatic {
    static Local<ObjectTemplate> GetOrCreateGlobalTemplate(Isolate* isolate);
    static Local<ObjectTemplate> CreateOSTemplate(Isolate* isolate);
    static Local<FunctionTemplate> CreateWorkerTemplate(Isolate* isolate);
@@ -10254,10 +10618,18 @@ index c4045bb9..0620388f 100644
    friend class IC;
    friend class NamedLoadHandlerCompiler;
 diff --git a/src/init/bootstrapper.cc b/src/init/bootstrapper.cc
-index 8c98628e..742c778b 100644
+index 8c98628e..0a90a05d 100644
 --- a/src/init/bootstrapper.cc
 +++ b/src/init/bootstrapper.cc
-@@ -4035,6 +4035,19 @@ void Genesis::InitializeGlobal(DirectHandle<JSGlobalObject> global_object,
+@@ -261,6 +261,7 @@ class Genesis {
+ #undef IGNORE_FEATURE
+   void InitializeGlobal_regexp_linear_flag();
+   void InitializeGlobal_sharedarraybuffer();
++  void InitializeGlobal_regions();
+   // TODO(572988458): Remove harmony_struct initialization.
+   void InitializeGlobal_harmony_struct();
+ #if V8_ENABLE_WEBASSEMBLY
+@@ -4035,6 +4036,19 @@ void Genesis::InitializeGlobal(DirectHandle<JSGlobalObject> global_object,
          Builtin::kArrayBufferConstructor_DoNotInitialize, 1, kDontAdapt);
      native_context()->set_array_buffer_noinit_fun(*array_buffer_noinit_fun);
  
@@ -10277,6 +10649,57 @@ index 8c98628e..742c778b 100644
      DirectHandle<JSObject> array_buffer_prototype(
          Cast<JSObject>(array_buffer_fun->instance_prototype()), isolate_);
      SimpleInstallGetter(isolate_, array_buffer_prototype,
+@@ -5208,6 +5222,7 @@ void Genesis::InitializeExperimentalGlobal() {
+ #undef IGNORE_FEATURE
+   InitializeGlobal_regexp_linear_flag();
+   InitializeGlobal_sharedarraybuffer();
++  InitializeGlobal_regions();
+ 
+   InitializeGlobal_queueMicrotask();
+ }
+@@ -5815,6 +5830,42 @@ void Genesis::InitializeGlobal_sharedarraybuffer() {
+                         isolate()->shared_array_buffer_fun(), DONT_ENUM);
+ }
+ 
++// Errors of ownership regions: OwnershipError extends TypeError, TimeoutError
++// extends AbortError, AbortError and DeadlockError extend Error.
++void Genesis::InitializeGlobal_regions() {
++  if (!v8_flags.harmony_regions) return;
++  Factory* factory = isolate()->factory();
++  DirectHandle<JSGlobalObject> global(native_context()->global_object(),
++                                      isolate());
++  auto install = [&](const char* name, int index,
++                     DirectHandle<JSFunction> parent) {
++    InstallError(isolate(), global, factory->InternalizeUtf8String(name),
++                 index);
++    DirectHandle<JSFunction> error(
++        Cast<JSFunction>(native_context()->GetNoCell(index)), isolate());
++    if (parent.is_null()) return error;
++    CHECK(JSReceiver::SetPrototype(isolate(), error, parent, false,
++                                   kThrowOnError)
++              .FromMaybe(false));
++    CHECK(JSReceiver::SetPrototype(
++              isolate(),
++              DirectHandle<JSObject>(Cast<JSObject>(error->instance_prototype()),
++                                     isolate()),
++              DirectHandle<JSObject>(Cast<JSObject>(parent->instance_prototype()),
++                                     isolate()),
++              false, kThrowOnError)
++              .FromMaybe(false));
++    return error;
++  };
++  install("OwnershipError", Context::REGION_OWNERSHIP_ERROR_FUNCTION_INDEX,
++          isolate()->type_error_function());
++  DirectHandle<JSFunction> abort_error =
++      install("AbortError", Context::REGION_ABORT_ERROR_FUNCTION_INDEX, {});
++  install("TimeoutError", Context::REGION_TIMEOUT_ERROR_FUNCTION_INDEX,
++          abort_error);
++  install("DeadlockError", Context::REGION_DEADLOCK_ERROR_FUNCTION_INDEX, {});
++}
++
+ 
+ 
+ 
 diff --git a/src/interpreter/bytecode-generator.cc b/src/interpreter/bytecode-generator.cc
 index 89ca37fc..4a2ae44e 100644
 --- a/src/interpreter/bytecode-generator.cc
@@ -11213,10 +11636,10 @@ index 5a0a666c..473044be 100644
  #ifdef V8_TEMPORAL_SUPPORT
  #include "src/objects/js-temporal-objects.h"
 diff --git a/src/objects/contexts.h b/src/objects/contexts.h
-index 1859939e..746b81d3 100644
+index 1859939e..a35c6147 100644
 --- a/src/objects/contexts.h
 +++ b/src/objects/contexts.h
-@@ -319,6 +319,10 @@ enum ContextLookupFlags {
+@@ -319,6 +319,18 @@ enum ContextLookupFlags {
    V(REGEXP_RESULT_INDICES_MAP_INDEX, Map, regexp_result_indices_map)           \
    V(REGEXP_SEARCH_FUNCTION_INDEX, JSFunction, regexp_search_function)          \
    V(REGEXP_SPLIT_FUNCTION_INDEX, JSFunction, regexp_split_function)            \
@@ -11224,6 +11647,14 @@ index 1859939e..746b81d3 100644
 +  V(REGION_ARRAY_LITERAL_INDEX, JSFunction, region_array_literal)              \
 +  V(REGION_LITERAL_CACHE_INDEX, Object, region_literal_cache)                  \
 +  V(REGION_OBJECT_LITERAL_INDEX, JSFunction, region_object_literal)            \
++  /* Errors of ownership regions; undefined without --harmony-regions */      \
++  V(REGION_ABORT_ERROR_FUNCTION_INDEX, Object, region_abort_error_function)    \
++  V(REGION_DEADLOCK_ERROR_FUNCTION_INDEX, Object,                              \
++    region_deadlock_error_function)                                            \
++  V(REGION_OWNERSHIP_ERROR_FUNCTION_INDEX, Object,                             \
++    region_ownership_error_function)                                           \
++  V(REGION_TIMEOUT_ERROR_FUNCTION_INDEX, Object,                               \
++    region_timeout_error_function)                                             \
    V(INITIAL_REGEXP_STRING_ITERATOR_PROTOTYPE_MAP_INDEX, Map,                   \
      initial_regexp_string_iterator_prototype_map)                              \
    V(SCRIPT_CONTEXT_TABLE_INDEX, ScriptContextTable, script_context_table)      \
@@ -11484,10 +11915,10 @@ index 00000000..844041ef
 +#endif  // V8_OBJECTS_JS_REGION_INL_H_
 diff --git a/src/objects/js-region.cc b/src/objects/js-region.cc
 new file mode 100644
-index 00000000..15d0c0c0
+index 00000000..85eeffc8
 --- /dev/null
 +++ b/src/objects/js-region.cc
-@@ -0,0 +1,3045 @@
+@@ -0,0 +1,3217 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -11495,7 +11926,9 @@ index 00000000..15d0c0c0
 +#include "src/objects/js-region.h"
 +
 +#include <algorithm>
++#include <array>
 +#include <bitset>
++#include <cstring>
 +#include <limits>
 +#include <map>
 +#include <unordered_map>
@@ -11506,6 +11939,7 @@ index 00000000..15d0c0c0
 +#include "src/base/lazy-instance.h"
 +#include "src/base/platform/mutex.h"
 +#include "src/execution/isolate.h"
++#include "src/execution/messages.h"
 +#include "src/heap/factory.h"
 +#include "src/heap/heap-inl.h"
 +#include "src/heap/heap-layout-inl.h"
@@ -11791,7 +12225,56 @@ index 00000000..15d0c0c0
 +  }
 +};
 +
++// What RegionRegistry::Remember() was told, by region id.
++class RegionHistory {
++ public:
++  using Entry = std::array<std::string,
++                           static_cast<size_t>(RegionRegistry::Event::kCount)>;
++
++  static void Set(int region, RegionRegistry::Event event, std::string what) {
++    base::MutexGuard guard(Mutex());
++    (*All())[region][static_cast<size_t>(event)] = std::move(what);
++    used_.store(true, std::memory_order_relaxed);
++  }
++
++  static std::string Get(int region, RegionRegistry::Event event) {
++    if (!used_.load(std::memory_order_relaxed)) return {};
++    base::MutexGuard guard(Mutex());
++    auto it = All()->find(region);
++    if (it == All()->end()) return {};
++    return it->second[static_cast<size_t>(event)];
++  }
++
++  static void Forget(int region) {
++    if (!used_.load(std::memory_order_relaxed)) return;
++    base::MutexGuard guard(Mutex());
++    All()->erase(region);
++  }
++
++ private:
++  static base::Mutex* Mutex() {
++    static base::LeakyObject<base::Mutex> mutex;
++    return mutex.get();
++  }
++  static std::unordered_map<int, Entry>* All() {
++    static base::LeakyObject<std::unordered_map<int, Entry>> all;
++    return all.get();
++  }
++  static std::atomic<bool> used_;
++};
++
++std::atomic<bool> RegionHistory::used_{false};
++
 +}  // namespace
++
++void RegionRegistry::Remember(int region, Event event, std::string what) {
++  if (what.empty()) return;
++  RegionHistory::Set(region, event, std::move(what));
++}
++
++std::string RegionRegistry::History(int region, Event event) {
++  return RegionHistory::Get(region, event);
++}
 +
 +int RegionRegistry::Create(Isolate* owner) {
 +  int region;
@@ -11806,6 +12289,7 @@ index 00000000..15d0c0c0
 +      next_region_.store(region + 1, std::memory_order_relaxed);
 +    }
 +  }
++  RegionHistory::Forget(region);
 +  in_use_[region].store(true, std::memory_order_relaxed);
 +  locked_[region].store(false, std::memory_order_relaxed);
 +  handles_[region].store(0, std::memory_order_relaxed);
@@ -12449,6 +12933,120 @@ index 00000000..15d0c0c0
 +
 +namespace {
 +
++DirectHandle<JSObject> NewError(Isolate* isolate, int context_index,
++                                DirectHandle<JSFunction> fallback,
++                                DirectHandle<String> message) {
++  Tagged<Object> constructor = isolate->native_context()->GetNoCell(context_index);
++  return isolate->factory()->NewError(
++      IsJSFunction(constructor)
++          ? DirectHandle<JSFunction>(Cast<JSFunction>(constructor), isolate)
++          : fallback,
++      message);
++}
++
++void AddOwnershipFields(Isolate* isolate, DirectHandle<JSObject> error,
++                        int region, const char* reason) {
++  Factory* factory = isolate->factory();
++  JSObject::AddProperty(isolate, error, "region",
++                        factory->NewNumberFromInt(region), DONT_ENUM);
++  JSObject::AddProperty(isolate, error, "reason",
++                        factory->NewStringFromAsciiChecked(reason), DONT_ENUM);
++}
++
++// The event behind an error with this reason, if one is remembered.
++std::string HistoryFor(int region, const char* reason) {
++  using Event = RegionRegistry::Event;
++  auto is = [&](const char* name) { return strcmp(reason, name) == 0; };
++  Event event;
++  if (is("not-owner") || is("in-transit")) {
++    event = Event::kMoved;
++  } else if (is("frozen") || is("not-borrowed") || is("sealed")) {
++    event = Event::kFrozen;
++  } else if (is("freed")) {
++    event = Event::kFreed;
++  } else if (is("locked") || is("read-locked")) {
++    event = Event::kLocked;
++  } else {
++    return {};
++  }
++  return RegionRegistry::History(region, event);
++}
++
++DirectHandle<String> WithHistory(Isolate* isolate, int region,
++                                 const char* reason,
++                                 DirectHandle<String> text) {
++  std::string history = HistoryFor(region, reason);
++  if (history.empty()) return text;
++  Factory* factory = isolate->factory();
++  std::string text_suffix = " (" + history + ")";
++  DirectHandle<String> suffix =
++      factory->NewStringFromUtf8(std::string_view(text_suffix))
++          .ToHandleChecked();
++  return factory->NewConsString(text, suffix).ToHandleChecked();
++}
++
++}  // namespace
++
++// static
++DirectHandle<JSObject> RegionRegistry::NewOwnershipError(
++    Isolate* isolate, int region, const char* reason, MessageTemplate message,
++    base::Vector<const DirectHandle<Object>> args) {
++  DirectHandle<String> text = WithHistory(
++      isolate, region, reason, MessageFormatter::Format(isolate, message, args));
++  DirectHandle<JSObject> error =
++      NewError(isolate, Context::REGION_OWNERSHIP_ERROR_FUNCTION_INDEX,
++               isolate->type_error_function(), text);
++  AddOwnershipFields(isolate, error, region, reason);
++  return error;
++}
++
++// static
++DirectHandle<JSObject> RegionRegistry::NewOwnershipError(Isolate* isolate,
++                                                         int region,
++                                                         const char* reason,
++                                                         const char* message) {
++  DirectHandle<JSObject> error = NewError(
++      isolate, Context::REGION_OWNERSHIP_ERROR_FUNCTION_INDEX,
++      isolate->type_error_function(),
++      WithHistory(isolate, region, reason,
++                  isolate->factory()->NewStringFromAsciiChecked(message)));
++  AddOwnershipFields(isolate, error, region, reason);
++  return error;
++}
++
++// static
++DirectHandle<JSObject> RegionRegistry::NewTaskError(Isolate* isolate,
++                                                    const char* name,
++                                                    const char* message) {
++  int index = strcmp(name, "AbortError") == 0
++                  ? Context::REGION_ABORT_ERROR_FUNCTION_INDEX
++              : strcmp(name, "TimeoutError") == 0
++                  ? Context::REGION_TIMEOUT_ERROR_FUNCTION_INDEX
++              : strcmp(name, "DeadlockError") == 0
++                  ? Context::REGION_DEADLOCK_ERROR_FUNCTION_INDEX
++                  : -1;
++  Factory* factory = isolate->factory();
++  DirectHandle<String> text =
++      factory->NewStringFromAsciiChecked(message);
++  if (index >= 0 && IsJSFunction(isolate->native_context()->GetNoCell(index))) {
++    return NewError(isolate, index, isolate->error_function(), text);
++  }
++  DirectHandle<JSObject> error =
++      factory->NewError(isolate->error_function(), text);
++  Object::SetProperty(isolate, error, factory->name_string(),
++                      factory->NewStringFromAsciiChecked(name))
++      .Check();
++  return error;
++}
++
++namespace {
++
++DirectHandle<JSObject> OutsideReferenceError(Isolate* isolate, int region) {
++  return RegionRegistry::NewOwnershipError(
++      isolate, region, "outside-reference",
++      MessageTemplate::kRegionCrossReference);
++}
++
 +int LengthOf(Tagged<FixedArray> array) {
 +  return static_cast<int>(array->ulength().value());
 +}
@@ -12458,30 +13056,33 @@ index 00000000..15d0c0c0
 +void ThrowAccessError(Isolate* isolate, int region, Access access) {
 +  Factory* factory = isolate->factory();
 +  DirectHandle<Object> id = factory->NewNumberFromInt(region);
++  auto error = [&](const char* reason, MessageTemplate message) {
++    return *RegionRegistry::NewOwnershipError(isolate, region, reason, message,
++                                              base::VectorOf({id}));
++  };
 +  if (RegionRegistry::IsFreed(region)) {
-+    isolate->Throw(*factory->NewTypeError(MessageTemplate::kRegionFreed, id));
++    isolate->Throw(error("freed", MessageTemplate::kRegionFreed));
 +  } else if (RegionRegistry::IsLocked(region)) {
-+    bool read_locked = RegionRegistry::IsFrozen(region);
-+    isolate->Throw(*factory->NewTypeError(
-+        read_locked && access == Access::kWrite
-+            ? MessageTemplate::kRegionReadLocked
-+            : MessageTemplate::kRegionLocked,
-+        id));
++    bool read_locked =
++        RegionRegistry::IsFrozen(region) && access == Access::kWrite;
++    isolate->Throw(read_locked
++                       ? error("read-locked", MessageTemplate::kRegionReadLocked)
++                       : error("locked", MessageTemplate::kRegionLocked));
 +  } else if (RegionRegistry::IsInTransit(region)) {
-+    isolate->Throw(
-+        *factory->NewTypeError(MessageTemplate::kRegionInTransit, id));
++    isolate->Throw(error("in-transit", MessageTemplate::kRegionInTransit));
 +  } else if (access == Access::kWrite && RegionRegistry::IsSealed(region)) {
-+    isolate->Throw(*factory->NewTypeError(MessageTemplate::kRegionSealed, id));
++    isolate->Throw(error("sealed", MessageTemplate::kRegionSealed));
 +  } else if (access == Access::kWrite && RegionRegistry::IsFrozen(region)) {
-+    isolate->Throw(*factory->NewTypeError(MessageTemplate::kRegionFrozen, id));
++    isolate->Throw(error("frozen", MessageTemplate::kRegionFrozen));
 +  } else if (RegionRegistry::IsFrozen(region)) {
 +    isolate->Throw(
-+        *factory->NewTypeError(MessageTemplate::kRegionBorrowRequired, id));
++        error("not-borrowed", MessageTemplate::kRegionBorrowRequired));
 +  } else {
-+    isolate->Throw(*factory->NewTypeError(
-+        MessageTemplate::kRegionNotOwner, id,
-+        factory->NewNumberFromInt(RegionRegistry::Owner(region)),
-+        factory->NewNumberFromInt(isolate->id())));
++    isolate->Throw(*RegionRegistry::NewOwnershipError(
++        isolate, region, "not-owner", MessageTemplate::kRegionNotOwner,
++        base::VectorOf<DirectHandle<Object>>(
++            {id, factory->NewNumberFromInt(RegionRegistry::Owner(region)),
++             factory->NewNumberFromInt(isolate->id())})));
 +  }
 +}
 +
@@ -12742,8 +13343,8 @@ index 00000000..15d0c0c0
 +    if (IsSmi(*value)) return value;
 +    if (IsJSRegionObject(*value)) {
 +      if (Cast<JSRegionObject>(*value)->region_id() == region_) return value;
-+      THROW_NEW_ERROR(isolate_,
-+                      NewTypeError(MessageTemplate::kRegionCrossReference));
++      isolate_->Throw(*OutsideReferenceError(isolate_, region_));
++      return {};
 +    }
 +    if (IsPlainObjectOrArray(*value)) return CopyObject(Cast<JSObject>(value));
 +    if (IsJSTypedArray(*value)) return CopyTypedArray(Cast<JSTypedArray>(value));
@@ -13180,9 +13781,11 @@ index 00000000..15d0c0c0
 +  if (RegionRegistry::IsFrozen(region) && !sealed &&
 +      !RegionRegistry::IsFrozenBy(region, isolate) &&
 +      !RegionRegistry::IsBorrowedBy(region, isolate)) {
-+    THROW_NEW_ERROR(isolate,
-+                    NewTypeError(MessageTemplate::kRegionBorrowRequired,
-+                                 factory->NewNumberFromInt(region)));
++    isolate->Throw(*RegionRegistry::NewOwnershipError(
++        isolate, region, "not-borrowed", MessageTemplate::kRegionBorrowRequired,
++        base::VectorOf<DirectHandle<Object>>(
++            {factory->NewNumberFromInt(region)})));
++    return {};
 +  }
 +  std::shared_ptr<BackingStore> store =
 +      RegionBackingStores::Get(holder->backing_store_id());
@@ -13302,8 +13905,8 @@ index 00000000..15d0c0c0
 +  if (IsSmi(*value)) return value;
 +  if (IsJSRegionObject(*value)) {
 +    if (Cast<JSRegionObject>(*value)->region_id() == region) return value;
-+    THROW_NEW_ERROR(isolate,
-+                    NewTypeError(MessageTemplate::kRegionCrossReference));
++    isolate->Throw(*OutsideReferenceError(isolate, region));
++    return {};
 +  }
 +  // Typed arrays have their bytes outside the heap; those are copied.
 +  if (IsJSTypedArray(*value)) return Evacuator(isolate, region).Copy(value);
@@ -13677,8 +14280,8 @@ index 00000000..15d0c0c0
 +  }
 +  if (IsJSReceiver(*value) && !IsJSRegionObject(*value) &&
 +      !IsJSTypedArray(*value)) {
-+    RETURN_FAILURE(isolate, kThrowOnError,
-+                   NewTypeError(MessageTemplate::kRegionCrossReference));
++    isolate->Throw(*OutsideReferenceError(isolate, object->region_id()));
++    return Nothing<bool>();
 +  }
 +  // Small integers and objects of the region go in as they are, other
 +  // primitives as ShareValue() gives them; only the rest needs the evacuator
@@ -14535,10 +15138,10 @@ index 00000000..15d0c0c0
 +}  // namespace v8
 diff --git a/src/objects/js-region.h b/src/objects/js-region.h
 new file mode 100644
-index 00000000..c19c57c6
+index 00000000..8f5634fb
 --- /dev/null
 +++ b/src/objects/js-region.h
-@@ -0,0 +1,492 @@
+@@ -0,0 +1,520 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -14547,9 +15150,12 @@ index 00000000..c19c57c6
 +#define V8_OBJECTS_JS_REGION_H_
 +
 +#include <atomic>
++#include <string>
 +#include <unordered_map>
 +#include <vector>
 +
++#include "src/base/vector.h"
++#include "src/common/message-template.h"
 +#include "src/objects/fixed-array.h"
 +#include "src/objects/js-objects.h"
 +#include "src/objects/smi.h"
@@ -14608,6 +15214,31 @@ index 00000000..c19c57c6
 +  // Id of the owning isolate, also while frozen; kInTransit while moving.
 +  static int Owner(int region);
 +  static int Readers(int region);
++
++  // An OwnershipError, a TypeError with the number of the region in `region`
++  // and why access failed in `reason`: "not-owner", "in-transit", "frozen",
++  // "not-borrowed", "freed", "sealed", "locked", "read-locked" or
++  // "outside-reference". A TypeError without --harmony-regions.
++  static DirectHandle<JSObject> NewOwnershipError(
++      Isolate* isolate, int region, const char* reason,
++      MessageTemplate message,
++      base::Vector<const DirectHandle<Object>> args = {});
++  static DirectHandle<JSObject> NewOwnershipError(Isolate* isolate, int region,
++                                                  const char* reason,
++                                                  const char* message);
++  // An AbortError, TimeoutError or DeadlockError for d8 tasks and channels;
++  // an Error with that name if the class is missing.
++  static DirectHandle<JSObject> NewTaskError(Isolate* isolate,
++                                             const char* name,
++                                             const char* message);
++
++  // Where a region was last moved (sent, or thawed by an owner that other
++  // threads were reading it from), frozen, freed or put in a lock, as in
++  // "sent at main.js:12:5". An OwnershipError caused by that event ends with
++  // it. The history of an id is dropped when the id is reused.
++  enum class Event { kMoved, kFrozen, kFreed, kLocked, kCount };
++  static void Remember(int region, Event event, std::string what);
++  static std::string History(int region, Event event);
 +
 +  // Owned(isolate) -> InTransit. Fails if isolate is not the owner.
 +  static bool Release(int region, Isolate* isolate);

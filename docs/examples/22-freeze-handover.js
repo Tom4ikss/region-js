@@ -14,7 +14,7 @@ const worker = new Worker(
        config.theme = 'light';
        thaw = 'разморозил, theme = ' + config.theme;
      } catch (e) {
-       thaw = 'thaw: ' + e.message;
+       thaw = 'thaw: ' + String(e);
      }
      postMessage('frozenHere = ' + right + ', ' + thaw);
    };`,
@@ -32,12 +32,12 @@ print('главный поток: frozenHere =', region.frozenHere);
 try {
   region.thaw();
 } catch (e) {
-  print('главный поток, thaw:', e.message);
+  print('главный поток, thaw:', String(e));
 }
 print('воркер с правом:', worker.getMessage());
 try {
   print(config.theme);
 } catch (e) {
-  print('главный поток читает:', e.message);
+  print('главный поток читает:', String(e));
 }
 worker.terminate();

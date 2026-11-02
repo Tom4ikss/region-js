@@ -29,6 +29,6 @@ print(`переезд региона:          ${roundTrip({ tree }, [region]).t
 try {
   tree.value;
 } catch (e) {
-  print('главный поток после переезда:', e.message);
+  print('главный поток после переезда:', String(e));
 }
 worker.terminate();

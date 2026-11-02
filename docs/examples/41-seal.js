@@ -32,7 +32,7 @@ for (const [what, fn] of [
   try {
     fn();
   } catch (e) {
-    print(what + ':', e.message);
+    print(what + ':', String(e));
   }
 }
 

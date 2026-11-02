@@ -9,7 +9,7 @@ print('readers:', region.readers);
 try {
   region.thaw();
 } catch (e) {
-  print('thaw с читателем:', e.message);
+  print('thaw с читателем:', String(e));
 }
 
 ticket.release();
@@ -28,5 +28,5 @@ print('разморожено, apple =', prices.apple);
 try {
   new Region().borrow();
 } catch (e) {
-  print('borrow незамороженного:', e.message);
+  print('borrow незамороженного:', String(e));
 }

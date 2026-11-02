@@ -28,7 +28,7 @@ const workers = Array.from({ length: READERS }, () => new Worker(`
           reads++;
         }
       } catch (e) {
-        if (e.message.startsWith('OwnershipError')) denied++;
+        if (e instanceof OwnershipError) denied++;
         else throw e;
       } finally {
         borrow.release();

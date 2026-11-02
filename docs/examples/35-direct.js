@@ -17,7 +17,7 @@ print('всё в одном регионе:', Region.of(shop.orders[2]).id === r
 try {
   shop.orders.push({ id: 4 });
 } catch (e) {
-  print('обычный объект:', e.message);
+  print('обычный объект:', String(e));
 }
 
 // Регион целиком уезжает в задачу и обратно; внутри задачи регион называют явно.

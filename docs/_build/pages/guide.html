@@ -170,7 +170,7 @@
 
 <!--ex:02-before-after.js timing-->
 
-<p>Видно два разных текста ошибки. Сразу после отправки регион ещё в пути: «is being moved between isolates». Когда воркер получил сообщение, владелец уже он: «is owned by isolate 1, not by isolate 0». <code>Object.keys</code>, <code>JSON.stringify</code> и прочее перечисление ключей проверяют владельца так же, как чтение поля.</p>
+<p>Видно два разных текста ошибки. Сразу после отправки регион ещё в пути: «was sent to another thread and has not been received yet». Когда воркер получил сообщение, владелец уже он: «belongs to another thread». Обе ошибки заканчиваются местом отправки. <code>Object.keys</code>, <code>JSON.stringify</code> и прочее перечисление ключей проверяют владельца так же, как чтение поля.</p>
 <p>Сам объект <code>region</code> в данные сообщения класть не нужно, достаточно объектов из него. Объекты региона всегда передаются по ссылке. Если отправить их без списка transfer, воркер получит ссылку, но прочитать по ней ничего не сможет, пока регион к нему не переедет: владелец остаётся прежним.</p>
 <p>В списке transfer можно указать и сам объект региона, он означает свой регион: <code>worker.postMessage(order, [order])</code> работает так же, как <code>[region]</code> или <code>[Region.of(order)]</code>.</p>
 <p><code>postMessage</code> со списком transfer — самый низкий уровень. <code>spawn</code> делает то же самое без списка transfer и мимо <code>postMessage</code>, через свою очередь, поэтому обходится дешевле.</p>
@@ -218,29 +218,40 @@
 </table>
 </div>
 
-<h3 id="errors">Тексты ошибок</h3>
-<p>Ошибки доступа — это <code>TypeError</code>, текст которых начинается с <code>OwnershipError:</code>. Отдельного класса ошибки в прототипе пока нет.</p>
+<h3 id="errors">Ошибки</h3>
+<p>Нарушения владения бросают <code>OwnershipError</code>. Это наследник <code>TypeError</code>, так что код, который ловил <code>TypeError</code>, работает как раньше. У ошибки два поля: <code>region</code> — номер региона и <code>reason</code> — причина одним словом, по которой удобно ветвиться вместо разбора текста.</p>
+<p>В конце текста ошибка говорит, где с регионом случилось то, из-за чего она возникла: где его отправили, разморозили, заморозили, запечатали, освободили или положили в <code>RwLock</code>. Например, <code>(sent at main.js:12:5)</code>. Код задачи <code>spawn</code> сохраняет строки своего файла, поэтому и отправка из задачи показывает место в файле. Если файла у кода нет, например у воркера из строки, будет номер потока: <code>(sent by isolate 2)</code>. Запись места стоит около 60 нс на событие, флаг d8 <code>--no-region-history</code> её выключает.</p>
+<!--ex:44-errors.js-->
+<div class="table-wrap">
+<table>
+<thead><tr><th>Текст</th><th><code>reason</code></th><th>Когда бывает</th></tr></thead>
+<tbody>
+<tr><td><code>region N belongs to another thread (isolate X, this is isolate Y)</code></td><td><code>not-owner</code></td><td>Обращение к региону, которым владеет другой поток.</td></tr>
+<tr><td><code>region N was sent to another thread and has not been received yet</code></td><td><code>in-transit</code></td><td>Регион отправлен, но ещё не получен: лежит в канале, в очереди задач или в сообщении.</td></tr>
+<tr><td><code>region N was freed</code></td><td><code>freed</code></td><td>Обращение к освобождённому региону. <code>Region was already freed</code> — повторный <code>free()</code>.</td></tr>
+<tr><td><code>region N is frozen; thaw it before writing</code></td><td><code>frozen</code></td><td>Запись в замороженный регион, в том числе владельцем. <code>Region is already frozen</code> — повторный <code>freeze()</code>.</td></tr>
+<tr><td><code>region N is frozen; borrow it to read it</code></td><td><code>not-borrowed</code></td><td>Чтение замороженного региона без билета потоком, который его не замораживал: поля, типизированные массивы, <code>Object.keys</code> и прочее.</td></tr>
+<tr><td><code>region N is sealed and cannot change</code></td><td><code>sealed</code></td><td>Запись в запечатанный регион.</td></tr>
+<tr><td><code>Region is sealed and cannot be thawed</code>, <code>Region is sealed; the GC frees it once nothing refers to it</code></td><td><code>sealed</code></td><td><code>thaw()</code> и <code>free()</code> запечатанного региона.</td></tr>
+<tr><td><code>Region is sealed: its objects are shared, send them without a transfer list</code></td><td><code>sealed</code></td><td>Запечатанный регион в списке transfer.</td></tr>
+<tr><td><code>region N is in an RwLock; use it through lock.read() or lock.write()</code></td><td><code>locked</code></td><td>Обращение к региону, который лежит в <code>RwLock</code>, мимо guard. Своими текстами <code>free()</code>, <code>freeze()</code>, список transfer и второй <code>RwLock</code> на тот же регион.</td></tr>
+<tr><td><code>region N is locked for reading; use lock.write() to change it</code></td><td><code>read-locked</code></td><td>Запись под <code>lock.read()</code>.</td></tr>
+<tr><td><code>Region is still borrowed by N reader(s)</code></td><td><code>borrowed</code></td><td><code>thaw()</code> и <code>free()</code>, пока не сданы билеты.</td></tr>
+<tr><td><code>Region is not frozen by this isolate</code></td><td><code>not-frozen</code></td><td><code>thaw()</code> в потоке, у которого нет права разморозить.</td></tr>
+<tr><td><code>Region must be frozen to borrow it</code></td><td><code>not-frozen</code></td><td><code>borrow()</code> у незамороженного региона.</td></tr>
+<tr><td><code>a region object cannot reference objects outside its region; copy them in with Region.object() or Region.array()</code></td><td><code>outside-reference</code></td><td>Запись в поле обычного объекта или объекта из другого региона.</td></tr>
+</tbody>
+</table>
+</div>
+<p>Ошибки формы данных — обычные <code>TypeError</code>, без <code>region</code> и <code>reason</code>:</p>
 <div class="table-wrap">
 <table>
 <thead><tr><th>Текст</th><th>Когда бывает</th></tr></thead>
 <tbody>
-<tr><td><code>OwnershipError: region N is owned by isolate X, not by isolate Y</code></td><td>Обращение к региону, которым владеет другой поток.</td></tr>
-<tr><td><code>OwnershipError: region N was freed</code></td><td>Обращение к освобождённому региону.</td></tr>
-<tr><td><code>OwnershipError: region N is being moved between isolates</code></td><td>Регион отправлен, но ещё не получен.</td></tr>
-<tr><td><code>OwnershipError: region N is frozen; thaw it before writing</code></td><td>Запись в замороженный регион, в том числе владельцем.</td></tr>
-<tr><td><code>OwnershipError: region N is frozen; borrow it to read it</code></td><td>Чтение замороженного региона без билета потоком, который его не замораживал: поля, типизированные массивы, <code>Object.keys</code> и прочее.</td></tr>
-<tr><td><code>OwnershipError: a region object cannot reference objects outside its region; copy them in with Region.object() or Region.array()</code></td><td>Запись в поле обычного объекта или объекта из другого региона.</td></tr>
 <tr><td><code>Cannot add property X, region objects have a fixed shape</code></td><td>Новое свойство у объекта региона.</td></tr>
 <tr><td><code>Region.object() needs a current region: use region.enter() or region.object()</code></td><td><code>Region.object()</code> вне <code>enter()</code> и <code>run()</code>, в том числе в задаче <code>spawn</code>. У <code>Region.array()</code> текст такой же, со своим именем.</td></tr>
 <tr><td><code>… expects a plain object; use array() for arrays</code></td><td>Массив или функция в <code>Region.object()</code> или <code>region.object()</code>.</td></tr>
 <tr><td><code>… cannot be moved into a region</code></td><td>В <code>run</code> попала функция, <code>Map</code>, <code>Date</code>, <code>DataView</code>, массив поверх <code>SharedArrayBuffer</code>, экземпляр класса, наследник <code>Array</code> и т. п.</td></tr>
-<tr><td><code>Region is not frozen by this isolate</code></td><td><code>thaw()</code> в потоке, у которого нет права разморозить.</td></tr>
-<tr><td><code>Region was frozen by another isolate</code></td><td>Замороженный регион в списке transfer у потока без права разморозить.</td></tr>
-<tr><td><code>OwnershipError: region N is sealed and cannot change</code></td><td>Запись в запечатанный регион.</td></tr>
-<tr><td><code>Region is sealed and cannot be thawed</code>, <code>Region is sealed; the GC frees it once nothing refers to it</code></td><td><code>thaw()</code> и <code>free()</code> запечатанного региона.</td></tr>
-<tr><td><code>Region is sealed: its objects are shared, send them without a transfer list</code></td><td>Запечатанный регион в списке transfer.</td></tr>
-<tr><td><code>Region is still borrowed by N reader(s)</code></td><td><code>thaw()</code>, пока не сданы билеты.</td></tr>
-<tr><td><code>Region must be frozen to borrow it</code></td><td><code>borrow()</code> у незамороженного региона.</td></tr>
 <tr><td><code>#{} and #[] need a current region: use region.enter() or region.run()</code></td><td>Литерал вне <code>enter()</code> и <code>run()</code>.</td></tr>
 <tr><td><code>#{} and #[] hold primitives and objects of their region; write nested objects as #{} and arrays as #[]</code></td><td>Обычный объект или массив внутри литерала.</td></tr>
 <tr><td><code>In 'use region' code {} and [] are #{} and #[], which allow no spread, holes, methods, accessors, __proto__, computed or numeric keys</code></td><td>Синтаксическая ошибка: в коде с <code>'use region'</code> литерал, который не может быть <code>#{}</code> или <code>#[]</code>.</td></tr>

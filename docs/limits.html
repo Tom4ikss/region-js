@@ -88,7 +88,6 @@
   <li>Экземпляры классов и наследники <code>Array</code> не кладутся: ошибка «cannot be moved into a region».</li>
   <li>Форма объектов фиксирована: новое поле добавить нельзя. Массивы растут и укорачиваются (<code>push</code>, <code>pop</code>, <code>splice</code>, <code>length</code>). Запись по индексу и <code>push</code> идут по быстрому пути, пока в массиве есть запас, а <code>pop</code>, <code>splice</code>, <code>length = n</code> и рост запаса — через рантайм.</li>
   <li><code>Object.keys</code>, <code>Object.values</code>, <code>Object.entries</code>, <code>for...in</code>, <code>JSON.stringify</code>, <code>Array.isArray</code>, <code>flat</code> и spread работают. Для потока, который не владеет регионом, они бросают <code>OwnershipError</code>.</li>
-  <li>Отдельного класса <code>OwnershipError</code> нет: это <code>TypeError</code> с таким префиксом в тексте.</li>
 </ul>
 
 <h3 id="skorost"><a class="anchor" href="#skorost" aria-hidden="true" tabindex="-1"></a>Скорость</h3>

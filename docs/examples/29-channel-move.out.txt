@@ -1,2 +1,2 @@
-отправитель после send: OwnershipError: region 0 is being moved between isolates
+отправитель после send: OwnershipError: region 0 was sent to another thread and has not been received yet (sent at 29-channel-move.js:5:10)
 вернулся из задачи: 7 принят чай, сыр
