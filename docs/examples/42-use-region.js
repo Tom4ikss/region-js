@@ -1,4 +1,3 @@
-// d8-flags: --harmony-region-literals
 // 'use region': в функции, и в функциях внутри неё, каждый {} — это #{}, а [] — #[].
 // Обычный JS-синтаксис: TypeScript, ESLint и Biome его понимают.
 const region = new Region();

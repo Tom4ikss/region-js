@@ -15,7 +15,7 @@ const other = new Region();
 
 // Hot loops: stores in bounds, at the end, and pushes that cross a growth.
 {
-  const a = region.array();
+  const a = region.run(() => []);
   for (let i = 0; i < 1000; i++) a.push(i);
   for (let i = 0; i < a.length; i++) a[i] = a[i] * 2;
   for (let i = a.length; i < 2000; i++) a[i] = i * 2;
@@ -26,32 +26,32 @@ const other = new Region();
 
 // push() returns the new length; other arities go through the runtime.
 {
-  const a = region.array();
+  const a = region.run(() => []);
   print('push returns length:', a.push('x'), a.push(1, 2, 3), a.push(), a.length,
         JSON.stringify(a));
 }
 
 // Values the fast path can't store as they are: the runtime copies or rejects.
 {
-  const a = region.array();
+  const a = region.run(() => []);
   using _ = region.enter();
   a.push(1.5);
   a.push('local ' + String(a.length));
   a.push(new Uint8Array([7, 8]));
   a[a.length] = 2 ** 40;
   a.push(null, undefined, true);
-  a.push(region.object({ ok: 1 }));
+  a.push(region.run(() => ({ ok: 1 })));
   print('copied values:', a.length, a[0], a[1], a[2][1], a[3], a[7].ok);
   expectError('plain object', () => a.push({ a: 1 }));
   expectError('plain object by index', () => { a[a.length] = { a: 1 }; });
-  expectError('other region', () => a.push(other.array()));
-  expectError('other region by index', () => { a[0] = other.array(); });
+  expectError('other region', () => a.push(other.run(() => [])));
+  expectError('other region by index', () => { a[0] = other.run(() => []); });
   print('length after rejects:', a.length);
 }
 
 // Indices the fast path leaves to the runtime.
 {
-  const a = region.array();
+  const a = region.run(() => []);
   a.push(0, 1);
   a[5] = 5;
   print('past the end:', a.length, JSON.stringify(a));
@@ -60,7 +60,7 @@ const other = new Region();
   expectError('fractional index', () => { a[1.5] = 'fraction'; });
   print('odd keys:', a[1], a.length);
   expectError('new property on an object', () => {
-    const o = region.object({ a: 1 });
+    const o = region.run(() => ({ a: 1 }));
     o[0] = 1;
   });
 }
@@ -68,7 +68,7 @@ const other = new Region();
 // Denied: frozen, freed, owned by another isolate.
 {
   const r = new Region();
-  const a = r.array(1);
+  const a = r.run(() => [1]);
   const store = (x, i, v) => { x[i] = v; };
   const push = (x, v) => x.push(v);
   for (let i = 0; i < 10; i++) { store(a, 0, i); push(a, i); }
@@ -83,7 +83,7 @@ const other = new Region();
 }
 {
   const r = new Region();
-  const a = r.array(1, 2);
+  const a = r.run(() => [1, 2]);
   const w = new Worker(`
     onmessage = ({ data }) => {
       const out = [];
@@ -101,10 +101,10 @@ const other = new Region();
 {
   const store = (x, i, v) => { x[i] = v; };
   const push = (x, v) => x.push(v);
-  const targets = [[], region.array(), [1.5], region.array(1), { length: 0 },
-                   new Uint8Array(4), region.array('a')];
-  const arrays = [[], region.array(), [1.5], region.array(1), ['a'],
-                  region.array('a')];
+  const targets = [[], region.run(() => []), [1.5], region.run(() => [1]), { length: 0 },
+                   new Uint8Array(4), region.run(() => ['a'])];
+  const arrays = [[], region.run(() => []), [1.5], region.run(() => [1]), ['a'],
+                  region.run(() => ['a'])];
   for (let round = 0; round < 50; round++) {
     for (const t of targets) store(t, 0, round);
     for (const a of arrays) push(a, round);
@@ -121,13 +121,13 @@ const other = new Region();
     return a.length;
   };
   %PrepareFunctionForOptimization(fill);
-  fill(region.array(), 10);
-  fill(region.array(), 10);
+  fill(region.run(() => []), 10);
+  fill(region.run(() => []), 10);
   %OptimizeFunctionOnNextCall(fill);
-  const a = region.array();
+  const a = region.run(() => []);
   print('optimized:', fill(a, 1000), a[0], a[999]);
   const r = new Region();
-  const b = r.array();
+  const b = r.run(() => []);
   r.freeze();
   expectError('optimized into frozen', () => fill(b, 1));
 }
@@ -137,7 +137,7 @@ const other = new Region();
 // the prototype changes.
 {
   const r = new Region();
-  const a = r.array(1, 2, 3);
+  const a = r.run(() => [1, 2, 3]);
   const getPush = (x) => x.push;
   const sum = (x) => x.reduce((s, v) => s + v, 0);
   for (let i = 0; i < 100; i++) { getPush(a); sum(a); }
@@ -152,8 +152,8 @@ const other = new Region();
 }
 {
   const r = new Region();
-  const a = r.array();
-  const o = r.object({ x: 1 });
+  const a = r.run(() => []);
+  const o = r.run(() => ({ x: 1 }));
   const realm = Realm.create();
   const otherPush = Realm.eval(realm, 'Array.prototype.push');
   const otherGet = Realm.eval(realm, `(x) => x.push`);
@@ -173,7 +173,7 @@ const other = new Region();
 {
   // A frozen region: methods are read under a borrow only.
   const r = new Region();
-  const a = r.array(1, 2);
+  const a = r.run(() => [1, 2]);
   r.freeze();
   const w = new Worker(`
     onmessage = ({ data }) => {

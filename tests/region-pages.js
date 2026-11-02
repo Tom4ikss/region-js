@@ -1,4 +1,4 @@
-// d8 --harmony-region-literals --allow-natives-syntax --expose-gc --verify-heap region-pages.js
+// d8 --harmony-regions --allow-natives-syntax --expose-gc --verify-heap region-pages.js
 // A region that holds --region-page-threshold bytes (64 KB) gets pages of its
 // own in the shared heap. %RegionPageOf tells the region of the page an
 // object is on, or -1 for a page anyone allocates on.

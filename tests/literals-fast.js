@@ -1,4 +1,4 @@
-// d8 --harmony-region-literals --module --allow-natives-syntax --expose-gc --verify-heap literals-fast.js
+// d8 --harmony-regions --module --allow-natives-syntax --expose-gc --verify-heap literals-fast.js
 // #{} and #[] in generated code: after the first literal of a shape, objects
 // are allocated without the runtime. Whatever path a literal takes, the
 // result, the errors and the bytes counted for the region must be the same.
@@ -115,7 +115,7 @@ const region = new Region();
 
 // Tasks: every thread allocates in its own area.
 {
-  const lists = Array.from({ length: 4 }, () => new Region().array());
+  const lists = Array.from({ length: 4 }, () => new Region().run(() => []));
   const counts = await Promise.all(lists.map((list) => spawn(() => {
     using _ = Region.of(list).enter();
     for (let i = 0; i < 50000; i++) list.push(#{ i, sq: i * i });

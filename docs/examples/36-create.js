@@ -1,6 +1,5 @@
-// d8-flags: --harmony-region-literals
 // Сколько стоит положить данные в регион: 200 000 товаров { id, name, tags, price }.
-// Пять способов собрать один и тот же массив, и после каждого — проход по нему.
+// Четыре способа собрать один и тот же массив, и после каждого — проход по нему.
 const N = 200_000;
 const item = (i) => ({ id: i, name: 'товар ' + i, tags: ['новый', 'склад'], price: i % 100 });
 
@@ -10,25 +9,14 @@ const plain = () => Array.from({ length: N }, (_, i) => item(i));
 // 2. Собрать обычные объекты и скопировать в регион через run.
 const viaRun = (region) => region.run(plain);
 
-// 3. Каждый объект сразу в регион через region.object, в конце один массив.
-const viaObject = (region) => {
-  const list = new Array(N);
-  for (let i = 0; i < N; i++) {
-    list[i] = region.object({ id: i, name: 'товар ' + i, tags: region.array('новый', 'склад'), price: i % 100 });
-  }
-  return region.object({ list }).list; // копируется только внешний массив
-};
-
-// 4. То же, но массив региона растёт через push.
-const viaPush = (region) => {
-  const list = region.array();
-  for (let i = 0; i < N; i++) {
-    list.push(region.object({ id: i, name: 'товар ' + i, tags: region.array('новый', 'склад'), price: i % 100 }));
-  }
+// 3. По одному: каждый объект копирует в регион свой run, массив региона растёт через push.
+const viaRunEach = (region) => {
+  const list = region.run(() => []);
+  for (let i = 0; i < N; i++) list.push(region.run(() => item(i)));
   return list;
 };
 
-// 5. Литерал #{} создаёт объект сразу в регионе, без копии; массив растёт через push.
+// 4. Литерал #{} создаёт объект сразу в регионе, без копии; массив растёт через push.
 const viaLiteral = (region) => {
   using _ = region.enter();
   const list = #[];
@@ -61,8 +49,7 @@ const measure = (label, build) => {
   print(`${label}: создание ${buildMs.toFixed(0)} ms, проход ${readMs.toFixed(1)} ms (сумма ${total})`);
 };
 
-measure('обычные объекты        ', () => plain());
-measure('region.run             ', viaRun);
-measure('region.object по одному', viaObject);
-measure('region.object и push   ', viaPush);
-measure('литерал #{} и push     ', viaLiteral);
+measure('обычные объекты      ', () => plain());
+measure('один region.run      ', viaRun);
+measure('run по одному и push ', viaRunEach);
+measure('литерал #{} и push   ', viaLiteral);

@@ -1,4 +1,4 @@
-// d8-flags: --module --harmony-region-literals
+// d8-flags: --module
 // Литералы #{} и #[]: объект или массив создаётся сразу в текущем регионе, без копии.
 const region = new Region();
 let shop;

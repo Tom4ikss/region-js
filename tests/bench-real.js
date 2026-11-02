@@ -1,4 +1,4 @@
-// d8 --harmony-region-literals --module --max-serializer-memory=4000 bench-real.js
+// d8 --harmony-regions --module --max-serializer-memory=4000 bench-real.js
 // Three everyday workloads with orders, each three ways: spawn() with regions,
 // plain workers with postMessage (what JS has today) and, in
 // tests/tokio-bench (cargo run --release -- real), Rust with tokio.

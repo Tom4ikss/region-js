@@ -1,4 +1,4 @@
-// d8-flags: --module --harmony-region-literals
+// d8-flags: --module
 // Четыре задачи spawn собирают 100 000 заказов. Объекты создаются сразу в общей
 // памяти ('use region'), и главный поток получает их без копии.
 const ORDERS = 100_000;

@@ -2,7 +2,7 @@
 // OwnershipError: класс, поля region и reason, место события в тексте.
 const orders = new Channel(1);
 const region = new Region();
-const order = region.object({ id: 7, total: 120 });
+const order = region.run(() => ({ id: 7, total: 120 }));
 await orders.send(order);           // регион уехал в канал
 
 try {

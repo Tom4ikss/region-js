@@ -1,4 +1,4 @@
-// d8 --harmony-region-literals bench-pauses.js
+// d8 --harmony-regions bench-pauses.js
 // Pauses that one thread's garbage causes in the others. The main thread and
 // three workers count in a loop that allocates nothing and note every gap of a
 // millisecond or more between two steps; a fifth thread makes garbage: plain
@@ -8,7 +8,7 @@
 // objects live in the shared heap, whose collection stops every thread.
 // Modes run one after another in one process, so a shared heap left by one can
 // be collected during the next: for clean numbers pass one mode per run,
-// e.g. `d8 --harmony-region-literals bench-pauses.js -- local`.
+// e.g. `d8 --harmony-regions bench-pauses.js -- local`.
 const MODES = ['idle', 'local', 'use region', 'region.run'];
 const SECONDS = 3;
 const COUNTERS = 3;

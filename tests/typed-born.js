@@ -1,4 +1,4 @@
-// d8 --harmony-region-literals --module --expose-gc --verify-heap typed-born.js
+// d8 --harmony-regions --module --expose-gc --verify-heap typed-born.js
 // region.typedArray() makes a typed array whose bytes belong to the region
 // from the start: storing its view in the region copies nothing.
 const expectError = (name, fn) => {

@@ -1,4 +1,4 @@
-// d8 --harmony-region-literals --allow-natives-syntax --expose-gc --region-gc-pages=8 region-strings.js
+// d8 --harmony-regions --allow-natives-syntax --expose-gc --region-gc-pages=8 region-strings.js
 // Strings and numbers that a region shares are copied into the memory of the
 // region, on its pages or chunks, and die with it: they no longer wait for a
 // shared GC. %RegionOfValue tells the region whose memory holds a value.

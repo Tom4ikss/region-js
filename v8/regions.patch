@@ -1456,7 +1456,7 @@ index f3ec683b..af3517ea 100644
        UNREACHABLE();
    }
 diff --git a/src/common/message-template.h b/src/common/message-template.h
-index ce7c8efa..bdf2df21 100644
+index ce7c8efa..5329f75d 100644
 --- a/src/common/message-template.h
 +++ b/src/common/message-template.h
 @@ -739,6 +739,36 @@ namespace internal {
@@ -1489,7 +1489,7 @@ index ce7c8efa..bdf2df21 100644
 +    "region % is frozen; borrow it to read it")                                \
 +  T(RegionCrossReference,                                                      \
 +    "a region object cannot reference objects outside its "                    \
-+    "region; copy them in with region.object() or region.array()")             \
++    "region; create them in it with region.run() or #{}")                      \
 +  T(RegionCannotMove, "% cannot be moved into a region")                       \
 +  T(RegionNotExtensible,                                                       \
 +    "Cannot add property %, region objects have a fixed shape")                \
@@ -6219,7 +6219,7 @@ index 00000000..bd767012
 +
 +#endif  // V8_D8_D8_PORT_H_
 diff --git a/src/d8/d8.cc b/src/d8/d8.cc
-index 49121fe1..609c7389 100644
+index 49121fe1..dd31cf4b 100644
 --- a/src/d8/d8.cc
 +++ b/src/d8/d8.cc
 @@ -14,6 +14,7 @@
@@ -6437,7 +6437,7 @@ index 49121fe1..609c7389 100644
  
    // Prevent fuzzers from creating side effects.
    if (!i::v8_flags.fuzzing) {
-@@ -4830,73 +4938,1456 @@ Local<ObjectTemplate> Shell::GetOrCreateGlobalTemplate(Isolate* isolate) {
+@@ -4830,73 +4938,1396 @@ Local<ObjectTemplate> Shell::GetOrCreateGlobalTemplate(Isolate* isolate) {
    if (data->global_template_.IsEmpty()) {
      data->global_template_.Reset(isolate, CreateGlobalTemplate(isolate));
    }
@@ -6581,8 +6581,7 @@ index 49121fe1..609c7389 100644
 +        std::pair{"thaw", RegionThaw},
 +        std::pair{"thawWhenFree", RegionThawWhenFree},
 +        std::pair{"borrow", RegionBorrow}, std::pair{"free", RegionFree},
-+        std::pair{"enter", RegionEnter}, std::pair{"object", RegionNewObject},
-+        std::pair{"array", RegionNewArray},
++        std::pair{"enter", RegionEnter},
 +        std::pair{"typedArray", RegionNewTypedArray}}) {
 +    region_template->PrototypeTemplate()->Set(
 +        String::NewFromUtf8(isolate, name).ToLocalChecked(),
@@ -7761,65 +7760,6 @@ index 49121fe1..609c7389 100644
 +
 +namespace {
 +
-+// Copies `value` into `region` and returns what JS sees of it.
-+void CreateInRegion(const v8::FunctionCallbackInfo<v8::Value>& info,
-+                    int region, Local<Value> value) {
-+  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(info.GetIsolate());
-+  i::DirectHandle<i::Object> evacuated;
-+  if (!i::JSRegionObject::Evacuate(i_isolate, region,
-+                                   Utils::OpenDirectHandle(*value), nullptr,
-+                                   false)
-+           .ToHandle(&evacuated)) {
-+    return;
-+  }
-+  i::Handle<i::Object> result;
-+  if (i::JSRegionObject::ToJSValue(i_isolate,
-+                                   i::indirect_handle(evacuated, i_isolate))
-+          .ToHandle(&result)) {
-+    info.GetReturnValue().Set(Utils::ToLocal(result));
-+  }
-+}
-+
-+bool CheckObjectArgument(const v8::FunctionCallbackInfo<v8::Value>& info,
-+                         const char* name) {
-+  if (info.Length() < 1 || !info[0]->IsObject() || info[0]->IsArray() ||
-+      info[0]->IsFunction()) {
-+    std::string message =
-+        std::string(name) + "() expects a plain object; use array() for arrays";
-+    info.GetIsolate()->ThrowException(Exception::TypeError(
-+        String::NewFromUtf8(info.GetIsolate(), message.c_str())
-+            .ToLocalChecked()));
-+    return false;
-+  }
-+  return true;
-+}
-+
-+MaybeLocal<Array> ArgumentsArray(
-+    const v8::FunctionCallbackInfo<v8::Value>& info) {
-+  std::vector<Local<Value>> items;
-+  for (int i = 0; i < info.Length(); i++) items.push_back(info[i]);
-+  return Array::New(info.GetIsolate(), items.data(), items.size());
-+}
-+
-+}  // namespace
-+
-+// region.object(value): a plain object copied into this region.
-+void Shell::RegionNewObject(const v8::FunctionCallbackInfo<v8::Value>& info) {
-+  DCHECK(i::ValidateCallbackInfo(info));
-+  if (!CheckObjectArgument(info, "region.object")) return;
-+  CreateInRegion(info, RegionIdOf(info), info[0]);
-+}
-+
-+// region.array(...items): an array of the items in this region.
-+void Shell::RegionNewArray(const v8::FunctionCallbackInfo<v8::Value>& info) {
-+  DCHECK(i::ValidateCallbackInfo(info));
-+  Local<Array> items;
-+  if (!ArgumentsArray(info).ToLocal(&items)) return;
-+  CreateInRegion(info, RegionIdOf(info), items);
-+}
-+
-+namespace {
-+
 +// A typed array whose bytes belong to `region` from the start.
 +void CreateTypedArrayInRegion(const v8::FunctionCallbackInfo<v8::Value>& info,
 +                              int region, const char* name) {
@@ -7950,7 +7890,7 @@ index 49121fe1..609c7389 100644
  }
  
  Local<ObjectTemplate> Shell::CreateAsyncHookTemplate(Isolate* isolate) {
-@@ -5376,9 +6867,1181 @@ MaybeLocal<Context> Shell::CreateEvaluationContext(Isolate* isolate) {
+@@ -5376,9 +6807,1181 @@ MaybeLocal<Context> Shell::CreateEvaluationContext(Isolate* isolate) {
    }
  #endif  // V8_ENABLE_HARDWARE_WATCHPOINT_SUPPORT
  
@@ -9132,7 +9072,7 @@ index 49121fe1..609c7389 100644
  namespace {
  int LineFromOffset(Local<debug::Script> script, int offset) {
    debug::Location location = script->GetSourceLocation(offset);
-@@ -6538,6 +9201,7 @@ void SourceGroup::JoinThread(const i::ParkedScope& parked) {
+@@ -6538,6 +9141,7 @@ void SourceGroup::JoinThread(const i::ParkedScope& parked) {
  void SerializationDataQueue::Enqueue(std::unique_ptr<SerializationData> data) {
    base::MutexGuard lock_guard(&mutex_);
    data_.push_back(std::move(data));
@@ -9140,7 +9080,7 @@ index 49121fe1..609c7389 100644
  }
  
  bool SerializationDataQueue::Dequeue(
-@@ -6547,6 +9211,7 @@ bool SerializationDataQueue::Dequeue(
+@@ -6547,6 +9151,7 @@ bool SerializationDataQueue::Dequeue(
    if (data_.empty()) return false;
    *out_data = std::move(data_[0]);
    data_.erase(data_.begin());
@@ -9148,7 +9088,7 @@ index 49121fe1..609c7389 100644
    return true;
  }
  
-@@ -6558,6 +9223,7 @@ bool SerializationDataQueue::IsEmpty() {
+@@ -6558,6 +9163,7 @@ bool SerializationDataQueue::IsEmpty() {
  void SerializationDataQueue::Clear() {
    base::MutexGuard lock_guard(&mutex_);
    data_.clear();
@@ -9156,7 +9096,7 @@ index 49121fe1..609c7389 100644
  }
  
  Worker::Worker(Isolate* parent_isolate, const char* script)
-@@ -6668,6 +9334,12 @@ std::unique_ptr<SerializationData> Worker::GetMessage(Isolate* requester) {
+@@ -6668,6 +9274,12 @@ std::unique_ptr<SerializationData> Worker::GetMessage(Isolate* requester) {
        out_queue_.Dequeue(&result);
        break;
      }
@@ -9169,7 +9109,7 @@ index 49121fe1..609c7389 100644
      out_semaphore_.ParkedWait(
          reinterpret_cast<i::Isolate*>(requester)->main_thread_local_isolate());
    }
-@@ -6698,6 +9370,10 @@ void Worker::Terminate() {
+@@ -6698,6 +9310,10 @@ void Worker::Terminate() {
    base::MutexGuard lock_guard(&worker_mutex_);
    auto expected = State::kRunning;
    if (!state_.compare_exchange_strong(expected, State::kTerminating)) return;
@@ -9180,7 +9120,7 @@ index 49121fe1..609c7389 100644
    std::unique_ptr<v8::Task> task(
        new TerminateTask(task_manager_, shared_from_this()));
    task_runner_->PostTask(std::move(task));
-@@ -6791,6 +9467,7 @@ Worker* Worker::GetCurrentWorker() { return current_worker_; }
+@@ -6791,6 +9407,7 @@ Worker* Worker::GetCurrentWorker() { return current_worker_; }
  void Worker::ExecuteInThread() {
    Isolate::CreateParams create_params = GetDefaultIsolateCreateParams();
    isolate_ = Isolate::New(create_params);
@@ -9188,7 +9128,7 @@ index 49121fe1..609c7389 100644
  
    // TODO(mdanylo): can we omit dump disable here?
  #ifdef V8_DUMPLING
-@@ -6926,6 +9603,7 @@ void Worker::ExecuteInThread() {
+@@ -6926,6 +9543,7 @@ void Worker::ExecuteInThread() {
      platform::NotifyIsolateShutdown(g_default_platform, isolate_);
    }
  
@@ -9196,7 +9136,7 @@ index 49121fe1..609c7389 100644
    isolate_->Dispose();
    isolate_ = nullptr;
  
-@@ -7190,6 +9868,8 @@ bool Shell::SetOptions(int argc, char* argv[]) {
+@@ -7190,6 +9808,8 @@ bool Shell::SetOptions(int argc, char* argv[]) {
        options.expected_to_throw = true;
      } else if (FlagMatches("--no-fail", &argv[i])) {
        options.no_fail = true;
@@ -9205,7 +9145,7 @@ index 49121fe1..609c7389 100644
      } else if (FlagMatches("--dump-counters", &argv[i])) {
        options.dump_counters = true;
      } else if (FlagMatches("--dump-counters-nvp", &argv[i])) {
-@@ -7310,6 +9990,9 @@ bool Shell::SetOptions(int argc, char* argv[]) {
+@@ -7310,6 +9930,9 @@ bool Shell::SetOptions(int argc, char* argv[]) {
                                    argv, &i)) {
        // Value is expressed in MB.
        options.max_serializer_memory = atoi(flag_value) * i::MB;
@@ -9215,7 +9155,7 @@ index 49121fe1..609c7389 100644
      } else if (FlagMatches("--bundle", &argv[i])) {
        options.bundle = true;
  #ifdef V8_FUZZILLI
-@@ -7921,6 +10604,27 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7921,6 +10544,27 @@ class Serializer : public ValueSerializer::Delegate {
      return true;
    }
  
@@ -9243,7 +9183,7 @@ index 49121fe1..609c7389 100644
   private:
    Maybe<bool> PrepareTransfer(Local<Context> context, Local<Value> transfer) {
      if (transfer->IsArray()) {
-@@ -7929,6 +10633,22 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7929,6 +10573,22 @@ class Serializer : public ValueSerializer::Delegate {
        for (uint32_t i = 0; i < length; ++i) {
          Local<Value> element;
          if (transfer_array->Get(context, i).ToLocal(&element)) {
@@ -9266,7 +9206,7 @@ index 49121fe1..609c7389 100644
            if (!element->IsArrayBuffer()) {
              ThrowError(isolate_,
                         "Transfer array elements must be an ArrayBuffer");
-@@ -7961,7 +10681,64 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7961,7 +10621,64 @@ class Serializer : public ValueSerializer::Delegate {
      }
    }
  
@@ -9331,7 +9271,7 @@ index 49121fe1..609c7389 100644
      for (const auto& global_array_buffer : array_buffers_) {
        Local<ArrayBuffer> array_buffer =
            Local<ArrayBuffer>::New(isolate_, global_array_buffer);
-@@ -7987,6 +10764,7 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7987,6 +10704,7 @@ class Serializer : public ValueSerializer::Delegate {
    ValueSerializer serializer_;
    std::unique_ptr<SerializationData> data_;
    std::vector<Global<ArrayBuffer>> array_buffers_;
@@ -9339,7 +9279,7 @@ index 49121fe1..609c7389 100644
    std::vector<Global<SharedArrayBuffer>> shared_array_buffers_;
    std::vector<Global<WasmModuleObject>> wasm_modules_;
    std::vector<std::shared_ptr<v8::BackingStore>> backing_stores_;
-@@ -8013,6 +10791,21 @@ class Deserializer : public ValueDeserializer::Delegate {
+@@ -8013,6 +10731,21 @@ class Deserializer : public ValueDeserializer::Delegate {
        return MaybeLocal<Value>();
      }
  
@@ -9361,7 +9301,7 @@ index 49121fe1..609c7389 100644
      uint32_t index = 0;
      for (const auto& backing_store : data_->backing_stores()) {
        Local<ArrayBuffer> array_buffer =
-@@ -8049,6 +10842,21 @@ class Deserializer : public ValueDeserializer::Delegate {
+@@ -8049,6 +10782,21 @@ class Deserializer : public ValueDeserializer::Delegate {
      return nullptr;
    }
  
@@ -9383,7 +9323,7 @@ index 49121fe1..609c7389 100644
   private:
    Isolate* isolate_;
    ValueDeserializer deserializer_;
-@@ -8309,9 +11117,13 @@ int Shell::Main(int argc, char* argv[]) {
+@@ -8309,9 +11057,13 @@ int Shell::Main(int argc, char* argv[]) {
    // The platform is owned by wrapper platform despite the `std::move` below.
    START_IGNORE_LIFETIME_SAFETY_WARNINGS()
    g_default_platform = g_platform.get();
@@ -9397,7 +9337,7 @@ index 49121fe1..609c7389 100644
    }
    if (options.stress_delay_tasks) {
      int64_t random_seed = i::v8_flags.fuzzer_random_seed;
-@@ -8438,6 +11250,7 @@ int Shell::Main(int argc, char* argv[]) {
+@@ -8438,6 +11190,7 @@ int Shell::Main(int argc, char* argv[]) {
    }
  
    Isolate* isolate = Isolate::New(create_params);
@@ -9406,7 +9346,7 @@ index 49121fe1..609c7389 100644
  #ifdef V8_FUZZILLI
  
 diff --git a/src/d8/d8.h b/src/d8/d8.h
-index 0c7ad50a..b4fb6595 100644
+index 0c7ad50a..90a65b06 100644
 --- a/src/d8/d8.h
 +++ b/src/d8/d8.h
 @@ -8,6 +8,7 @@
@@ -9644,7 +9584,7 @@ index 0c7ad50a..b4fb6595 100644
   private:
    static inline int DeserializationRunCount() {
      return options.stress_deserialize ? 1000 : 1;
-@@ -1007,6 +1135,48 @@ class Shell : public i::AllStatic {
+@@ -1007,6 +1135,46 @@ class Shell : public i::AllStatic {
    static Local<ObjectTemplate> GetOrCreateGlobalTemplate(Isolate* isolate);
    static Local<ObjectTemplate> CreateOSTemplate(Isolate* isolate);
    static Local<FunctionTemplate> CreateWorkerTemplate(Isolate* isolate);
@@ -9674,8 +9614,6 @@ index 0c7ad50a..b4fb6595 100644
 +      const v8::FunctionCallbackInfo<v8::Value>& info);
 +  static void RegionEnter(const v8::FunctionCallbackInfo<v8::Value>& info);
 +  static void RegionScopeExit(const v8::FunctionCallbackInfo<v8::Value>& info);
-+  static void RegionNewObject(const v8::FunctionCallbackInfo<v8::Value>& info);
-+  static void RegionNewArray(const v8::FunctionCallbackInfo<v8::Value>& info);
 +  static void RegionNewTypedArray(
 +      const v8::FunctionCallbackInfo<v8::Value>& info);
 +  static void RegionFree(const v8::FunctionCallbackInfo<v8::Value>& info);
@@ -9923,10 +9861,10 @@ index 793be1a7..a3f0c828 100644
    // Certain objects may be allocated in RO space if suitable for the snapshot.
    bool enable_ro_allocation_for_snapshot_ = false;
 diff --git a/src/flags/flag-definitions.h b/src/flags/flag-definitions.h
-index f47b7006..b9e3d5bb 100644
+index f47b7006..3dc60b35 100644
 --- a/src/flags/flag-definitions.h
 +++ b/src/flags/flag-definitions.h
-@@ -1306,6 +1306,41 @@ DEFINE_WEAK_IMPLICATION(trace_baseline, trace_baseline_batch_compilation)
+@@ -1306,6 +1306,44 @@ DEFINE_WEAK_IMPLICATION(trace_baseline, trace_baseline_batch_compilation)
  // Internalize into a shared string table in the shared isolate
  DEFINE_BOOL(shared_strings, false, "allow sharing of strings")
  DEFINE_IMPLICATION(shared_strings, shared_heap)
@@ -9936,9 +9874,12 @@ index f47b7006..b9e3d5bb 100644
 +DEFINE_IMPLICATION(harmony_regions, shared_strings)
 +// Readers of frozen regions get immutable typed array views.
 +DEFINE_IMPLICATION(harmony_regions, js_immutable_arraybuffer)
++// #{} and #[] literals and 'use region' come with the regions; the flag
++// itself is kept so that command lines naming it still work.
 +DEFINE_BOOL(harmony_region_literals, false,
 +            "#{} and #[] literals that create objects in the current region")
 +DEFINE_IMPLICATION(harmony_region_literals, harmony_regions)
++DEFINE_IMPLICATION(harmony_regions, harmony_region_literals)
 +DEFINE_BOOL(inline_region_access, true,
 +            "inline loads and stores of region objects in Maglev and Turbofan")
 +DEFINE_BOOL(region_loop_speculation, true,
@@ -12731,7 +12672,7 @@ index 00000000..844041ef
 +#endif  // V8_OBJECTS_JS_REGION_INL_H_
 diff --git a/src/objects/js-region.cc b/src/objects/js-region.cc
 new file mode 100644
-index 00000000..03ead2a8
+index 00000000..1be0e393
 --- /dev/null
 +++ b/src/objects/js-region.cc
 @@ -0,0 +1,3414 @@
@@ -14238,8 +14179,8 @@ index 00000000..03ead2a8
 +
 +
 +  // The keys array and map for objects with `keys`, shared by every object
-+  // with these keys that this isolate creates in a region: by run(),
-+  // region.object() and #{}. One map per shape keeps inline caches
++  // with these keys that this isolate creates in a region: by run() and
++  // #{}. One map per shape keeps inline caches
 +  // monomorphic.
 +  static std::pair<DirectHandle<FixedArray>, DirectHandle<Map>> ShapeFor(
 +      Isolate* isolate, const DirectHandleVector<String>& keys) {

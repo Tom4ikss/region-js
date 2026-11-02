@@ -1,5 +1,5 @@
 // #{ } and #[ ] create objects straight in the current region, no copy.
-// Run with Cmd+Shift+B (the task passes --harmony-region-literals).
+// Run with Cmd+Shift+B (the task passes --harmony-regions).
 // In VS Code the region-literals extension lets TypeScript read #{ } and #[ ]
 // as { } and [ ], so types work here; Biome and ESLint skip this folder.
 const region = new Region();

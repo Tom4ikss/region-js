@@ -1,4 +1,4 @@
-// d8 --harmony-region-literals --module --allow-natives-syntax --verify-heap literals.js
+// d8 --harmony-regions --module --allow-natives-syntax --verify-heap literals.js
 // #{} and #[] create objects directly in the current region, without a copy.
 const expectError = (name, fn) => {
   try {

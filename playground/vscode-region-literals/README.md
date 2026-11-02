@@ -1,6 +1,6 @@
 # Region literals for VS Code
 
-Colors the `#` of `#{ ... }` and `#[ ... ]` (d8 `--harmony-region-literals`)
+Colors the `#` of `#{ ... }` and `#[ ... ]` (d8 `--harmony-regions`)
 as an operator instead of an error, and adds a TypeScript server plugin
 (`node_modules/region-literals-ts-plugin`) that lets TypeScript read them as
 `{ ... }` and `[ ... ]`. The plugin replaces the `#` with a space before

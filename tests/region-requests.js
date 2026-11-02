@@ -1,4 +1,4 @@
-// d8 --harmony-region-literals --allow-natives-syntax --expose-gc --region-gc-pages=8 region-requests.js
+// d8 --harmony-regions --allow-natives-syntax --expose-gc --region-gc-pages=8 region-requests.js
 // The owner of a region can collect or mark it only while no other isolate
 // holds it (see region-holders.js and region-mark.js). After a move the old
 // owners hold it until their own reports find no pointer to it, and an idle

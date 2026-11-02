@@ -1,5 +1,5 @@
-// d8 --harmony-region-literals --allow-natives-syntax --expose-gc --verify-heap --region-gc-pages=8 region-mark.js
-// d8 --harmony-region-literals --allow-natives-syntax --expose-gc --region-gc-pages=8 region-mark.js -- reuse
+// d8 --harmony-regions --allow-natives-syntax --expose-gc --verify-heap --region-gc-pages=8 region-mark.js
+// d8 --harmony-regions --allow-natives-syntax --expose-gc --region-gc-pages=8 region-mark.js -- reuse
 // The owner of a live region that no other isolate holds marks it from its
 // own pointers and sweeps it, without stopping other threads: dead objects
 // on the pages of the region become its free memory, empty pages go to the

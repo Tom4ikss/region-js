@@ -1,4 +1,4 @@
-// d8 --harmony-region-literals --allow-natives-syntax --expose-gc --verify-heap region-holders.js
+// d8 --harmony-regions --allow-natives-syntax --expose-gc --verify-heap region-holders.js
 // Every region knows which isolates may hold pointers to its objects. An
 // isolate is added before it can get one: it creates or claims the region,
 // borrows it, or receives its objects in a message. Only its own full GC takes

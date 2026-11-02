@@ -1,4 +1,4 @@
-// d8 --harmony-region-literals --expose-gc --verify-heap use-region.js
+// d8 --harmony-regions --expose-gc --verify-heap use-region.js
 // 'use region': {} and [] in the function, and in the functions inside it,
 // are #{} and #[]. Destructuring patterns stay patterns.
 const check = (name, ok) => {

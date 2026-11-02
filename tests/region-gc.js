@@ -1,5 +1,5 @@
-// d8 --harmony-region-literals --allow-natives-syntax --expose-gc --verify-heap region-gc.js
-// d8 --harmony-region-literals --allow-natives-syntax --expose-gc region-gc.js -- pool
+// d8 --harmony-regions --allow-natives-syntax --expose-gc --verify-heap region-gc.js
+// d8 --harmony-regions --allow-natives-syntax --expose-gc region-gc.js -- pool
 // The owner of a region collects it by itself, without stopping other
 // threads, once nothing points into it: no other isolate holds it (see
 // region-holders.js) and the owner's own GC finds no pointer to it. Its pages
