@@ -8,7 +8,7 @@
 <title>spawn: задачи в потоках · Регионы владения в V8</title>
 <script>try{var t=localStorage.getItem('theme');if(t)document.documentElement.classList.add(t)}catch(e){}</script>
 <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="assets/style.css?v=762f1ac439">
+<link rel="stylesheet" href="assets/style.css?v=447503250a">
 </head>
 <body>
 <header class="topbar">
@@ -116,7 +116,7 @@ async-колбэк: page-7 3 строки
 <p>В примере есть <code>setTimeout(resolve, 10)</code>. В d8 <code>setTimeout</code> не ждёт указанную задержку: колбэки выполняются по очереди, как только поток свободен. В примерах таймер нужен только для того, чтобы работа стала асинхронной.</p>
 
 <h3 id="module"><a class="anchor" href="#module" aria-hidden="true" tabindex="-1"></a>Модули: <code>await</code> на верхнем уровне</h3>
-<p>Обычный скрипт d8 не разрешает <code>await</code> вне функции, поэтому примеры выше оборачивают код в <code>(async () =&gt; { ... })()</code>. С флагом <code>--module</code> файл выполняется как модуль, и <code>await spawn(...)</code> можно писать прямо на верхнем уровне. Перед выходом d8 дожидается задач, которые ещё идут, даже тех, которые никто не ждёт.</p>
+<p>Обычный скрипт d8 не разрешает <code>await</code> вне функции, поэтому примеры выше оборачивают код в <code>(async () =&gt; { ... })()</code>. С флагом <code><span class="nw">--module</span></code> файл выполняется как модуль, и <code>await spawn(...)</code> можно писать прямо на верхнем уровне. Перед выходом d8 дожидается задач, которые ещё идут, даже тех, которые никто не ждёт.</p>
 
 <figure class="example"><div class="ex-head"><span class="file"><a href="examples/26-module-await.js">examples/26-module-await.js</a></span><button class="copy" type="button">Копировать</button></div><pre class="code"><code><span class="tok-comment">// d8-flags: --module</span>
 <span class="tok-comment">// С флагом --module await работает прямо на верхнем уровне файла.</span>
@@ -355,7 +355,7 @@ result.total += <span class="tok-number">1</span>;
 
 1 pending unhandled Promise rejection(s) detected.</pre></figure>
 
-<p>Стек ошибки начинается со стека задачи: код задачи сохраняет строки своего файла, поэтому видно, где именно она упала. За ним после строки <code>at spawn()</code> идут кадры, которые эту задачу запустили, как у async-стеков в V8: функция, вызвавшая <code>spawn</code>, и её вызывающие. У вложенных задач таких строк несколько, по одной на каждый <code>spawn</code>. Место запуска стоит около 150 нс на <code>spawn</code>: на пустых задачах это 1,15 мкс вместо 1,3 на <code>spawn</code> и <code>await</code>. Флаг d8 <code>--no-spawn-stack</code> его выключает, тогда <code>spawn</code> вообще не смотрит на вызывающего. Чтобы ошибка не была необработанной, дождитесь задачи и поймайте её: <code>try { await task } catch (e) { ... }</code>. Задачи, которые никто не ждёт, ловит и линтер, правило <a href="tooling.html#no-floating-spawn"><code>no-floating-spawn</code></a>. Проще всего запускать задачи в <a href="#scope">блоке <code>spawn.scope</code></a>: он ждёт их сам.</p>
+<p>Стек ошибки начинается со стека задачи: код задачи сохраняет строки своего файла, поэтому видно, где именно она упала. За ним после строки <code>at spawn()</code> идут кадры, которые эту задачу запустили, как у async-стеков в V8: функция, вызвавшая <code>spawn</code>, и её вызывающие. У вложенных задач таких строк несколько, по одной на каждый <code>spawn</code>. Место запуска стоит около 150 нс на <code>spawn</code>: на пустых задачах это 1,15 мкс вместо 1,3 на <code>spawn</code> и <code>await</code>. Флаг d8 <code><span class="nw">--no-spawn-stack</span></code> его выключает, тогда <code>spawn</code> вообще не смотрит на вызывающего. Чтобы ошибка не была необработанной, дождитесь задачи и поймайте её: <code>try { await task } catch (e) { ... }</code>. Задачи, которые никто не ждёт, ловит и линтер, правило <a href="tooling.html#no-floating-spawn"><code>no-floating-spawn</code></a>. Проще всего запускать задачи в <a href="#scope">блоке <code>spawn.scope</code></a>: он ждёт их сам.</p>
 
 <h2 id="parallel"><a class="anchor" href="#parallel" aria-hidden="true" tabindex="-1"></a>Несколько задач сразу</h2>
 <p>Задачи выполняются в пуле воркеров, по умолчанию их четыре. Если сначала запустить все задачи, а потом ждать, до четырёх из них работают параллельно, остальные ждут в очереди свободного воркера.</p>
@@ -390,10 +390,10 @@ start = performance.<span class="tok-fn">now</span>();
 <span class="tok-fn">six</span>(<span class="tok-string">'пул из 4'</span>);
 <span class="tok-api">spawn</span>.<span class="tok-api">poolSize</span> = <span class="tok-number">6</span>;
 <span class="tok-fn">six</span>(<span class="tok-string">'пул из 6'</span>);</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8; время у вас будет другим</span></div><pre class="out">результаты совпадают: true
-по очереди: 515 ms
-все сразу:  140 ms (x3.7)
-6 задач, пул из 4: 260 ms
-6 задач, пул из 6: 140 ms</pre></figure>
+по очереди: 536 ms
+все сразу:  140 ms (x3.8)
+6 задач, пул из 4: 262 ms
+6 задач, пул из 6: 143 ms</pre></figure>
 
 <p>Четыре задачи сразу идут примерно в 3,5 раза быстрее, чем по очереди. Ровно в 4 раза не выходит, и дело не в запуске: он стоит несколько микросекунд, а задача считается больше ста миллисекунд. Причину мы отдельно не разбирали.</p>
 <p>Все воркеры пула берут задачи из одной очереди, как рабочие потоки tokio: задача ждёт, только пока заняты все воркеры, и никогда не стоит за долгой задачей, если рядом есть свободный воркер. Воркер, который ждёт в <code>await</code>, тоже свободен: пока одна его задача ждёт канал или таймер, он выполняет другие. Если задач больше, чем воркеров, лишние ждут очереди: шесть задач с пулом из четырёх идут почти вдвое дольше одной. Пул можно увеличить, например под 6 быстрых ядер этой машины: <code>spawn.poolSize = 6</code>. Больше, чем ядер, ставить нет смысла: потоки начнут делить одни и те же ядра. Значения меньше 1 и не числа <code>spawn</code> считает за 1.</p>
@@ -644,8 +644,8 @@ poisoned: false {"inFlight":0,"served":0}</pre></figure>
   ms = performance.<span class="tok-fn">now</span>() - start;
   <span class="tok-fn">print</span>(<span class="tok-string">`${</span>M<span class="tok-string">} задач сразу (await): ${</span>ms.<span class="tok-fn">toFixed</span>(<span class="tok-number">0</span>)<span class="tok-string">} ms, последний результат ${</span>results[M - <span class="tok-number">1</span>]<span class="tok-string">}`</span>);
 })();</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8; время у вас будет другим</span></div><pre class="out">воркеров в пуле: 4
-100000 задач по очереди (join): 406 ms, 4 µs на задачу
-20000 задач сразу (await): 102 ms, последний результат 20000</pre></figure>
+100000 задач по очереди (join): 418 ms, 4 µs на задачу
+20000 задач сразу (await): 104 ms, последний результат 20000</pre></figure>
 
 <p>Задачи, запущенные все сразу, стоят примерно столько же, около 4 мкс на штуку. Почему запуск вообще стал таким дешёвым, рассказано на странице <a href="inside.html#fast-spawn">«Как это устроено»</a>.</p>
 <p>Для задач от миллисекунды и дольше эти накладные расходы почти не видны. Для мелких задач они могут оказаться больше самой работы. Как с этим быть, показано на странице <a href="practices.html#batch">«Как делать и как не делать»</a>.</p>
@@ -759,7 +759,7 @@ borrowWhile: 55 (readers: 2) | readers после задачи: 0</pre></figure>
 <ul>
   <li>Классы не поддерживаются, <code>super</code>, <code>new.target</code> и <code>import</code> в колбэке не работают.</li>
   <li>Если воркер пула умер посреди задачи, её <code>join()</code> и <code>await</code> заканчиваются ошибкой <code>spawn() worker exited without a result</code>. Это касается только задач, которые он успел взять: остальные выполнят другие воркеры, а если умерли все, следующий <code>spawn</code> заводит новый пул. Тайм-аута у задач нет: задача, которая работает бесконечно, ждётся бесконечно.</li>
-  <li>Как и всё остальное, <code>spawn</code> есть только в d8 с флагом <code>--harmony-regions</code>.</li>
+  <li>Как и всё остальное, <code>spawn</code> есть только в d8 с флагом <code><span class="nw">--harmony-regions</span></code>.</li>
 </ul>
 </div>
 

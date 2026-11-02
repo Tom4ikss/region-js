@@ -827,6 +827,20 @@ def typograph(body):
     return ''.join(out)
 
 
+INLINE_CODE = re.compile(r'<code>([^<]*)</code>')
+FLAG = re.compile(r'(?<![\w-])(--?[\w][^\s<]*)')
+
+
+def glue_flags(body):
+    """Флаг d8 в строчном коде не рвётся после дефиса: перенос только по пробелам."""
+    parts = re.split(r'(<pre\b.*?</pre>)', body, flags=re.S)
+    for i in range(0, len(parts), 2):
+        parts[i] = INLINE_CODE.sub(
+            lambda m: '<code>%s</code>' % FLAG.sub(r'<span class="nw">\1</span>', m.group(1)),
+            parts[i])
+    return ''.join(parts)
+
+
 def asset_version(name):
     """Хэш файла в ссылке, чтобы браузер не держал старую версию из кэша."""
     with open(os.path.join(ROOT, 'assets', name), 'rb') as f:
@@ -852,6 +866,7 @@ def build(run=True):
         body = SNIPPET.sub(snippet_block, body)
         body, toc = headings(body)
         body = typograph(body)
+        body = glue_flags(body)
 
         titles = dict(PAGES)
         number = {s: n + 1 for n, (s, _) in enumerate(PAGES)}

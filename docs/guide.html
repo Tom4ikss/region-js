@@ -8,7 +8,7 @@
 <title>Данные в регионах · Регионы владения в V8</title>
 <script>try{var t=localStorage.getItem('theme');if(t)document.documentElement.classList.add(t)}catch(e){}</script>
 <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="assets/style.css?v=762f1ac439">
+<link rel="stylesheet" href="assets/style.css?v=447503250a">
 </head>
 <body>
 <header class="topbar">
@@ -48,8 +48,8 @@
 
 <div class="callout aside">
 <span class="callout-title">Как читать примеры</span>
-<p>Примеры запускаются так: <code>d8 --harmony-regions файл.js</code> (полная команда — на странице <a href="limits.html#run">«Ограничения и планы»</a>). Вместо <code>console.log</code> в d8 используется <code>print</code>. Строку-предупреждение «V8 is running with experimental features enabled», которую d8 печатает первой, мы из вывода убрали.</p>
-<p>Некоторые примеры запускаются с флагом <code>--module</code>, чтобы писать <code>await</code> прямо на верхнем уровне файла. Такие файлы начинаются со строки <code>// d8-flags: --module</code>.</p>
+<p>Примеры запускаются так: <code>d8 <span class="nw">--harmony-regions</span> файл.js</code> (полная команда — на странице <a href="limits.html#run">«Ограничения и планы»</a>). Вместо <code>console.log</code> в d8 используется <code>print</code>. Строку-предупреждение «V8 is running with experimental features enabled», которую d8 печатает первой, мы из вывода убрали.</p>
+<p>Некоторые примеры запускаются с флагом <code><span class="nw">--module</span></code>, чтобы писать <code>await</code> прямо на верхнем уровне файла. Такие файлы начинаются со строки <code>// d8-flags: <span class="nw">--module</span></code>.</p>
 <p>Ещё одна особенность d8: <code>worker.getMessage()</code> останавливает поток, пока не придёт ответ от воркера. Так короче писать примеры. В браузере то же самое делается через <code>worker.onmessage</code> или промис, который ждут через <code>await</code>.</p>
 </div>
 
@@ -86,7 +86,7 @@ id региона: 0 | владелец (isolate): 0</pre></figure>
 </div>
 
 <h2 id="literals"><a class="anchor" href="#literals" aria-hidden="true" tabindex="-1"></a>Литералы <code>#{}</code> и <code>#[]</code></h2>
-<p><code>run</code> копирует в регион то, что создал обычный код. Литералы <code>#{...}</code> и <code>#[...]</code> создают объект или массив сразу в текущем регионе, без промежуточного объекта в куче потока и без копии. Они включены вместе с <code>--harmony-regions</code>.</p>
+<p><code>run</code> копирует в регион то, что создал обычный код. Литералы <code>#{...}</code> и <code>#[...]</code> создают объект или массив сразу в текущем регионе, без промежуточного объекта в куче потока и без копии. Они включены вместе с <code><span class="nw">--harmony-regions</span></code>.</p>
 
 <figure class="example"><div class="ex-head"><span class="file"><a href="examples/37-literals.js">examples/37-literals.js</a></span><button class="copy" type="button">Копировать</button></div><pre class="code"><code><span class="tok-comment">// d8-flags: --module</span>
 <span class="tok-comment">// Литералы #{} и #[]: объект или массив создаётся сразу в текущем регионе, без копии.</span>
@@ -157,7 +157,7 @@ id региона: 0 | владелец (isolate): 0</pre></figure>
 <p>В VS Code типы в файлах с литералами работают через расширение из <code>playground/</code>, Biome и ESLint синтаксис <code>#{}</code> пока не понимают (<a href="tooling.html#literals">подробнее</a>).</p>
 
 <h3 id="use-region"><a class="anchor" href="#use-region" aria-hidden="true" tabindex="-1"></a>Директива <code>'use region'</code></h3>
-<p>Если почти все объекты функции должны лежать в регионе, решётку перед каждым <code>{</code> и <code>[</code> можно не писать. Директива <code>'use region'</code> в начале функции или файла, как <code>'use strict'</code>, делает каждый <code>{}</code> в этом коде литералом <code>#{}</code>, а каждый <code>[]</code> — <code>#[]</code>. Это обычный синтаксис JavaScript, поэтому TypeScript, ESLint, Biome и Prettier такой код понимают без расширений. Директива работает с флагом <code>--harmony-regions</code>, без него это просто строка.</p>
+<p>Если почти все объекты функции должны лежать в регионе, решётку перед каждым <code>{</code> и <code>[</code> можно не писать. Директива <code>'use region'</code> в начале функции или файла, как <code>'use strict'</code>, делает каждый <code>{}</code> в этом коде литералом <code>#{}</code>, а каждый <code>[]</code> — <code>#[]</code>. Это обычный синтаксис JavaScript, поэтому TypeScript, ESLint, Biome и Prettier такой код понимают без расширений. Директива работает с флагом <code><span class="nw">--harmony-regions</span></code>, без него это просто строка.</p>
 
 <figure class="example"><div class="ex-head"><span class="file"><a href="examples/42-use-region.js">examples/42-use-region.js</a></span><button class="copy" type="button">Копировать</button></div><pre class="code"><code><span class="tok-comment">// 'use region': в функции, и в функциях внутри неё, каждый {} — это #{}, а [] — #[].</span>
 <span class="tok-comment">// Обычный JS-синтаксис: TypeScript, ESLint и Biome его понимают.</span>
@@ -468,7 +468,7 @@ start = performance.<span class="tok-fn">now</span>();
 тот же объект? false | те же байты? true
 это обычный Uint8Array: true 4
 новая длина: 16
-8 МБ копией: 0.51 ms, через transfer: 0.04 ms
+8 МБ копией: 0.50 ms, через transfer: 0.04 ms
 исходный после transfer: 0 | в регионе: 1000000 1000000</pre></figure>
 
 <ul>
@@ -877,8 +877,8 @@ worker.<span class="tok-api">terminate</span>();</code></pre><div class="out-hea
   <span class="tok-fn">print</span>(<span class="tok-string">'главный поток после переезда:'</span>, <span class="tok-fn">String</span>(e));
 }
 worker.<span class="tok-api">terminate</span>();</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8; время у вас будет другим</span></div><pre class="out">узлов в дереве: 131071
-копия (structured clone): 126.12 ms
-переезд региона:          0.15 ms
+копия (structured clone): 124.95 ms
+переезд региона:          1.20 ms
 <span class="err">главный поток после переезда: OwnershipError: region 0 belongs to another thread (isolate 1, this is isolate 0) (sent at 02-before-after.js:13:10)</span></pre></figure>
 
 <p>Видно два разных текста ошибки. Сразу после отправки регион ещё в пути: «was sent to another thread and has not been received yet». Когда воркер получил сообщение, владелец уже он: «belongs to another thread». Обе ошибки заканчиваются местом отправки. <code>Object.keys</code>, <code>JSON.stringify</code> и прочее перечисление ключей проверяют владельца так же, как чтение поля.</p>
@@ -925,7 +925,7 @@ worker.<span class="tok-api">terminate</span>();</code></pre><div class="out-hea
 }
 worker.<span class="tok-api">terminate</span>();</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8; время у вас будет другим</span></div><pre class="out">тот же самый объект: true
 ходов: 2000 | последний писал: воркер
-один круг туда-обратно: 11.9 µs
+один круг туда-обратно: 12.2 µs
 Region.of для обычного объекта: Region.of() expects an object from a region</pre></figure>
 
 <p>Тысяча кругов «туда и обратно», и в конце в руках тот же самый объект: <code>current === state</code>. Один круг — два переезда и две пересылки сообщения — занимает около 10–11 микросекунд, от запуска к запуску по-разному.</p>
@@ -969,7 +969,7 @@ Region.of для обычного объекта: Region.of() expects an object 
 
 <h3 id="errors"><a class="anchor" href="#errors" aria-hidden="true" tabindex="-1"></a>Ошибки</h3>
 <p>Нарушения владения бросают <code>OwnershipError</code>. Это наследник <code>TypeError</code>, так что код, который ловил <code>TypeError</code>, работает как раньше. У ошибки два поля: <code>region</code> — номер региона и <code>reason</code> — причина одним словом, по которой удобно ветвиться вместо разбора текста.</p>
-<p>В конце текста ошибка говорит, где с регионом случилось то, из-за чего она возникла: где его отправили, разморозили, заморозили, запечатали, освободили или положили в <code>RwLock</code>. Например, <code>(sent at main.js:12:5)</code>. Код задачи <code>spawn</code> сохраняет строки своего файла, поэтому и отправка из задачи показывает место в файле. Если файла у кода нет, например у воркера из строки, будет номер потока: <code>(sent by isolate 2)</code>. Запись места стоит около 60 нс на событие, флаг d8 <code>--no-region-history</code> её выключает.</p>
+<p>В конце текста ошибка говорит, где с регионом случилось то, из-за чего она возникла: где его отправили, разморозили, заморозили, запечатали, освободили или положили в <code>RwLock</code>. Например, <code>(sent at main.js:12:5)</code>. Код задачи <code>spawn</code> сохраняет строки своего файла, поэтому и отправка из задачи показывает место в файле. Если файла у кода нет, например у воркера из строки, будет номер потока: <code>(sent by isolate 2)</code>. Запись места стоит около 60 нс на событие, флаг d8 <code><span class="nw">--no-region-history</span></code> её выключает.</p>
 <figure class="example"><div class="ex-head"><span class="file"><a href="examples/44-errors.js">examples/44-errors.js</a></span><button class="copy" type="button">Копировать</button></div><pre class="code"><code><span class="tok-comment">// d8-flags: --module</span>
 <span class="tok-comment">// OwnershipError: класс, поля region и reason, место события в тексте.</span>
 <span class="tok-keyword">const</span> orders = <span class="tok-keyword">new</span> <span class="tok-api">Channel</span>(<span class="tok-number">1</span>);

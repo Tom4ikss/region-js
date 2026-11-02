@@ -8,7 +8,7 @@
 <title>Редактор и линтеры · Регионы владения в V8</title>
 <script>try{var t=localStorage.getItem('theme');if(t)document.documentElement.classList.add(t)}catch(e){}</script>
 <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="assets/style.css?v=762f1ac439">
+<link rel="stylesheet" href="assets/style.css?v=447503250a">
 </head>
 <body>
 <header class="topbar">
@@ -70,7 +70,7 @@
   <li>Откройте папку <code>playground</code> в VS Code целиком (File → Open Folder). Типы и правила подключаются из её настроек, отдельный файл они не увидят.</li>
   <li>Выполните <code>npm install</code>: он ставит Biome, ESLint и TypeScript.</li>
   <li>Поставьте расширения Biome и ESLint. VS Code сам предложит их, они записаны в <code>.vscode/extensions.json</code>.</li>
-  <li>Укажите путь к своему d8 в <code>.vscode/settings.json</code>, настройка <code>regions.d8Path</code>. Тогда Cmd+Shift+B запускает открытый файл командой <code>d8 --harmony-regions --module --expose-gc --max-serializer-memory=4000 файл.js</code>.</li>
+  <li>Укажите путь к своему d8 в <code>.vscode/settings.json</code>, настройка <code>regions.d8Path</code>. Тогда Cmd+Shift+B запускает открытый файл командой <code>d8 <span class="nw">--harmony-regions</span> <span class="nw">--module</span> <span class="nw">--expose-gc</span> <span class="nw">--max-serializer-memory=4000</span> файл.js</code>.</li>
 </ol>
 <p>То же можно проверить из терминала, в папке песочницы:</p>
 <pre class="shell"><span class="prompt">$ </span>npm run typecheck      # типы, tsc
@@ -174,7 +174,7 @@ error  'config' is in a frozen region: tasks can read it but writing throws Owne
 <h2 id="literals"><a class="anchor" href="#literals" aria-hidden="true" tabindex="-1"></a>Литералы <code>#{}</code> в редакторе</h2>
 <p>Синтаксиса <code>#{...}</code> и <code>#[...]</code> (<a href="guide.html#literals">литералы регионов</a>) нет в JavaScript, поэтому сами по себе инструменты его не знают. Для VS Code в <code>playground/vscode-region-literals</code> лежит расширение. Оно подсвечивает <code>#</code> как оператор и подключает к TypeScript плагин: тот заменяет <code>#</code> перед <code>{</code> и <code>[</code> пробелом до разбора файла. Длина текста не меняется, поэтому ошибки, подсказки и автодополнение стоят на своих местах, а литерал получает тип такого же обычного литерала. Ставится оно символической ссылкой (команда в README расширения), после чего нужен «Developer: Reload Window».</p>
 <p>Одна особенность от самого TypeScript: пустой <code>#[]</code> для него — пустой <code>[]</code>, то есть <code>never[]</code>, и <code>push</code> в него подсвечивается как ошибка. Подскажите тип: <code>/** @type {Order[]} */ (#[])</code>.</p>
-<p>Biome и ESLint литералы не разбирают. В <code>playground/</code> файлы с литералами лежат в <code>experimental/</code>, который оба пропускают, а TypeScript проверяет. Запускайте их в d8 с флагом <code>--harmony-regions</code>.</p>
+<p>Biome и ESLint литералы не разбирают. В <code>playground/</code> файлы с литералами лежат в <code>experimental/</code>, который оба пропускают, а TypeScript проверяет. Запускайте их в d8 с флагом <code><span class="nw">--harmony-regions</span></code>.</p>
 <p>Без всего этого обходится директива <code>'use region'</code> (<a href="guide.html#use-region">подробнее</a>): с ней обычные <code>{}</code> и <code>[]</code> в функции создаются как <code>#{}</code> и <code>#[]</code>, а для инструментов это обычный JavaScript со строкой-директивой.</p>
 
 <h2 id="runtime"><a class="anchor" href="#runtime" aria-hidden="true" tabindex="-1"></a>Что видно только при запуске</h2>

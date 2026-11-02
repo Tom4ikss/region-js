@@ -152,6 +152,10 @@
 * { box-sizing: border-box; }
 
 html { -webkit-text-size-adjust: 100%; scroll-padding-top: calc(var(--top) + 1.25rem); }
+/* The glow behind the hero is wider than the page. With overflow set on html
+   too, the one of body is not moved to the viewport and clips body itself;
+   clip, unlike hidden, keeps the sidebars sticky. */
+html, body { overflow-x: clip; }
 
 body {
   margin: 0;
@@ -410,6 +414,7 @@ code, kbd { font-size: 0.86em; }
   hyphens: none;
 }
 p > code, li > code { white-space: nowrap; }
+code .nw { white-space: nowrap; }
 h1 code, h2 code, h3 code { font-size: 0.85em; background: none; padding: 0; }
 
 /* ---------- Выноски ---------- */
@@ -863,6 +868,8 @@ td.verdict-good { color: var(--ok); }
   h2 { font-size: 1.4rem; }
   .lead { font-size: 1.08rem; }
   pre { font-size: 0.78rem; }
+  /* Long error texts and commands wrap instead of widening the page. */
+  p > code, li > code { white-space: normal; }
   .stats { grid-template-columns: 1fr; }
   .pager { grid-template-columns: 1fr; }
   .pager .next { grid-column: 1; }
