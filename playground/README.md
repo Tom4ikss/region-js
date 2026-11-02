@@ -26,8 +26,8 @@ npm run test:rules    # тесты правила ESLint
 командной строки `#{}` не разбирает. В VS Code их проверяет свой `experimental/jsconfig.json`
 через плагин из расширения `vscode-region-literals` (его нужно поставить, см. README расширения).
 
-`experimental/whats-new.js` — тур по новому в 0.4: литералы без отдельного флага, запись
-в регион в задаче, `spawn.shield` с таймаутом. `examples/demo.js` — рабочий пример, `examples/channels.js` — конвейер на каналах,
+`experimental/whats-new.js` — тур по новым API: литералы без отдельного флага, запись
+в регион в задаче, `spawn.scope`, `spawn.shield` и его таймаут. `examples/demo.js` — рабочий пример, `examples/channels.js` — конвейер на каналах,
 `examples/mistakes.js` — типичные ошибки,
 каждая должна подсветиться.
 
