@@ -16,7 +16,6 @@
   "include": [
     "types/**/*.d.ts",
     "examples/**/*.js",
-    "experimental/**/*.js",
     "*.js"
   ]
 }

@@ -22,6 +22,9 @@ npm run lint:regions  # правило ESLint про регионы в зада�
 npm run test:rules    # тесты правила ESLint
 ```
 
+`experimental/` в проверку типов не входит: TypeScript не разбирает `#{}`, а с синтаксической
+ошибкой хотя бы в одном файле `tsc` не проверяет типы нигде.
+
 `examples/demo.js` — рабочий пример, `examples/channels.js` — конвейер на каналах,
 `examples/mistakes.js` — типичные ошибки,
 каждая должна подсветиться.
