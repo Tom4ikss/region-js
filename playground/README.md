@@ -25,7 +25,8 @@ npm run test:rules    # тесты правила ESLint
 `experimental/` в проверку типов не входит: TypeScript не разбирает `#{}`, а с синтаксической
 ошибкой хотя бы в одном файле `tsc` не проверяет типы нигде.
 
-`examples/demo.js` — рабочий пример, `examples/channels.js` — конвейер на каналах,
+`experimental/whats-new.js` — тур по новому в 0.4: литералы без отдельного флага, запись
+в регион в задаче, `spawn.shield` с таймаутом. `examples/demo.js` — рабочий пример, `examples/channels.js` — конвейер на каналах,
 `examples/mistakes.js` — типичные ошибки,
 каждая должна подсветиться.
 
