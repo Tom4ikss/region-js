@@ -47,7 +47,7 @@
 </div>
 
 <h2 id="types">Типы</h2>
-<p>Файл <code>types/regions.d.ts</code> описывает <code>Region</code>, <code>spawn</code>, <code>Channel</code> и глобальные функции d8 (<code>print</code>, <code>Worker</code> с его <code>getMessage</code>). Встроенный в VS Code TypeScript читает его через <code>jsconfig.json</code>, ставить ничего не нужно. Это даёт автодополнение и проверку того, что кладётся в регион: результат <code>run</code> и аргументы <code>spawn</code> должны быть данными (примитивы, простые объекты, массивы, типизированные массивы).</p>
+<p>Файл <code>types/regions.d.ts</code> описывает <code>Region</code>, <code>spawn</code>, <code>Channel</code> и глобальные функции d8 (<code>print</code>, <code>Worker</code> с его <code>getMessage</code>). Встроенный в VS Code TypeScript читает его через <code>jsconfig.json</code>, ставить ничего не нужно. Это даёт автодополнение и проверку того, что кладётся в регион: результат <code>run</code> и аргументы <code>spawn</code> должны быть данными (примитивы, простые объекты, массивы, типизированные массивы, функции из <code>Region.fn</code>).</p>
 <div class="versus">
 <js-bad>
 region.run(() => new Map());

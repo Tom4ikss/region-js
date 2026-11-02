@@ -16,6 +16,11 @@ region.run(() => new Map());
 // Type error: regions have no such method.
 region.frezee();
 
+// Type error: a region holds only functions made by Region.fn().
+region.run(() => ({ scale: (x) => x * 2 }));
+const scaled = region.run(() => ({ scale: Region.fn((x) => x * 2) }));
+scaled.scale(3);
+
 // Type error: objects in a region have a fixed shape.
 const state = region.run(() => ({ count: 0 }));
 state.total = 1;

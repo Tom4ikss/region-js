@@ -1,4 +1,4 @@
-функция: TypeError: onClick() {} cannot be moved into a region
+функция: TypeError: a region object can hold only functions made by Region.fn()
 Map: TypeError: #<Map> cannot be moved into a region
 Date: TypeError: [object Date] cannot be moved into a region
 BigInt: TypeError: 10 cannot be shared

@@ -16,9 +16,17 @@ type RegionTypedArray =
   | BigInt64Array
   | BigUint64Array;
 
+declare const regionFunction: unique symbol;
+
+/** A function made by Region.fn(): the only kind of function a region can
+ * hold. */
+type RegionFunction<F extends (...args: any[]) => any = (...args: any[]) => any> = F & {
+  readonly [regionFunction]: true;
+};
+
 /** Data that can be copied into a region: primitives, typed arrays, plain
- * arrays and plain objects. Functions, class instances, Map, Set, Date and
- * symbols are not allowed. */
+ * arrays, plain objects and functions made by Region.fn(). Other functions,
+ * class instances, Map, Set, Date and symbols are not allowed. */
 type RegionData =
   | null
   | undefined
@@ -26,6 +34,7 @@ type RegionData =
   | number
   | string
   | RegionTypedArray
+  | RegionFunction
   | RegionData[]
   | { readonly [key: string]: RegionData };
 
@@ -165,6 +174,12 @@ declare class Region implements Disposable {
   static of(value: object): Region;
   /** Whether `value` is an object of some region; never throws. */
   static isRegionObject(value: unknown): boolean;
+  /** A function that objects of any region can hold. Every thread compiles
+   * its source again without the closure, so `fn` may use only its
+   * arguments, `this`, built-in globals and its own name. Reading it from a
+   * region in any thread gives that thread's copy, the same one each time.
+   * Throws TypeError for captured variables, eval, classes and methods. */
+  static fn<F extends (...args: any[]) => any>(fn: F): RegionFunction<F>;
 }
 
 interface RegionScope extends Disposable {

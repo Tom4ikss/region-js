@@ -3,7 +3,8 @@
     "target": "ES2024",
     "lib": [
       "ES2024",
-      "ESNext.Disposable"
+      "ESNext.Disposable",
+      "ES2025.Float16"
     ],
     "module": "ESNext",
     "checkJs": true,

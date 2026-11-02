@@ -382,7 +382,7 @@ spread объекта: {"x":1,"y":2,"z":3}
 </div>
 
 <h2 id="not-allowed"><a class="anchor" href="#not-allowed" aria-hidden="true" tabindex="-1"></a>Что нельзя положить в регион</h2>
-<p>В регион попадают только простые объекты (их прототип — <code>Object.prototype</code> или <code>null</code>), обычные массивы, типизированные массивы и примитивы. Функции, <code>Map</code>, <code>Set</code>, <code>Date</code>, <code>BigInt</code>, <code>Symbol</code>, сам <code>ArrayBuffer</code>, <code>DataView</code>, экземпляры классов, наследники <code>Array</code> и объекты из другого региона вызовут ошибку. Про типизированные массивы — <a href="#typed">отдельный раздел</a>.</p>
+<p>В регион попадают только простые объекты (их прототип — <code>Object.prototype</code> или <code>null</code>), обычные массивы, типизированные массивы, примитивы и функции из <code>Region.fn</code> (<a href="#functions">ниже</a>). Остальные функции, <code>Map</code>, <code>Set</code>, <code>Date</code>, <code>BigInt</code>, <code>Symbol</code>, сам <code>ArrayBuffer</code>, <code>DataView</code>, экземпляры классов, наследники <code>Array</code> и объекты из другого региона вызовут ошибку. Про типизированные массивы — <a href="#typed">отдельный раздел</a>.</p>
 
 <figure class="example"><div class="ex-head"><span class="file"><a href="examples/05-not-allowed.js">examples/05-not-allowed.js</a></span><button class="copy" type="button">Копировать</button></div><pre class="code"><code><span class="tok-comment">// Что нельзя положить в регион.</span>
 <span class="tok-keyword">const</span> region = <span class="tok-keyword">new</span> <span class="tok-api">Region</span>();
@@ -416,7 +416,7 @@ spread объекта: {"x":1,"y":2,"z":3}
 <span class="tok-keyword">class</span> List <span class="tok-keyword">extends</span> Array {}
 <span class="tok-fn">tryRun</span>(<span class="tok-string">'экземпляр класса'</span>, () =&gt; ({ p: <span class="tok-keyword">new</span> <span class="tok-fn">Point</span>(<span class="tok-number">7</span>) }));
 <span class="tok-fn">tryRun</span>(<span class="tok-string">'наследник Array'</span>, () =&gt; List.<span class="tok-fn">from</span>([<span class="tok-number">1</span>, <span class="tok-number">2</span>]));
-<span class="tok-fn">tryRun</span>(<span class="tok-string">'объект без прототипа'</span>, () =&gt; Object.<span class="tok-fn">assign</span>(Object.<span class="tok-fn">create</span>(<span class="tok-keyword">null</span>), { x: <span class="tok-number">1</span> }));</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8</span></div><pre class="out"><span class="err">функция: TypeError: onClick() {} cannot be moved into a region</span>
+<span class="tok-fn">tryRun</span>(<span class="tok-string">'объект без прототипа'</span>, () =&gt; Object.<span class="tok-fn">assign</span>(Object.<span class="tok-fn">create</span>(<span class="tok-keyword">null</span>), { x: <span class="tok-number">1</span> }));</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8</span></div><pre class="out"><span class="err">функция: TypeError: a region object can hold only functions made by Region.fn()</span>
 <span class="err">Map: TypeError: #&lt;Map&gt; cannot be moved into a region</span>
 <span class="err">Date: TypeError: [object Date] cannot be moved into a region</span>
 <span class="err">BigInt: TypeError: 10 cannot be shared</span>
@@ -430,6 +430,49 @@ Uint8Array: ok
 объект без прототипа: ok</pre></figure>
 
 <p>Экземпляр класса раньше молча копировался как обычный объект и терял класс. Теперь это ошибка: у объекта в регионе нет своего прототипа, поэтому методы класса до него всё равно бы не дошли. Если нужны данные из экземпляра, переложите их в простой объект: <code>region.run(() =&gt; ({ x: point.x }))</code>.</p>
+
+<h2 id="functions"><a class="anchor" href="#functions" aria-hidden="true" tabindex="-1"></a>Функции в регионе: <code>Region.fn</code></h2>
+<p>Обычную функцию в регион не положить: её код и замыкание живут в куче одного потока. <code>Region.fn(f)</code> делает из функции такую, которую объекты региона могут хранить в полях и массивах. Регион держит только её исходный текст и место в файле, а каждый поток, который её прочитал, компилирует текст сам, один раз, и дальше получает ту же функцию: <code>a.f === b.f</code> для любых регионов, в которых она лежит. Вызывается она как обычная функция, <code>this</code> — объект, на котором её вызвали, а стек ошибки показывает строку, где её написали.</p>
+<p>Раз замыкание с функцией не переезжает, ей можно пользоваться только своими аргументами, <code>this</code>, встроенными глобальными объектами (<code>Math</code>, <code>JSON</code> и т. п.) и своим именем, чтобы вызвать себя. Захваченная переменная, <code>this</code> внешней функции у стрелки, <code>eval</code>, классы и методы объектов — <code>TypeError</code> сразу в <code>Region.fn</code>, с подсказкой, что передать аргументом. Проверку делает тот же разбор, что и у <code>spawn</code> (<a href="spawn.html#captures">захват</a>).</p>
+<figure class="example"><div class="ex-head"><span class="file"><a href="examples/48-region-fn.js">examples/48-region-fn.js</a></span><button class="copy" type="button">Копировать</button></div><pre class="code"><code><span class="tok-comment">// d8-flags: --module</span>
+<span class="tok-comment">// Функции в регионе: Region.fn.</span>
+<span class="tok-keyword">const</span> area = <span class="tok-api">Region</span>.<span class="tok-fn">fn</span>(<span class="tok-keyword">function</span> () {
+  <span class="tok-keyword">return</span> <span class="tok-keyword">this</span>.w * <span class="tok-keyword">this</span>.h;
+});
+
+<span class="tok-keyword">const</span> region = <span class="tok-keyword">new</span> <span class="tok-api">Region</span>();
+<span class="tok-keyword">const</span> shapes = region.<span class="tok-api">run</span>(() =&gt; [
+  { w: <span class="tok-number">2</span>, h: <span class="tok-number">3</span>, area },
+  { w: <span class="tok-number">4</span>, h: <span class="tok-number">5</span>, area },
+]);
+<span class="tok-fn">print</span>(<span class="tok-string">'площади:'</span>, shapes.<span class="tok-fn">map</span>((s) =&gt; s.<span class="tok-fn">area</span>()).<span class="tok-api">join</span>(<span class="tok-string">', '</span>));
+<span class="tok-fn">print</span>(<span class="tok-string">'та же функция:'</span>, shapes[<span class="tok-number">0</span>].area === area);
+
+<span class="tok-comment">// Задача получает регион вместе с функциями. Её поток компилирует функцию</span>
+<span class="tok-comment">// из исходного текста один раз и дальше берёт готовую.</span>
+<span class="tok-keyword">const</span> total = <span class="tok-keyword">await</span> <span class="tok-api">spawn</span>(() =&gt; shapes.<span class="tok-fn">reduce</span>((sum, s) =&gt; sum + s.<span class="tok-fn">area</span>(), <span class="tok-number">0</span>));
+<span class="tok-fn">print</span>(<span class="tok-string">'в задаче:'</span>, total);
+
+<span class="tok-comment">// Замыкание с функцией не переезжает: она видит только свои аргументы,</span>
+<span class="tok-comment">// this, встроенные глобальные объекты и своё имя.</span>
+<span class="tok-keyword">const</span> rate = <span class="tok-number">1.2</span>;
+<span class="tok-keyword">try</span> {
+  <span class="tok-api">Region</span>.<span class="tok-fn">fn</span>((x) =&gt; x * rate);
+} <span class="tok-keyword">catch</span> (e) {
+  <span class="tok-fn">print</span>(e.name + <span class="tok-string">': '</span> + e.message);
+}
+
+<span class="tok-comment">// Обычную функцию регион не возьмёт.</span>
+<span class="tok-keyword">try</span> {
+  region.<span class="tok-api">run</span>(() =&gt; ({ f: (x) =&gt; x * <span class="tok-number">2</span> }));
+} <span class="tok-keyword">catch</span> (e) {
+  <span class="tok-fn">print</span>(e.name + <span class="tok-string">': '</span> + e.message);
+}</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8 --module</span></div><pre class="out">площади: 6, 20
+та же функция: true
+в задаче: 26
+<span class="err">TypeError: a Region.fn() function cannot use rate of its closure: every thread compiles the function again without it. Pass rate as an argument, or keep it in the object the function is called on</span>
+<span class="err">TypeError: a region object can hold only functions made by Region.fn()</span></pre></figure>
+<p>Каждый регион, куда попала функция, хранит свою маленькую запись о ней, около 48 байт. Сколько бы объектов одного <code>run</code> ни ссылались на функцию, запись одна; повторная запись той же функции в поле ничего не создаёт.</p>
 
 <h2 id="typed"><a class="anchor" href="#typed" aria-hidden="true" tabindex="-1"></a>Типизированные массивы</h2>
 <p>В регион можно положить <code>Uint8Array</code>, <code>Float64Array</code> и остальные типизированные массивы, включая <code>BigInt64Array</code> и <code>Float16Array</code>. Они устроены иначе, чем объекты региона: регион хранит сам блок памяти, а при чтении поля вы получаете обычный локальный типизированный массив, который смотрит на эту память (view). Поэтому работа с ним идёт на полной скорости, как с любым типизированным массивом, без проверки владельца на каждом элементе.</p>
@@ -468,7 +511,7 @@ start = performance.<span class="tok-fn">now</span>();
 тот же объект? false | те же байты? true
 это обычный Uint8Array: true 4
 новая длина: 16
-8 МБ копией: 0.65 ms, через transfer: 0.09 ms
+8 МБ копией: 0.47 ms, через transfer: 0.03 ms
 исходный после transfer: 0 | в регионе: 1000000 1000000</pre></figure>
 
 <ul>
@@ -877,8 +920,8 @@ worker.<span class="tok-api">terminate</span>();</code></pre><div class="out-hea
   <span class="tok-fn">print</span>(<span class="tok-string">'главный поток после переезда:'</span>, <span class="tok-fn">String</span>(e));
 }
 worker.<span class="tok-api">terminate</span>();</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8; время у вас будет другим</span></div><pre class="out">узлов в дереве: 131071
-копия (structured clone): 135.36 ms
-переезд региона:          1.19 ms
+копия (structured clone): 118.97 ms
+переезд региона:          0.13 ms
 <span class="err">главный поток после переезда: OwnershipError: region 0 belongs to another thread (isolate 1, this is isolate 0) (sent at 02-before-after.js:13:10)</span></pre></figure>
 
 <p>Видно два разных текста ошибки. Сразу после отправки регион ещё в пути: «was sent to another thread and has not been received yet». Когда воркер получил сообщение, владелец уже он: «belongs to another thread». Обе ошибки заканчиваются местом отправки. <code>Object.keys</code>, <code>JSON.stringify</code> и прочее перечисление ключей проверяют владельца так же, как чтение поля.</p>
@@ -925,7 +968,7 @@ worker.<span class="tok-api">terminate</span>();</code></pre><div class="out-hea
 }
 worker.<span class="tok-api">terminate</span>();</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8; время у вас будет другим</span></div><pre class="out">тот же самый объект: true
 ходов: 2000 | последний писал: воркер
-один круг туда-обратно: 13.0 µs
+один круг туда-обратно: 10.9 µs
 Region.of для обычного объекта: Region.of() expects an object from a region</pre></figure>
 
 <p>Тысяча кругов «туда и обратно», и в конце в руках тот же самый объект: <code>current === state</code>. Один круг — два переезда и две пересылки сообщения — занимает около 10–11 микросекунд, от запуска к запуску по-разному.</p>
@@ -940,6 +983,7 @@ Region.of для обычного объекта: Region.of() expects an object 
 <tr><td><code>region.run(fn, [buffer])</code></td><td>То же, но память типизированных массивов с этими <code>ArrayBuffer</code> переезжает без копии, а исходные буферы отсоединяются.</td></tr>
 <tr><td><code>region.id</code>, <code>region.owner</code></td><td>Номер региона и номер потока-владельца.</td></tr>
 <tr><td><code>Region.of(obj)</code></td><td>Регион, в котором лежит <code>obj</code>. Для обычного объекта — ошибка.</td></tr>
+<tr><td><code>Region.fn(f)</code></td><td>Функция, которую можно хранить в регионе. Каждый поток компилирует её сам и получает одну и ту же функцию. Замыкания у неё нет.</td></tr>
 <tr><td><code>Region.isRegionObject(value)</code></td><td>Лежит ли значение в каком-нибудь регионе. Ошибок не бросает.</td></tr>
 <tr><td><code>worker.postMessage(msg, [region])</code></td><td>Переезд: получатель становится владельцем, отправитель теряет доступ. Вместо <code>region</code> можно указать любой его объект.</td></tr>
 <tr><td><code>worker.postMessage(msg)</code></td><td>Для объектов замороженного региона — рассылка без копии.</td></tr>
@@ -1049,6 +1093,7 @@ region 0 was sent to another thread and has not been received yet (sent at 44-er
 <li class="h2"><a href="#rules">Чтение и запись</a></li>
 <li class="h2"><a href="#arrays">Массивы и методы</a></li>
 <li class="h2"><a href="#not-allowed">Что нельзя положить в регион</a></li>
+<li class="h2"><a href="#functions">Функции в регионе: Region.fn</a></li>
 <li class="h2"><a href="#typed">Типизированные массивы</a></li>
 <li class="h3"><a href="#typed-detach">Когда view отсоединяются</a></li>
 <li class="h2"><a href="#share">Общие данные: Region.share</a></li>
