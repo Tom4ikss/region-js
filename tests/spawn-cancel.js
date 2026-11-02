@@ -330,6 +330,114 @@ const busy = (ms) => {
   check('bad argument', (await outcome(spawn.shield(1))).startsWith('TypeError'));
 }
 
+// spawn.shield(fn, { timeout }): cleanup that hangs is aborted with a
+// TimeoutError after the timeout, so the task still ends.
+{
+  const log = new Region().run(() => []);
+  const start = performance.now();
+  const task = spawn(async (log) => {
+    try {
+      await (globalThis.kept = new Promise(() => {}));
+    } finally {
+      try {
+        await spawn.shield(async () => {
+          try {
+            await (globalThis.keptToo = new Promise(() => {}));
+          } finally {
+            log.push('shield cleanup: ' + spawn.aborted());
+          }
+        }, { timeout: 40 });
+      } catch (e) {
+        log.push('shield: ' + e.name + ': ' + e.message);
+      }
+    }
+  }, log);
+  busy(20);
+  task.abort();
+  const result = await outcome(task);
+  const took = performance.now() - start;
+  check('hung shield, task still aborted', result.startsWith('AbortError'), result);
+  check('ended at the deadline', took < 400, Math.round(took) + ' ms');
+  check('shield timed out', log.join(', ') === 'shield cleanup: true, shield: ' +
+        'TimeoutError: spawn.shield() did not finish in 40 ms', log.join(', '));
+}
+
+// The deadline holds whether or not the task is aborted; a shield that ends
+// in time is not aborted later, and the task goes on.
+{
+  const value = await outcome(spawn(async () => {
+    const fast = await spawn.shield(async () => {
+      await null;
+      return 'fast';
+    }, { timeout: 30 });
+    let slow;
+    try {
+      await spawn.shield(() => new Promise(() => {}), { timeout: 30 });
+    } catch (e) {
+      slow = e.name;
+    }
+    const end = performance.now() + 60;
+    while (performance.now() < end);
+    await null;
+    return [fast, slow, spawn.aborted()];
+  }));
+  check('in time and too slow', value === 'value ["fast","TimeoutError",false]', value);
+}
+
+// It aborts the shield's own waits and tasks, not those of other shields.
+// A shield that did not finish in time fails with the TimeoutError even if
+// its code caught it: its awaits throw it from then on.
+{
+  const ch = new Channel(1);
+  const never = new Channel(1);
+  const log = new Region().run(() => []);
+  const task = spawn(async (ch, never, log) => {
+    let child;
+    const timed = spawn.shield(async () => {
+      child = spawn(async (never) => { await never.recv(); }, never)
+          .then(() => log.push('child: done'), (e) => log.push('child: ' + e.name));
+      try {
+        await never.recv();
+      } catch (e) {
+        log.push('wait: ' + e.name);
+      }
+    }, { timeout: 30 });
+    const other = spawn.shield(async () => {
+      const { value } = await ch.recv();
+      log.push('other got ' + value);
+    });
+    await timed.catch((e) => log.push('timed: ' + e.name));
+    await ch.send(5);
+    await other;
+    await child;
+  }, ch, never, log);
+  const result = await outcome(task);
+  check('task with a timed shield', result === 'value undefined', result);
+  check('only the timed shield', [...log].sort().join(', ') ===
+        'child: AbortError, other got 5, timed: TimeoutError, wait: TimeoutError',
+        log.join(', '));
+}
+
+// A write guard held by a shield that times out poisons the lock.
+{
+  const lock = new RwLock({ n: 0 });
+  const result = await outcome(spawn(async (lock) => {
+    try {
+      await spawn.shield(async () => {
+        using g = await lock.write();
+        g.value.n = 1;
+        await new Promise(() => {});
+      }, { timeout: 20 });
+    } catch (e) {
+      return e.name;
+    }
+  }, lock));
+  check('shield timed out holding the lock', result === 'value "TimeoutError"', result);
+  check('lock poisoned', lock.poisoned === true);
+  check('bad timeout',
+        (await outcome(spawn.shield(() => 1, { timeout: -1 }))).startsWith('TypeError'));
+}
+
 // Code that never awaits still has to check spawn.aborted().
 {
   const task = spawn(() => {

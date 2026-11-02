@@ -270,8 +270,12 @@ declare namespace spawn {
    * in Trio: its awaits, channel and lock waits do not fail with the abort,
    * and the tasks it spawns are not aborted with the task. The task ends
    * only after its shields. In an aborted task, awaiting the shield throws
-   * the abort once `fn` has finished, or the error of `fn`. */
-  function shield<T>(fn: () => T | PromiseLike<T>): Promise<T>;
+   * the abort once `fn` has finished, or the error of `fn`. With `timeout`
+   * in milliseconds the shield itself is aborted with a TimeoutError if `fn`
+   * has not finished by then, aborted task or not: from then on its awaits
+   * throw, and so does awaiting the shield. */
+  function shield<T>(fn: () => T | PromiseLike<T>,
+                     options?: { timeout?: number }): Promise<T>;
 }
 
 /** What a receive gives: the value, or `done: true` once the channel is

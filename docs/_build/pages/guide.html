@@ -213,7 +213,7 @@
 <tr><td><code>region.freed</code>, <code>region.byteSize</code>, <code>Region.stats()</code></td><td>Освобождён ли регион, сколько байт в него скопировано, и сводка по всем регионам процесса.</td></tr>
 <tr><td><code>spawn(fn, ...args)</code></td><td>Запустить функцию в отдельном потоке. См. <a href="spawn.html">следующую страницу</a>.</td></tr>
 <tr><td><code>spawn.scope(async (s) =&gt; ...)</code></td><td>Блок задач <code>s.spawn(...)</code>: ждёт их все, первая ошибка отменяет остальные. См. <a href="spawn.html#scope">spawn.scope</a>.</td></tr>
-<tr><td><code>spawn.shield(fn)</code></td><td>Уборка, которую отмена задачи не прерывает: её <code>await</code> не бросают. См. <a href="spawn.html#abort">отмену</a>.</td></tr>
+<tr><td><code>spawn.shield(fn, { timeout })</code></td><td>Уборка, которую отмена задачи не прерывает: её <code>await</code> не бросают. <code>timeout</code> в миллисекундах — дедлайн, после него <code>shield</code> отменяется с <code>TimeoutError</code>. См. <a href="spawn.html#abort">отмену</a>.</td></tr>
 <tr><td><code>spawn.poolSize</code></td><td>Сколько воркеров в пуле <code>spawn</code>, по умолчанию 4.</td></tr>
 <tr><td><code>spawn.idle()</code></td><td>Промис, который выполнится, когда закончатся все задачи, запущенные этим потоком.</td></tr>
 <tr><td><code>new Channel(capacity)</code></td><td>Канал между потоками: <code>send</code>, <code>recv</code>, <code>close</code>, <code>Channel.select</code> и блокирующие версии. См. <a href="channels.html">страницу про каналы</a>.</td></tr>

@@ -2948,10 +2948,10 @@ index 8aab5f56..0bc22f26 100644
        CheckValueInputIs(node, 1, Type::Any());
 diff --git a/src/d8/d8-channel.cc b/src/d8/d8-channel.cc
 new file mode 100644
-index 00000000..91d15811
+index 00000000..5524c08f
 --- /dev/null
 +++ b/src/d8/d8-channel.cc
-@@ -0,0 +1,1863 @@
+@@ -0,0 +1,1867 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -3277,8 +3277,9 @@ index 00000000..91d15811
 +  return NewTaskError(isolate, reason.name.c_str(), reason.message);
 +}
 +
-+// The spawn() task the running code belongs to: pool workers set it as
-+// continuation data, so it follows the task through its awaits.
++// The spawn() task the running code belongs to, or a spawn.shield() of one:
++// pool workers set it as continuation data, so it follows the task through
++// its awaits. -1 outside tasks.
 +double CurrentTask(Isolate* isolate) {
 +  Local<Data> data = isolate->GetContinuationPreservedEmbedderData();
 +  if (data.IsEmpty() || !data->IsValue() || !data.As<Value>()->IsNumber()) {
@@ -3290,7 +3291,7 @@ index 00000000..91d15811
 +// The error of `task` of `isolate` if it was aborted. Any thread.
 +bool AbortedTaskReason(Isolate* isolate, double task, std::string* name,
 +                       std::string* message) {
-+  if (task < 0 || !any_aborted.load(std::memory_order_relaxed)) return false;
++  if (task == -1 || !any_aborted.load(std::memory_order_relaxed)) return false;
 +  base::MutexGuard guard(channels_mutex.Pointer());
 +  auto it = AbortedTasks().find(isolate);
 +  if (it == AbortedTasks().end()) return false;
@@ -3304,7 +3305,7 @@ index 00000000..91d15811
 +// Throws and returns true if the running task was aborted: it may not start
 +// waiting again.
 +bool ThrowIfAborted(Isolate* isolate, double task) {
-+  if (task < 0 || !any_aborted.load(std::memory_order_relaxed)) return false;
++  if (task == -1 || !any_aborted.load(std::memory_order_relaxed)) return false;
 +  AbortReason reason;
 +  {
 +    base::MutexGuard guard(channels_mutex.Pointer());
@@ -3555,7 +3556,7 @@ index 00000000..91d15811
 +    return;
 +  }
 +  BlockingWaiters().insert(waiter);
-+  if (waiter->task < 0 || !any_aborted.load(std::memory_order_relaxed)) {
++  if (waiter->task == -1 || !any_aborted.load(std::memory_order_relaxed)) {
 +    return;
 +  }
 +  auto tasks = AbortedTasks().find(waiter->isolate);
@@ -4307,8 +4308,11 @@ index 00000000..91d15811
 +  bool aborted = AbortedTaskReason(isolate, task, nullptr, nullptr);
 +  auto& held = DataOf(isolate).held;
 +  for (size_t i = held.size(); i-- > 0;) {
-+    // Also those taken in spawn.shield(), with -(task + 1).
-+    if (held[i].task != task && held[i].task != -task - 1) continue;
++    // Also those taken in its spawn.shield() calls.
++    if (held[i].task != task &&
++        i::RegionRegistry::ShieldedTask(held[i].task) != task) {
++      continue;
++    }
 +    IsolateChannels::Held guard = std::move(held[i]);
 +    held.erase(held.begin() + i);
 +    ReleaseHeld(isolate, guard.state, guard.write, false,
@@ -4901,10 +4905,10 @@ index 00000000..8fe0313f
 +#endif  // V8_D8_D8_CHANNEL_H_
 diff --git a/src/d8/d8-port.cc b/src/d8/d8-port.cc
 new file mode 100644
-index 00000000..093daf4e
+index 00000000..08815a24
 --- /dev/null
 +++ b/src/d8/d8-port.cc
-@@ -0,0 +1,1133 @@
+@@ -0,0 +1,1213 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -4955,6 +4959,8 @@ index 00000000..093daf4e
 +  bool drain_scheduled = false;
 +  // Ids of the tasks it took and has not replied to.
 +  std::unordered_set<double> in_flight;
++  // spawn.shield() calls of its tasks that have a deadline (port.deadline()).
++  std::unordered_set<double> deadlines;
 +};
 +
 +// Client -> servers: tasks. Servers -> client: replies. Every server takes
@@ -5754,6 +5760,45 @@ index 00000000..093daf4e
 +  const std::string message_;
 +};
 +
++// Aborts a spawn.shield() call of a task the server runs once its deadline
++// passes, unless the shield ended (port.ended()) first.
++class DeadlineTask : public Task {
++ public:
++  DeadlineTask(std::weak_ptr<PortState> state, Isolate* server, double id,
++               std::string name, std::string message)
++      : state_(std::move(state)),
++        server_(server),
++        id_(id),
++        name_(std::move(name)),
++        message_(std::move(message)) {
++    Deadlocks::TimerPosted();
++  }
++  ~DeadlineTask() override { Deadlocks::TimerDone(); }
++  void Run() override {
++    std::shared_ptr<PortState> state = state_.lock();
++    if (!state) return;
++    std::shared_ptr<TaskRunner> runner;
++    {
++      base::MutexGuard guard(&state->mutex);
++      PortServer* server = state->ServerOf(server_);
++      if (!server || !server->deadlines.erase(id_)) return;
++      // port.aborted() sees it, as for a task.
++      state->aborted.insert_or_assign(id_, std::pair{name_, message_});
++      runner = server->runner;
++      Channels::AbortTask(server_, id_, name_.c_str(), message_.c_str());
++    }
++    runner->PostTask(std::make_unique<AbortNoticeTask>(server_, state, id_,
++                                                       name_, message_));
++  }
++
++ private:
++  const std::weak_ptr<PortState> state_;
++  Isolate* const server_;
++  const double id_;
++  const std::string name_;
++  const std::string message_;
++};
++
 +std::string StringArgument(Isolate* isolate, Local<Value> value) {
 +  String::Utf8Value utf8(isolate, value);
 +  return *utf8 ? std::string(*utf8, utf8.length()) : std::string();
@@ -5780,6 +5825,44 @@ index 00000000..093daf4e
 +    return;
 +  }
 +  AbortPortTask(state, id, name, message);
++}
++
++// port.deadline(id, name, message, delayMs): server side, for the deadline
++// of a spawn.shield() call: after the delay its code is aborted as a task is,
++// and the abort callback of port.serve() is called with `id`.
++void PortDeadline(const FunctionCallbackInfo<Value>& info) {
++  Isolate* isolate = info.GetIsolate();
++  std::shared_ptr<PortState> state = ThisState(info);
++  if (!state || !info[0]->IsNumber() || !info[3]->IsNumber()) return;
++  double id = info[0].As<Number>()->Value();
++  double delay = std::max(0.0, info[3].As<Number>()->Value()) / 1000;
++  {
++    base::MutexGuard guard(&state->mutex);
++    PortServer* server = state->ServerOf(isolate);
++    if (!server) return;
++    server->deadlines.insert(id);
++  }
++  i::V8::GetCurrentPlatform()->PostDelayedTaskOnWorkerThread(
++      TaskPriority::kUserBlocking,
++      std::make_unique<DeadlineTask>(state, isolate, id,
++                                     StringArgument(isolate, info[1]),
++                                     StringArgument(isolate, info[2])),
++      delay);
++}
++
++// port.ended(id): the spawn.shield() call `id` ended; its deadline, or its
++// abort, is forgotten.
++void PortEnded(const FunctionCallbackInfo<Value>& info) {
++  Isolate* isolate = info.GetIsolate();
++  std::shared_ptr<PortState> state = ThisState(info);
++  if (!state || !info[0]->IsNumber()) return;
++  double id = info[0].As<Number>()->Value();
++  base::MutexGuard guard(&state->mutex);
++  if (PortServer* server = state->ServerOf(isolate)) {
++    server->deadlines.erase(id);
++  }
++  state->aborted.erase(id);
++  Channels::TaskEnded(isolate, id);
 +}
 +
 +// port.aborted(id): server side. The error name the task was aborted with,
@@ -5886,7 +5969,8 @@ index 00000000..093daf4e
 +        std::pair{"reply", PortReply}, std::pair{"take", PortTake},
 +        std::pair{"listen", PortListen}, std::pair{"code", PortCode},
 +        std::pair{"expect", PortExpect}, std::pair{"gone", PortGone},
-+        std::pair{"abort", PortAbort}, std::pair{"aborted", PortAborted}}) {
++        std::pair{"abort", PortAbort}, std::pair{"aborted", PortAborted},
++        std::pair{"deadline", PortDeadline}, std::pair{"ended", PortEnded}}) {
 +    ctor->PrototypeTemplate()->Set(
 +        String::NewFromUtf8(isolate, name).ToLocalChecked(),
 +        FunctionTemplate::New(isolate, callback, Local<Value>(), signature, 0,
@@ -6135,7 +6219,7 @@ index 00000000..bd767012
 +
 +#endif  // V8_D8_D8_PORT_H_
 diff --git a/src/d8/d8.cc b/src/d8/d8.cc
-index 49121fe1..e3b334f2 100644
+index 49121fe1..609c7389 100644
 --- a/src/d8/d8.cc
 +++ b/src/d8/d8.cc
 @@ -14,6 +14,7 @@
@@ -7866,7 +7950,7 @@ index 49121fe1..e3b334f2 100644
  }
  
  Local<ObjectTemplate> Shell::CreateAsyncHookTemplate(Isolate* isolate) {
-@@ -5376,9 +6867,1129 @@ MaybeLocal<Context> Shell::CreateEvaluationContext(Isolate* isolate) {
+@@ -5376,9 +6867,1181 @@ MaybeLocal<Context> Shell::CreateEvaluationContext(Isolate* isolate) {
    }
  #endif  // V8_ENABLE_HARDWARE_WATCHPOINT_SUPPORT
  
@@ -8056,6 +8140,11 @@ index 49121fe1..e3b334f2 100644
 +    const id = Region.__task();
 +    return id !== undefined && __port.aborted(id) !== undefined;
 +  };
++  // Deadlines of spawn.shield() calls, which the port aborts like tasks.
++  Object.defineProperty(spawn, '__deadline', {
++    value: (id, message, ms) => __port.deadline(id, 'TimeoutError', message, ms),
++  });
++  Object.defineProperty(spawn, '__ended', { value: (id) => __port.ended(id) });
 +}
 +
 +// Tasks come through a task port, handed over by the first message; the
@@ -8077,8 +8166,16 @@ index 49121fe1..e3b334f2 100644
 +    }
 +    // A task with no await left cannot run again: its awaits were for
 +    // promises nothing else refers to, and were collected. It ends here.
-+    if (Region.__interrupt(id, error) === 0 && __live.has(id)) {
-+      __idle(id).then(() => __fail(id, __live.get(id), error));
++    // A shield is looked at again after the microtasks: its failed channel
++    // and lock waits leave no await, but their catch blocks may run.
++    if (Region.__interrupt(id, error) === 0) {
++      if (__live.has(id)) {
++        __idle(id).then(() => __fail(id, __live.get(id), error));
++      } else if (id < 0) {
++        setTimeout(() => {
++          if (Region.__interrupt(id, error) === 0) spawn.__shieldGone(id);
++        }, 0);
++      }
 +    }
 +    spawn.__abortChildren(id);
 +  });
@@ -8748,33 +8845,72 @@ index 49121fe1..e3b334f2 100644
 +  // shielded cancel scope in Trio: its awaits, channel and lock waits do not
 +  // fail with the abort, and the tasks it spawns are not aborted with it.
 +  // The task ends only after its shields. Its code awaits with
-+  // -(task + 1) as continuation data, which no abort names.
++  // -(task + 1) - n * 2^32 as continuation data, a new n for each shield,
++  // which no abort of the task names. With { timeout } the shield itself is
++  // aborted with a TimeoutError once that many milliseconds have passed, as
++  // a task is: cleanup that hangs cannot keep the task from ending.
 +  const openShields = new Map();
-+  const shielded = async (fn) => await fn();
-+  spawn.shield = function shield(fn) {
++  // Its promise is held until the shield ends: one that nothing else refers
++  // to would be collected with the awaits on it, and a deadline would find
++  // nothing to interrupt.
++  const shielded = async (fn, held) =>
++      await (held.result = Promise.resolve(fn()));
++  const kShieldStride = 2 ** 32;
++  // Shields with a deadline, by id: ends them.
++  const timedShields = new Map();
++  let shieldCount = 0;
++  spawn.shield = function shield(fn, options) {
 +    if (typeof fn !== 'function') {
 +      return Promise.reject(new TypeError('spawn.shield() expects a function'));
 +    }
-+    const id = Region.__task();
-+    if (id === undefined || id < 0) return shielded(fn);
-+    Region.__task(-id - 1);
++    const timeout = options?.timeout;
++    if (timeout !== undefined && !(typeof timeout === 'number' && timeout >= 0)) {
++      return Promise.reject(new TypeError(
++          'spawn.shield() expects { timeout } in milliseconds, at least 0'));
++    }
++    const current = Region.__task();
++    const held = {};
++    if (current === undefined) return shielded(fn, held);
++    // A shield in a shield is shielded already, unless it has a deadline.
++    if (current < 0 && timeout === undefined) return shielded(fn, held);
++    const task = current >= 0 ? current : (-current - 1) % kShieldStride;
++    const id = -(task + 1) - ++shieldCount * kShieldStride;
++    Region.__task(id);
 +    let done;
 +    try {
-+      done = shielded(fn);
++      done = shielded(fn, held);
 +    } finally {
-+      Region.__task(id);
++      Region.__task(current);
 +    }
-+    const open = openShields.get(id) ?? { count: 0, waiters: [] };
++    if (timeout !== undefined) {
++      spawn.__deadline(id, 'spawn.shield() did not finish in ' + timeout + ' ms',
++                       timeout);
++    }
++    const open = openShields.get(task) ?? { count: 0, waiters: [] };
 +    open.count++;
-+    openShields.set(id, open);
++    openShields.set(task, open);
++    let closed = false;
 +    const close = () => {
++      if (closed) return;
++      closed = true;
++      held.result = undefined;
++      if (timeout !== undefined) {
++        timedShields.delete(id);
++        spawn.__ended(id);
++      }
 +      if (--open.count > 0) return;
-+      openShields.delete(id);
++      openShields.delete(task);
 +      for (const resolve of open.waiters) resolve();
 +    };
++    if (timeout !== undefined) timedShields.set(id, close);
 +    done.then(close, close);
 +    return done;
 +  };
++  // A shield that timed out with no await left to interrupt ends here, so
++  // that its task can.
++  Object.defineProperty(spawn, '__shieldGone', {
++    value: (id) => timedShields.get(id)?.(),
++  });
 +  // Resolves once the shields of task `id` have finished; null if none.
 +  Object.defineProperty(spawn, '__shielded', {
 +    value: (id) => {
@@ -8996,7 +9132,7 @@ index 49121fe1..e3b334f2 100644
  namespace {
  int LineFromOffset(Local<debug::Script> script, int offset) {
    debug::Location location = script->GetSourceLocation(offset);
-@@ -6538,6 +9149,7 @@ void SourceGroup::JoinThread(const i::ParkedScope& parked) {
+@@ -6538,6 +9201,7 @@ void SourceGroup::JoinThread(const i::ParkedScope& parked) {
  void SerializationDataQueue::Enqueue(std::unique_ptr<SerializationData> data) {
    base::MutexGuard lock_guard(&mutex_);
    data_.push_back(std::move(data));
@@ -9004,7 +9140,7 @@ index 49121fe1..e3b334f2 100644
  }
  
  bool SerializationDataQueue::Dequeue(
-@@ -6547,6 +9159,7 @@ bool SerializationDataQueue::Dequeue(
+@@ -6547,6 +9211,7 @@ bool SerializationDataQueue::Dequeue(
    if (data_.empty()) return false;
    *out_data = std::move(data_[0]);
    data_.erase(data_.begin());
@@ -9012,7 +9148,7 @@ index 49121fe1..e3b334f2 100644
    return true;
  }
  
-@@ -6558,6 +9171,7 @@ bool SerializationDataQueue::IsEmpty() {
+@@ -6558,6 +9223,7 @@ bool SerializationDataQueue::IsEmpty() {
  void SerializationDataQueue::Clear() {
    base::MutexGuard lock_guard(&mutex_);
    data_.clear();
@@ -9020,7 +9156,7 @@ index 49121fe1..e3b334f2 100644
  }
  
  Worker::Worker(Isolate* parent_isolate, const char* script)
-@@ -6668,6 +9282,12 @@ std::unique_ptr<SerializationData> Worker::GetMessage(Isolate* requester) {
+@@ -6668,6 +9334,12 @@ std::unique_ptr<SerializationData> Worker::GetMessage(Isolate* requester) {
        out_queue_.Dequeue(&result);
        break;
      }
@@ -9033,7 +9169,7 @@ index 49121fe1..e3b334f2 100644
      out_semaphore_.ParkedWait(
          reinterpret_cast<i::Isolate*>(requester)->main_thread_local_isolate());
    }
-@@ -6698,6 +9318,10 @@ void Worker::Terminate() {
+@@ -6698,6 +9370,10 @@ void Worker::Terminate() {
    base::MutexGuard lock_guard(&worker_mutex_);
    auto expected = State::kRunning;
    if (!state_.compare_exchange_strong(expected, State::kTerminating)) return;
@@ -9044,7 +9180,7 @@ index 49121fe1..e3b334f2 100644
    std::unique_ptr<v8::Task> task(
        new TerminateTask(task_manager_, shared_from_this()));
    task_runner_->PostTask(std::move(task));
-@@ -6791,6 +9415,7 @@ Worker* Worker::GetCurrentWorker() { return current_worker_; }
+@@ -6791,6 +9467,7 @@ Worker* Worker::GetCurrentWorker() { return current_worker_; }
  void Worker::ExecuteInThread() {
    Isolate::CreateParams create_params = GetDefaultIsolateCreateParams();
    isolate_ = Isolate::New(create_params);
@@ -9052,7 +9188,7 @@ index 49121fe1..e3b334f2 100644
  
    // TODO(mdanylo): can we omit dump disable here?
  #ifdef V8_DUMPLING
-@@ -6926,6 +9551,7 @@ void Worker::ExecuteInThread() {
+@@ -6926,6 +9603,7 @@ void Worker::ExecuteInThread() {
      platform::NotifyIsolateShutdown(g_default_platform, isolate_);
    }
  
@@ -9060,7 +9196,7 @@ index 49121fe1..e3b334f2 100644
    isolate_->Dispose();
    isolate_ = nullptr;
  
-@@ -7190,6 +9816,8 @@ bool Shell::SetOptions(int argc, char* argv[]) {
+@@ -7190,6 +9868,8 @@ bool Shell::SetOptions(int argc, char* argv[]) {
        options.expected_to_throw = true;
      } else if (FlagMatches("--no-fail", &argv[i])) {
        options.no_fail = true;
@@ -9069,7 +9205,7 @@ index 49121fe1..e3b334f2 100644
      } else if (FlagMatches("--dump-counters", &argv[i])) {
        options.dump_counters = true;
      } else if (FlagMatches("--dump-counters-nvp", &argv[i])) {
-@@ -7310,6 +9938,9 @@ bool Shell::SetOptions(int argc, char* argv[]) {
+@@ -7310,6 +9990,9 @@ bool Shell::SetOptions(int argc, char* argv[]) {
                                    argv, &i)) {
        // Value is expressed in MB.
        options.max_serializer_memory = atoi(flag_value) * i::MB;
@@ -9079,7 +9215,7 @@ index 49121fe1..e3b334f2 100644
      } else if (FlagMatches("--bundle", &argv[i])) {
        options.bundle = true;
  #ifdef V8_FUZZILLI
-@@ -7921,6 +10552,27 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7921,6 +10604,27 @@ class Serializer : public ValueSerializer::Delegate {
      return true;
    }
  
@@ -9107,7 +9243,7 @@ index 49121fe1..e3b334f2 100644
   private:
    Maybe<bool> PrepareTransfer(Local<Context> context, Local<Value> transfer) {
      if (transfer->IsArray()) {
-@@ -7929,6 +10581,22 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7929,6 +10633,22 @@ class Serializer : public ValueSerializer::Delegate {
        for (uint32_t i = 0; i < length; ++i) {
          Local<Value> element;
          if (transfer_array->Get(context, i).ToLocal(&element)) {
@@ -9130,7 +9266,7 @@ index 49121fe1..e3b334f2 100644
            if (!element->IsArrayBuffer()) {
              ThrowError(isolate_,
                         "Transfer array elements must be an ArrayBuffer");
-@@ -7961,7 +10629,64 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7961,7 +10681,64 @@ class Serializer : public ValueSerializer::Delegate {
      }
    }
  
@@ -9195,7 +9331,7 @@ index 49121fe1..e3b334f2 100644
      for (const auto& global_array_buffer : array_buffers_) {
        Local<ArrayBuffer> array_buffer =
            Local<ArrayBuffer>::New(isolate_, global_array_buffer);
-@@ -7987,6 +10712,7 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7987,6 +10764,7 @@ class Serializer : public ValueSerializer::Delegate {
    ValueSerializer serializer_;
    std::unique_ptr<SerializationData> data_;
    std::vector<Global<ArrayBuffer>> array_buffers_;
@@ -9203,7 +9339,7 @@ index 49121fe1..e3b334f2 100644
    std::vector<Global<SharedArrayBuffer>> shared_array_buffers_;
    std::vector<Global<WasmModuleObject>> wasm_modules_;
    std::vector<std::shared_ptr<v8::BackingStore>> backing_stores_;
-@@ -8013,6 +10739,21 @@ class Deserializer : public ValueDeserializer::Delegate {
+@@ -8013,6 +10791,21 @@ class Deserializer : public ValueDeserializer::Delegate {
        return MaybeLocal<Value>();
      }
  
@@ -9225,7 +9361,7 @@ index 49121fe1..e3b334f2 100644
      uint32_t index = 0;
      for (const auto& backing_store : data_->backing_stores()) {
        Local<ArrayBuffer> array_buffer =
-@@ -8049,6 +10790,21 @@ class Deserializer : public ValueDeserializer::Delegate {
+@@ -8049,6 +10842,21 @@ class Deserializer : public ValueDeserializer::Delegate {
      return nullptr;
    }
  
@@ -9247,7 +9383,7 @@ index 49121fe1..e3b334f2 100644
   private:
    Isolate* isolate_;
    ValueDeserializer deserializer_;
-@@ -8309,9 +11065,13 @@ int Shell::Main(int argc, char* argv[]) {
+@@ -8309,9 +11117,13 @@ int Shell::Main(int argc, char* argv[]) {
    // The platform is owned by wrapper platform despite the `std::move` below.
    START_IGNORE_LIFETIME_SAFETY_WARNINGS()
    g_default_platform = g_platform.get();
@@ -9261,7 +9397,7 @@ index 49121fe1..e3b334f2 100644
    }
    if (options.stress_delay_tasks) {
      int64_t random_seed = i::v8_flags.fuzzer_random_seed;
-@@ -8438,6 +11198,7 @@ int Shell::Main(int argc, char* argv[]) {
+@@ -8438,6 +11250,7 @@ int Shell::Main(int argc, char* argv[]) {
    }
  
    Isolate* isolate = Isolate::New(create_params);
@@ -12595,10 +12731,10 @@ index 00000000..844041ef
 +#endif  // V8_OBJECTS_JS_REGION_INL_H_
 diff --git a/src/objects/js-region.cc b/src/objects/js-region.cc
 new file mode 100644
-index 00000000..b8db8eb1
+index 00000000..03ead2a8
 --- /dev/null
 +++ b/src/objects/js-region.cc
-@@ -0,0 +1,3407 @@
+@@ -0,0 +1,3414 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -12608,6 +12744,7 @@ index 00000000..b8db8eb1
 +#include <algorithm>
 +#include <array>
 +#include <bitset>
++#include <cmath>
 +#include <cstring>
 +#include <limits>
 +#include <map>
@@ -13789,6 +13926,13 @@ index 00000000..b8db8eb1
 +}
 +
 +// static
++double RegionRegistry::ShieldedTask(double data) {
++  constexpr double kStride = 4294967296.0;
++  if (!(data <= -1 - kStride)) return -1;
++  return std::fmod(-data - 1, kStride);
++}
++
++// static
 +void RegionRegistry::SetHasAbortedTasks(Isolate* isolate, bool aborted) {
 +  isolate->set_region_task_aborted(aborted);
 +}
@@ -13834,9 +13978,8 @@ index 00000000..b8db8eb1
 +  // The awaits of the task on pending promises, and the promises that its
 +  // suspended async functions and generators settle: an await of one of
 +  // those waits for another await of the task, which throws first.
-+  // Code in spawn.shield() awaits with -(task + 1): it is not interrupted,
-+  // and an await for it waits too.
-+  const double shielded = -task - 1;
++  // Code in a spawn.shield() of the task (ShieldedTask()) is not
++  // interrupted, and an await for it waits too.
 +  std::vector<std::pair<Address, Address>> found;
 +  int shielded_awaits = 0;
 +  std::unordered_set<Address> settled_by_task;
@@ -13853,7 +13996,7 @@ index 00000000..b8db8eb1
 +        Tagged<Object> data = reaction->continuation_preserved_embedder_data();
 +        if (!IsNumber(data)) continue;
 +        double owner = Object::NumberValue(data);
-+        if (owner != task && owner != shielded) continue;
++        if (owner != task && ShieldedTask(owner) != task) continue;
 +        Tagged<JSGeneratorObject> generator =
 +            awaiting(reaction->fulfill_handler());
 +        if (generator.is_null()) continue;
@@ -16008,10 +16151,10 @@ index 00000000..b8db8eb1
 +}  // namespace v8
 diff --git a/src/objects/js-region.h b/src/objects/js-region.h
 new file mode 100644
-index 00000000..405002c6
+index 00000000..5f29bc10
 --- /dev/null
 +++ b/src/objects/js-region.h
-@@ -0,0 +1,559 @@
+@@ -0,0 +1,563 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -16109,6 +16252,10 @@ index 00000000..405002c6
 +  using TaskAbortHook = bool (*)(v8::Isolate* isolate, double task,
 +                                 std::string* name, std::string* message);
 +  static void SetTaskAbortHook(TaskAbortHook hook);
++  // Code in spawn.shield() runs with -(task + 1) - n * 2^32 as continuation
++  // data, a new n > 0 for each shield, so that each can be aborted alone.
++  // The task a shield belongs to, or -1 for other data.
++  static double ShieldedTask(double data);
 +  static void SetHasAbortedTasks(Isolate* isolate, bool aborted);
 +  // Undefined, or the error for an await that resumes now.
 +  static DirectHandle<Object> AwaitAbortError(Isolate* isolate);
