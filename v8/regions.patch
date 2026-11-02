@@ -1521,10 +1521,10 @@ index f3ec683b..af3517ea 100644
        UNREACHABLE();
    }
 diff --git a/src/common/message-template.h b/src/common/message-template.h
-index ce7c8efa..3e890655 100644
+index ce7c8efa..4c7b74a1 100644
 --- a/src/common/message-template.h
 +++ b/src/common/message-template.h
-@@ -739,6 +739,38 @@ namespace internal {
+@@ -739,6 +739,45 @@ namespace internal {
    T(WasmSuspendJSFrames, "trying to suspend JS frames")                        \
    T(WasmExceptionError, "wasm exception")                                      \
    T(WasmObjectsAreOpaque, "WebAssembly objects are opaque")                    \
@@ -1558,6 +1558,13 @@ index ce7c8efa..3e890655 100644
 +  T(RegionCannotMove, "% cannot be moved into a region")                       \
 +  T(RegionPlainFunction,                                                       \
 +    "a region object can hold only functions made by Region.fn()")             \
++  T(RegionLocalRefOtherThread,                                                 \
++    "this LocalRef refers to an object of another thread (isolate %, this is " \
++    "isolate %); only that thread can deref() it")                             \
++  T(RegionLocalRefReleased, "the object of this LocalRef was released")        \
++  T(RegionLocalRefClone,                                                       \
++    "a LocalRef cannot be copied to another thread; put it in a region "       \
++    "object and send that")                                                    \
 +  T(RegionNotExtensible,                                                       \
 +    "Cannot add property %, region objects have a fixed shape")                \
    /* DataCloneError messages */                                                \
@@ -2558,16 +2565,17 @@ index e52c358e..3dc8af36 100644
    return Type::NonInternal();
  }
 diff --git a/src/compiler/turbofan-types.cc b/src/compiler/turbofan-types.cc
-index f7525792..fbef2efa 100644
+index f7525792..3d3506e0 100644
 --- a/src/compiler/turbofan-types.cc
 +++ b/src/compiler/turbofan-types.cc
-@@ -268,6 +268,9 @@ Type::bitset BitsetType::Lub(MapRefLike map, JSHeapBroker* broker) {
+@@ -268,6 +268,10 @@ Type::bitset BitsetType::Lub(MapRefLike map, JSHeapBroker* broker) {
      case JS_ASYNC_GENERATOR_OBJECT_TYPE:
      case JS_MODULE_NAMESPACE_TYPE:
      case JS_DEFERRED_MODULE_NAMESPACE_TYPE:
 +    case JS_REGION_OBJECT_TYPE:
 +    case JS_REGION_TYPED_ARRAY_TYPE:
 +    case JS_REGION_FUNCTION_TYPE:
++    case JS_REGION_LOCAL_REF_TYPE:
      case JS_ARRAY_BUFFER_TYPE:
      case JS_ARRAY_ITERATOR_TYPE:
      case JS_REG_EXP_TYPE:
@@ -6293,7 +6301,7 @@ index 00000000..bd767012
 +
 +#endif  // V8_D8_D8_PORT_H_
 diff --git a/src/d8/d8.cc b/src/d8/d8.cc
-index 49121fe1..d632289f 100644
+index 49121fe1..c86bc77a 100644
 --- a/src/d8/d8.cc
 +++ b/src/d8/d8.cc
 @@ -14,6 +14,7 @@
@@ -6496,7 +6504,7 @@ index 49121fe1..d632289f 100644
  }
  
  void Shell::WorkerTerminate(const v8::FunctionCallbackInfo<v8::Value>& info) {
-@@ -4804,6 +4904,14 @@ Local<ObjectTemplate> Shell::CreateGlobalTemplate(Isolate* isolate) {
+@@ -4804,6 +4904,16 @@ Local<ObjectTemplate> Shell::CreateGlobalTemplate(Isolate* isolate) {
    global_template->Set(isolate, "performance",
                         Shell::CreatePerformanceTemplate(isolate));
    global_template->Set(isolate, "Worker", Shell::CreateWorkerTemplate(isolate));
@@ -6507,11 +6515,13 @@ index 49121fe1..d632289f 100644
 +                         Channels::CreateTemplate(isolate));
 +    global_template->Set(isolate, "RwLock",
 +                         Channels::CreateLockTemplate(isolate));
++    global_template->Set(isolate, "LocalRef",
++                         Shell::CreateLocalRefTemplate(isolate));
 +  }
  
    // Prevent fuzzers from creating side effects.
    if (!i::v8_flags.fuzzing) {
-@@ -4830,73 +4938,1665 @@ Local<ObjectTemplate> Shell::GetOrCreateGlobalTemplate(Isolate* isolate) {
+@@ -4830,73 +4940,1751 @@ Local<ObjectTemplate> Shell::GetOrCreateGlobalTemplate(Isolate* isolate) {
    if (data->global_template_.IsEmpty()) {
      data->global_template_.Reset(isolate, CreateGlobalTemplate(isolate));
    }
@@ -6605,6 +6615,8 @@ index 49121fe1..d632289f 100644
 +                            ConstructorBehavior::kThrow));
 +  region_template->Set(isolate, "of", FunctionTemplate::New(isolate, RegionOf));
 +  region_template->Set(isolate, "fn", FunctionTemplate::New(isolate, RegionFn));
++  region_template->Set(isolate, "localRef",
++                       FunctionTemplate::New(isolate, RegionLocalRef));
 +  region_template->Set(isolate, "isRegionObject",
 +                       FunctionTemplate::New(isolate, RegionIsRegionObject));
 +  region_template->Set(isolate, "__info",
@@ -7993,6 +8005,90 @@ index 49121fe1..d632289f 100644
 +  info.GetReturnValue().Set(Utils::ToLocal(i::DirectHandle<i::Object>(result)));
 +}
 +
++// Region.localRef(obj) -> a LocalRef of `obj`, an object of this thread, that
++// objects of regions can hold. Only this thread can deref() it; `obj` lives
++// while a LocalRef of it or a region holding one does.
++void Shell::RegionLocalRef(const v8::FunctionCallbackInfo<v8::Value>& info) {
++  DCHECK(i::ValidateCallbackInfo(info));
++  Isolate* isolate = info.GetIsolate();
++  auto throw_type_error = [isolate](const char* message) {
++    isolate->ThrowException(Exception::TypeError(
++        String::NewFromUtf8(isolate, message).ToLocalChecked()));
++  };
++  if (info.Length() < 1 || !info[0]->IsObject()) {
++    throw_type_error("Region.localRef() expects an object");
++    return;
++  }
++  i::DirectHandle<i::JSReceiver> target =
++      Utils::OpenDirectHandle(*info[0].As<Object>());
++  if (i::IsJSRegionObject(*target)) {
++    throw_type_error(
++        "Region.localRef() expects an object of this thread; a region object "
++        "can be stored in objects of its region as it is");
++    return;
++  }
++  i::DirectHandle<i::JSObject> ref;
++  if (!i::JSRegionObject::NewLocalRef(reinterpret_cast<i::Isolate*>(isolate),
++                                      target)
++           .ToHandle(&ref)) {
++    return;
++  }
++  info.GetReturnValue().Set(Utils::ToLocal(i::DirectHandle<i::Object>(ref)));
++}
++
++Local<FunctionTemplate> Shell::CreateLocalRefTemplate(Isolate* isolate) {
++  Local<FunctionTemplate> local_ref = FunctionTemplate::New(isolate, LocalRefNew);
++  local_ref->SetClassName(String::NewFromUtf8Literal(isolate, "LocalRef"));
++  local_ref->ReadOnlyPrototype();
++  local_ref->PrototypeTemplate()->Set(
++      isolate, "deref",
++      FunctionTemplate::New(isolate, LocalRefDeref, Local<Value>(),
++                            Local<Signature>(), 0,
++                            ConstructorBehavior::kThrow));
++  local_ref->PrototypeTemplate()->SetAccessorProperty(
++      String::NewFromUtf8Literal(isolate, "local"),
++      FunctionTemplate::New(isolate, LocalRefLocal, Local<Value>(),
++                            Local<Signature>(), 0,
++                            ConstructorBehavior::kThrow));
++  local_ref->PrototypeTemplate()->Set(
++      Symbol::GetToStringTag(isolate),
++      String::NewFromUtf8Literal(isolate, "LocalRef"),
++      static_cast<PropertyAttribute>(ReadOnly | DontEnum));
++  return local_ref;
++}
++
++void Shell::LocalRefNew(const v8::FunctionCallbackInfo<v8::Value>& info) {
++  Isolate* isolate = info.GetIsolate();
++  isolate->ThrowException(Exception::TypeError(String::NewFromUtf8Literal(
++      isolate, "LocalRef has no constructor; use Region.localRef(object)")));
++}
++
++// ref.deref() -> the object in the thread that made `ref`.
++void Shell::LocalRefDeref(const v8::FunctionCallbackInfo<v8::Value>& info) {
++  DCHECK(i::ValidateCallbackInfo(info));
++  i::DirectHandle<i::Object> target;
++  if (!i::JSRegionObject::DerefLocalRef(
++           reinterpret_cast<i::Isolate*>(info.GetIsolate()),
++           Utils::OpenDirectHandle(*info.This()))
++           .ToHandle(&target)) {
++    return;
++  }
++  info.GetReturnValue().Set(Utils::ToLocal(target));
++}
++
++// ref.local -> whether this thread can deref() `ref`.
++void Shell::LocalRefLocal(const v8::FunctionCallbackInfo<v8::Value>& info) {
++  DCHECK(i::ValidateCallbackInfo(info));
++  bool here;
++  if (!i::JSRegionObject::IsLocalRefHere(
++           reinterpret_cast<i::Isolate*>(info.GetIsolate()),
++           Utils::OpenDirectHandle(*info.This()))
++           .To(&here)) {
++    return;
++  }
++  info.GetReturnValue().Set(here);
++}
++
 +// Region.__spawnCode(id) -> { source, functions: { name: source }, names,
 +// places }: places are [file, line, column] or null for the callback, then
 +// for the functions.
@@ -8233,7 +8329,7 @@ index 49121fe1..d632289f 100644
  }
  
  Local<ObjectTemplate> Shell::CreateAsyncHookTemplate(Isolate* isolate) {
-@@ -5376,9 +7076,1182 @@ MaybeLocal<Context> Shell::CreateEvaluationContext(Isolate* isolate) {
+@@ -5376,9 +7164,1200 @@ MaybeLocal<Context> Shell::CreateEvaluationContext(Isolate* isolate) {
    }
  #endif  // V8_ENABLE_HARDWARE_WATCHPOINT_SUPPORT
  
@@ -8242,6 +8338,24 @@ index 49121fe1..d632289f 100644
  }
  
 +void Shell::InstallSpawn(Isolate* isolate, Local<Context> context) {
++  // LocalRef objects that the engine makes, e.g. when a region holder is
++  // read, get the prototype of the first context.
++  {
++    Local<Value> local_ref;
++    Local<Value> prototype;
++    if (context->Global()
++            ->Get(context, String::NewFromUtf8Literal(isolate, "LocalRef"))
++            .ToLocal(&local_ref) &&
++        local_ref->IsFunction() &&
++        local_ref.As<Function>()
++            ->Get(context, String::NewFromUtf8Literal(isolate, "prototype"))
++            .ToLocal(&prototype) &&
++        prototype->IsObject()) {
++      i::JSRegionObject::SetLocalRefPrototype(
++          reinterpret_cast<i::Isolate*>(isolate),
++          Utils::OpenDirectHandle(*prototype.As<Object>()));
++    }
++  }
 +  // spawn(callback, ...args) runs a pure callback in a new worker. Arguments
 +  // and the result travel in regions, so nothing is copied between threads.
 +  static const char kSpawnSource[] = R"JS(
@@ -9416,7 +9530,7 @@ index 49121fe1..d632289f 100644
  namespace {
  int LineFromOffset(Local<debug::Script> script, int offset) {
    debug::Location location = script->GetSourceLocation(offset);
-@@ -6538,6 +9411,7 @@ void SourceGroup::JoinThread(const i::ParkedScope& parked) {
+@@ -6538,6 +9517,7 @@ void SourceGroup::JoinThread(const i::ParkedScope& parked) {
  void SerializationDataQueue::Enqueue(std::unique_ptr<SerializationData> data) {
    base::MutexGuard lock_guard(&mutex_);
    data_.push_back(std::move(data));
@@ -9424,7 +9538,7 @@ index 49121fe1..d632289f 100644
  }
  
  bool SerializationDataQueue::Dequeue(
-@@ -6547,6 +9421,7 @@ bool SerializationDataQueue::Dequeue(
+@@ -6547,6 +9527,7 @@ bool SerializationDataQueue::Dequeue(
    if (data_.empty()) return false;
    *out_data = std::move(data_[0]);
    data_.erase(data_.begin());
@@ -9432,7 +9546,7 @@ index 49121fe1..d632289f 100644
    return true;
  }
  
-@@ -6558,6 +9433,7 @@ bool SerializationDataQueue::IsEmpty() {
+@@ -6558,6 +9539,7 @@ bool SerializationDataQueue::IsEmpty() {
  void SerializationDataQueue::Clear() {
    base::MutexGuard lock_guard(&mutex_);
    data_.clear();
@@ -9440,7 +9554,7 @@ index 49121fe1..d632289f 100644
  }
  
  Worker::Worker(Isolate* parent_isolate, const char* script)
-@@ -6668,6 +9544,12 @@ std::unique_ptr<SerializationData> Worker::GetMessage(Isolate* requester) {
+@@ -6668,6 +9650,12 @@ std::unique_ptr<SerializationData> Worker::GetMessage(Isolate* requester) {
        out_queue_.Dequeue(&result);
        break;
      }
@@ -9453,7 +9567,7 @@ index 49121fe1..d632289f 100644
      out_semaphore_.ParkedWait(
          reinterpret_cast<i::Isolate*>(requester)->main_thread_local_isolate());
    }
-@@ -6698,6 +9580,10 @@ void Worker::Terminate() {
+@@ -6698,6 +9686,10 @@ void Worker::Terminate() {
    base::MutexGuard lock_guard(&worker_mutex_);
    auto expected = State::kRunning;
    if (!state_.compare_exchange_strong(expected, State::kTerminating)) return;
@@ -9464,7 +9578,7 @@ index 49121fe1..d632289f 100644
    std::unique_ptr<v8::Task> task(
        new TerminateTask(task_manager_, shared_from_this()));
    task_runner_->PostTask(std::move(task));
-@@ -6791,6 +9677,7 @@ Worker* Worker::GetCurrentWorker() { return current_worker_; }
+@@ -6791,6 +9783,7 @@ Worker* Worker::GetCurrentWorker() { return current_worker_; }
  void Worker::ExecuteInThread() {
    Isolate::CreateParams create_params = GetDefaultIsolateCreateParams();
    isolate_ = Isolate::New(create_params);
@@ -9472,7 +9586,7 @@ index 49121fe1..d632289f 100644
  
    // TODO(mdanylo): can we omit dump disable here?
  #ifdef V8_DUMPLING
-@@ -6926,6 +9813,7 @@ void Worker::ExecuteInThread() {
+@@ -6926,6 +9919,7 @@ void Worker::ExecuteInThread() {
      platform::NotifyIsolateShutdown(g_default_platform, isolate_);
    }
  
@@ -9480,7 +9594,7 @@ index 49121fe1..d632289f 100644
    isolate_->Dispose();
    isolate_ = nullptr;
  
-@@ -7190,6 +10078,10 @@ bool Shell::SetOptions(int argc, char* argv[]) {
+@@ -7190,6 +10184,10 @@ bool Shell::SetOptions(int argc, char* argv[]) {
        options.expected_to_throw = true;
      } else if (FlagMatches("--no-fail", &argv[i])) {
        options.no_fail = true;
@@ -9491,7 +9605,7 @@ index 49121fe1..d632289f 100644
      } else if (FlagMatches("--dump-counters", &argv[i])) {
        options.dump_counters = true;
      } else if (FlagMatches("--dump-counters-nvp", &argv[i])) {
-@@ -7310,6 +10202,9 @@ bool Shell::SetOptions(int argc, char* argv[]) {
+@@ -7310,6 +10308,9 @@ bool Shell::SetOptions(int argc, char* argv[]) {
                                    argv, &i)) {
        // Value is expressed in MB.
        options.max_serializer_memory = atoi(flag_value) * i::MB;
@@ -9501,7 +9615,7 @@ index 49121fe1..d632289f 100644
      } else if (FlagMatches("--bundle", &argv[i])) {
        options.bundle = true;
  #ifdef V8_FUZZILLI
-@@ -7921,6 +10816,27 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7921,6 +10922,27 @@ class Serializer : public ValueSerializer::Delegate {
      return true;
    }
  
@@ -9529,7 +9643,7 @@ index 49121fe1..d632289f 100644
   private:
    Maybe<bool> PrepareTransfer(Local<Context> context, Local<Value> transfer) {
      if (transfer->IsArray()) {
-@@ -7929,6 +10845,22 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7929,6 +10951,22 @@ class Serializer : public ValueSerializer::Delegate {
        for (uint32_t i = 0; i < length; ++i) {
          Local<Value> element;
          if (transfer_array->Get(context, i).ToLocal(&element)) {
@@ -9552,7 +9666,7 @@ index 49121fe1..d632289f 100644
            if (!element->IsArrayBuffer()) {
              ThrowError(isolate_,
                         "Transfer array elements must be an ArrayBuffer");
-@@ -7961,7 +10893,64 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7961,7 +10999,64 @@ class Serializer : public ValueSerializer::Delegate {
      }
    }
  
@@ -9617,7 +9731,7 @@ index 49121fe1..d632289f 100644
      for (const auto& global_array_buffer : array_buffers_) {
        Local<ArrayBuffer> array_buffer =
            Local<ArrayBuffer>::New(isolate_, global_array_buffer);
-@@ -7987,6 +10976,7 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7987,6 +11082,7 @@ class Serializer : public ValueSerializer::Delegate {
    ValueSerializer serializer_;
    std::unique_ptr<SerializationData> data_;
    std::vector<Global<ArrayBuffer>> array_buffers_;
@@ -9625,7 +9739,7 @@ index 49121fe1..d632289f 100644
    std::vector<Global<SharedArrayBuffer>> shared_array_buffers_;
    std::vector<Global<WasmModuleObject>> wasm_modules_;
    std::vector<std::shared_ptr<v8::BackingStore>> backing_stores_;
-@@ -8013,6 +11003,21 @@ class Deserializer : public ValueDeserializer::Delegate {
+@@ -8013,6 +11109,21 @@ class Deserializer : public ValueDeserializer::Delegate {
        return MaybeLocal<Value>();
      }
  
@@ -9647,7 +9761,7 @@ index 49121fe1..d632289f 100644
      uint32_t index = 0;
      for (const auto& backing_store : data_->backing_stores()) {
        Local<ArrayBuffer> array_buffer =
-@@ -8049,6 +11054,21 @@ class Deserializer : public ValueDeserializer::Delegate {
+@@ -8049,6 +11160,21 @@ class Deserializer : public ValueDeserializer::Delegate {
      return nullptr;
    }
  
@@ -9669,7 +9783,7 @@ index 49121fe1..d632289f 100644
   private:
    Isolate* isolate_;
    ValueDeserializer deserializer_;
-@@ -8309,9 +11329,13 @@ int Shell::Main(int argc, char* argv[]) {
+@@ -8309,9 +11435,13 @@ int Shell::Main(int argc, char* argv[]) {
    // The platform is owned by wrapper platform despite the `std::move` below.
    START_IGNORE_LIFETIME_SAFETY_WARNINGS()
    g_default_platform = g_platform.get();
@@ -9683,7 +9797,7 @@ index 49121fe1..d632289f 100644
    }
    if (options.stress_delay_tasks) {
      int64_t random_seed = i::v8_flags.fuzzer_random_seed;
-@@ -8438,6 +11462,7 @@ int Shell::Main(int argc, char* argv[]) {
+@@ -8438,6 +11568,7 @@ int Shell::Main(int argc, char* argv[]) {
    }
  
    Isolate* isolate = Isolate::New(create_params);
@@ -9692,7 +9806,7 @@ index 49121fe1..d632289f 100644
  #ifdef V8_FUZZILLI
  
 diff --git a/src/d8/d8.h b/src/d8/d8.h
-index 0c7ad50a..8da0423d 100644
+index 0c7ad50a..61827444 100644
 --- a/src/d8/d8.h
 +++ b/src/d8/d8.h
 @@ -8,6 +8,7 @@
@@ -9932,7 +10046,7 @@ index 0c7ad50a..8da0423d 100644
   private:
    static inline int DeserializationRunCount() {
      return options.stress_deserialize ? 1000 : 1;
-@@ -1007,6 +1137,56 @@ class Shell : public i::AllStatic {
+@@ -1007,6 +1137,61 @@ class Shell : public i::AllStatic {
    static Local<ObjectTemplate> GetOrCreateGlobalTemplate(Isolate* isolate);
    static Local<ObjectTemplate> CreateOSTemplate(Isolate* isolate);
    static Local<FunctionTemplate> CreateWorkerTemplate(Isolate* isolate);
@@ -9943,6 +10057,11 @@ index 0c7ad50a..8da0423d 100644
 +  static void RegionRun(const v8::FunctionCallbackInfo<v8::Value>& info);
 +  static void RegionOf(const v8::FunctionCallbackInfo<v8::Value>& info);
 +  static void RegionFn(const v8::FunctionCallbackInfo<v8::Value>& info);
++  static void RegionLocalRef(const v8::FunctionCallbackInfo<v8::Value>& info);
++  static Local<FunctionTemplate> CreateLocalRefTemplate(Isolate* isolate);
++  static void LocalRefNew(const v8::FunctionCallbackInfo<v8::Value>& info);
++  static void LocalRefDeref(const v8::FunctionCallbackInfo<v8::Value>& info);
++  static void LocalRefLocal(const v8::FunctionCallbackInfo<v8::Value>& info);
 +  static PerIsolateData::SpawnAnalysis* AnalyzeSpawnFunction(
 +      Isolate* isolate, Local<Context> context, Local<Function> function,
 +      PerIsolateData::SpawnAnalysis* uncached);
@@ -10002,7 +10121,7 @@ index b8e55445..c8b59d07 100644
    V(StoreToConstant, "Storing to a constant field")                            \
    V(StringTooLarge, "Result string larger than String::kMaxLength")            \
 diff --git a/src/diagnostics/objects-debug.cc b/src/diagnostics/objects-debug.cc
-index 28f4d0c8..c72624d3 100644
+index 28f4d0c8..34ecb84e 100644
 --- a/src/diagnostics/objects-debug.cc
 +++ b/src/diagnostics/objects-debug.cc
 @@ -91,6 +91,7 @@
@@ -10013,7 +10132,7 @@ index 28f4d0c8..c72624d3 100644
  #include "src/objects/module-inl.h"
  #include "src/objects/oddball-inl.h"
  #include "src/objects/promise-inl.h"
-@@ -3111,6 +3112,54 @@ void JSModuleNamespace::JSModuleNamespaceVerify(Isolate* isolate) {
+@@ -3111,6 +3112,67 @@ void JSModuleNamespace::JSModuleNamespaceVerify(Isolate* isolate) {
    CHECK(IsModule(module()));
  }
  
@@ -10053,6 +10172,19 @@ index 28f4d0c8..c72624d3 100644
 +  CHECK(IsString(script_name()) || IsUndefined(script_name()));
 +}
 +
++void JSRegionLocalRef::JSRegionLocalRefVerify(Isolate* isolate) {
++  JSObjectVerify(isolate);
++  CHECK(HeapLayout::InWritableSharedSpace(this));
++  CHECK(HeapLayout::InAnySharedSpace(map()));
++  CHECK(IsNull(map()->prototype()));
++  CHECK_LE(0, region_id());
++  CHECK_LT(region_id(), RegionRegistry::kMaxRegions);
++  CHECK_EQ(keys(), ReadOnlyRoots(isolate).empty_fixed_array());
++  CHECK_EQ(values(), ReadOnlyRoots(isolate).empty_fixed_array());
++  CHECK_LE(0, ref_id());
++  CHECK_LE(0, thread());
++}
++
 +void JSRegionTypedArray::JSRegionTypedArrayVerify(Isolate* isolate) {
 +  JSObjectVerify(isolate);
 +  CHECK(HeapLayout::InWritableSharedSpace(this));
@@ -10069,7 +10201,7 @@ index 28f4d0c8..c72624d3 100644
      Isolate* isolate) {
    JSModuleNamespaceVerify(isolate);
 diff --git a/src/diagnostics/objects-printer.cc b/src/diagnostics/objects-printer.cc
-index 78db0339..170481e3 100644
+index 78db0339..636d9c0b 100644
 --- a/src/diagnostics/objects-printer.cc
 +++ b/src/diagnostics/objects-printer.cc
 @@ -31,6 +31,7 @@
@@ -10080,7 +10212,7 @@ index 78db0339..170481e3 100644
  #include "src/objects/shared-function-info-inl.h"
  #include "src/objects/struct.h"
  #include "src/regexp/regexp.h"
-@@ -3040,6 +3041,33 @@ void JSModuleNamespace::JSModuleNamespacePrint(std::ostream& os) {
+@@ -3040,6 +3041,41 @@ void JSModuleNamespace::JSModuleNamespacePrint(std::ostream& os) {
    JSObjectPrintBody(os, this);
  }
  
@@ -10098,6 +10230,14 @@ index 78db0339..170481e3 100644
 +  os << "\n - function id: " << function_id();
 +  os << "\n - script name: " << Brief(script_name());
 +  os << "\n - line: " << line() << ", column: " << column();
++  JSObjectPrintBody(os, this);
++}
++
++void JSRegionLocalRef::JSRegionLocalRefPrint(std::ostream& os) {
++  JSObjectPrintHeader(os, this, "JSRegionLocalRef");
++  os << "\n - region: " << region_id();
++  os << "\n - ref id: " << ref_id();
++  os << "\n - thread: " << thread();
 +  JSObjectPrintBody(os, this);
 +}
 +
@@ -10311,24 +10451,25 @@ index f47b7006..3dc60b35 100644
      harmony_struct, false,
      "DEPRECATED. harmony structs, shared structs, and shared arrays")
 diff --git a/src/gen/intl-wasm/class-forward-declarations.h b/src/gen/intl-wasm/class-forward-declarations.h
-index ae217ce3..32870e96 100644
+index ae217ce3..ae589c3e 100644
 --- a/src/gen/intl-wasm/class-forward-declarations.h
 +++ b/src/gen/intl-wasm/class-forward-declarations.h
-@@ -137,6 +137,9 @@ class JSReceiver;
+@@ -137,6 +137,10 @@ class JSReceiver;
  class JSRegExp;
  class JSRegExpResult;
  class JSRegExpStringIterator;
 +class JSRegionFunction;
++class JSRegionLocalRef;
 +class JSRegionObject;
 +class JSRegionTypedArray;
  class JSRelativeTimeFormat;
  class JSSegmentDataObject;
  class JSSegmentDataObjectWithIsWordLike;
 diff --git a/src/gen/intl-wasm/instance-types.h b/src/gen/intl-wasm/instance-types.h
-index 8f144e35..c4f58115 100644
+index 8f144e35..1684f6de 100644
 --- a/src/gen/intl-wasm/instance-types.h
 +++ b/src/gen/intl-wasm/instance-types.h
-@@ -570,18 +570,27 @@
+@@ -570,18 +570,30 @@
          V(JS_OBJECT_TYPE, 1057) \
          V(FIRST_JS_CUSTOM_ELEMENTS_OBJECT_TYPE, 299) \
            V(FIRST_JS_SPECIAL_OBJECT_TYPE, 299) \
@@ -10349,45 +10490,50 @@ index 8f144e35..c4f58115 100644
 +              V(FIRST_JS_REGION_FUNCTION_TYPE, 300) \
 +              V(JS_REGION_FUNCTION_TYPE, 300) \
 +              V(LAST_JS_REGION_FUNCTION_TYPE, 300) \
-+              V(FIRST_JS_REGION_TYPED_ARRAY_TYPE, 301) \
-+              V(JS_REGION_TYPED_ARRAY_TYPE, 301) \
-+              V(LAST_JS_REGION_TYPED_ARRAY_TYPE, 301) \
-+            V(LAST_JS_REGION_OBJECT_TYPE, 301) \
-+            V(FIRST_JS_MODULE_NAMESPACE_TYPE, 302) \
-+              V(JS_MODULE_NAMESPACE_TYPE, 302) \
-+              V(FIRST_JS_DEFERRED_MODULE_NAMESPACE_TYPE, 303) \
-+              V(JS_DEFERRED_MODULE_NAMESPACE_TYPE, 303) \
-+              V(LAST_JS_DEFERRED_MODULE_NAMESPACE_TYPE, 303) \
-+            V(LAST_JS_MODULE_NAMESPACE_TYPE, 303) \
-+            V(FIRST_JS_GLOBAL_OBJECT_TYPE, 304) \
-+            V(JS_GLOBAL_OBJECT_TYPE, 304) \
-+            V(LAST_JS_GLOBAL_OBJECT_TYPE, 304) \
-+            V(FIRST_JS_GLOBAL_PROXY_TYPE, 305) \
-+            V(JS_GLOBAL_PROXY_TYPE, 305) \
-+            V(LAST_JS_GLOBAL_PROXY_TYPE, 305) \
++              V(FIRST_JS_REGION_LOCAL_REF_TYPE, 301) \
++              V(JS_REGION_LOCAL_REF_TYPE, 301) \
++              V(LAST_JS_REGION_LOCAL_REF_TYPE, 301) \
++              V(FIRST_JS_REGION_TYPED_ARRAY_TYPE, 302) \
++              V(JS_REGION_TYPED_ARRAY_TYPE, 302) \
++              V(LAST_JS_REGION_TYPED_ARRAY_TYPE, 302) \
++            V(LAST_JS_REGION_OBJECT_TYPE, 302) \
++            V(FIRST_JS_MODULE_NAMESPACE_TYPE, 303) \
++              V(JS_MODULE_NAMESPACE_TYPE, 303) \
++              V(FIRST_JS_DEFERRED_MODULE_NAMESPACE_TYPE, 304) \
++              V(JS_DEFERRED_MODULE_NAMESPACE_TYPE, 304) \
++              V(LAST_JS_DEFERRED_MODULE_NAMESPACE_TYPE, 304) \
++            V(LAST_JS_MODULE_NAMESPACE_TYPE, 304) \
++            V(FIRST_JS_GLOBAL_OBJECT_TYPE, 305) \
++            V(JS_GLOBAL_OBJECT_TYPE, 305) \
++            V(LAST_JS_GLOBAL_OBJECT_TYPE, 305) \
++            V(FIRST_JS_GLOBAL_PROXY_TYPE, 306) \
++            V(JS_GLOBAL_PROXY_TYPE, 306) \
++            V(LAST_JS_GLOBAL_PROXY_TYPE, 306) \
              V(FIRST_JS_SPECIAL_API_OBJECT_TYPE, 1040) \
              V(JS_SPECIAL_API_OBJECT_TYPE, 1040) \
              V(LAST_JS_SPECIAL_API_OBJECT_TYPE, 1040) \
-@@ -1132,6 +1141,9 @@
+@@ -1132,6 +1144,10 @@
    V(WASM_STRUCT_TYPE) \
    V(JS_PROXY_TYPE) \
    V(JS_OBJECT_TYPE) \
 +  V(JS_REGION_OBJECT_TYPE) \
 +  V(JS_REGION_FUNCTION_TYPE) \
++  V(JS_REGION_LOCAL_REF_TYPE) \
 +  V(JS_REGION_TYPED_ARRAY_TYPE) \
    V(JS_MODULE_NAMESPACE_TYPE) \
    V(JS_DEFERRED_MODULE_NAMESPACE_TYPE) \
    V(JS_GLOBAL_OBJECT_TYPE) \
-@@ -1415,6 +1427,8 @@
+@@ -1415,6 +1431,9 @@
    V(WasmArray, WASM_ARRAY_TYPE) \
    V(WasmStruct, WASM_STRUCT_TYPE) \
    V(JSProxy, JS_PROXY_TYPE) \
 +  V(JSRegionFunction, JS_REGION_FUNCTION_TYPE) \
++  V(JSRegionLocalRef, JS_REGION_LOCAL_REF_TYPE) \
 +  V(JSRegionTypedArray, JS_REGION_TYPED_ARRAY_TYPE) \
    V(JSDeferredModuleNamespace, JS_DEFERRED_MODULE_NAMESPACE_TYPE) \
    V(JSGlobalObject, JS_GLOBAL_OBJECT_TYPE) \
    V(JSGlobalProxy, JS_GLOBAL_PROXY_TYPE) \
-@@ -1539,6 +1553,7 @@
+@@ -1539,6 +1558,7 @@
    V(WeakFixedArray, WEAK_FIXED_ARRAY_TYPE) \
    V(Map, MAP_TYPE) \
    V(JSObject, JS_OBJECT_TYPE) \
@@ -10395,7 +10541,7 @@ index 8f144e35..c4f58115 100644
    V(JSModuleNamespace, JS_MODULE_NAMESPACE_TYPE) \
    V(JSApiObject, JS_API_OBJECT_TYPE) \
    V(JSTypedArray, JS_TYPED_ARRAY_TYPE) \
-@@ -1583,6 +1598,7 @@
+@@ -1583,6 +1603,7 @@
    V(Map, FIRST_MAP_TYPE, LAST_MAP_TYPE) \
    V(Module, FIRST_MODULE_TYPE, LAST_MODULE_TYPE) \
    V(WasmObject, FIRST_WASM_OBJECT_TYPE, LAST_WASM_OBJECT_TYPE) \
@@ -10403,12 +10549,13 @@ index 8f144e35..c4f58115 100644
    V(JSModuleNamespace, FIRST_JS_MODULE_NAMESPACE_TYPE, LAST_JS_MODULE_NAMESPACE_TYPE) \
    V(JSSpecialObject, FIRST_JS_SPECIAL_OBJECT_TYPE, LAST_JS_SPECIAL_OBJECT_TYPE) \
    V(JSCustomElementsObject, FIRST_JS_CUSTOM_ELEMENTS_OBJECT_TYPE, LAST_JS_CUSTOM_ELEMENTS_OBJECT_TYPE) \
-@@ -1748,6 +1764,9 @@
+@@ -1748,6 +1769,10 @@
    V(WasmStruct, WASM_STRUCT_TYPE) \
    V(JSProxy, JS_PROXY_TYPE) \
    V(JSObject, JS_OBJECT_TYPE) \
 +  V(JSRegionObject, JS_REGION_OBJECT_TYPE) \
 +  V(JSRegionFunction, JS_REGION_FUNCTION_TYPE) \
++  V(JSRegionLocalRef, JS_REGION_LOCAL_REF_TYPE) \
 +  V(JSRegionTypedArray, JS_REGION_TYPED_ARRAY_TYPE) \
    V(JSModuleNamespace, JS_MODULE_NAMESPACE_TYPE) \
    V(JSDeferredModuleNamespace, JS_DEFERRED_MODULE_NAMESPACE_TYPE) \
@@ -12838,7 +12985,7 @@ index 002cdca9..7456d3ee 100644
      return false;
  
 diff --git a/src/objects/instance-type.h b/src/objects/instance-type.h
-index 8c0ceaba..9a2279d0 100644
+index 8c0ceaba..f557d3c5 100644
 --- a/src/objects/instance-type.h
 +++ b/src/objects/instance-type.h
 @@ -207,6 +207,10 @@ enum InstanceType : uint16_t {
@@ -12852,23 +12999,25 @@ index 8c0ceaba..9a2279d0 100644
  
    // Convenient names for things where the generated name is awkward:
    FIRST_TYPE = FIRST_HEAP_OBJECT_TYPE,
-@@ -272,6 +276,9 @@ static_assert(JS_CLASS_CONSTRUCTOR_TYPE < FIRST_CALLABLE_JS_FUNCTION_TYPE ||
+@@ -272,6 +276,10 @@ static_assert(JS_CLASS_CONSTRUCTOR_TYPE < FIRST_CALLABLE_JS_FUNCTION_TYPE ||
                   TYPE == JS_GLOBAL_PROXY_TYPE ||                           \
                   TYPE == JS_MODULE_NAMESPACE_TYPE ||                       \
                   TYPE == JS_DEFERRED_MODULE_NAMESPACE_TYPE ||              \
 +                 TYPE == JS_REGION_OBJECT_TYPE ||                          \
 +                 TYPE == JS_REGION_TYPED_ARRAY_TYPE ||                     \
 +                 TYPE == JS_REGION_FUNCTION_TYPE ||                        \
++                 TYPE == JS_REGION_LOCAL_REF_TYPE ||                       \
                   TYPE == JS_SPECIAL_API_OBJECT_TYPE));                     \
    static_assert((TYPE >= FIRST_JS_RECEIVER_TYPE &&                         \
                   TYPE <= LAST_CUSTOM_ELEMENTS_RECEIVER) ==                 \
-@@ -282,6 +289,9 @@ static_assert(JS_CLASS_CONSTRUCTOR_TYPE < FIRST_CALLABLE_JS_FUNCTION_TYPE ||
+@@ -282,6 +290,10 @@ static_assert(JS_CLASS_CONSTRUCTOR_TYPE < FIRST_CALLABLE_JS_FUNCTION_TYPE ||
                   TYPE == JS_MODULE_NAMESPACE_TYPE ||                       \
                   TYPE == JS_DEFERRED_MODULE_NAMESPACE_TYPE ||              \
                   TYPE == JS_SPECIAL_API_OBJECT_TYPE ||                     \
 +                 TYPE == JS_REGION_OBJECT_TYPE ||                          \
 +                 TYPE == JS_REGION_TYPED_ARRAY_TYPE ||                     \
 +                 TYPE == JS_REGION_FUNCTION_TYPE ||                        \
++                 TYPE == JS_REGION_LOCAL_REF_TYPE ||                       \
                   TYPE == JS_PRIMITIVE_WRAPPER_TYPE));
  // clang-format on
  TORQUE_ASSIGNED_INSTANCE_TYPE_LIST(CHECK_INSTANCE_TYPE)
@@ -12887,7 +13036,7 @@ index 60c22c3b..e86d39ef 100644
    inline void set_detach_key(Tagged<Cell> value,
                               WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
 diff --git a/src/objects/js-objects.cc b/src/objects/js-objects.cc
-index deb7420b..4d377aef 100644
+index deb7420b..cdb635a9 100644
 --- a/src/objects/js-objects.cc
 +++ b/src/objects/js-objects.cc
 @@ -62,6 +62,7 @@
@@ -12975,7 +13124,7 @@ index deb7420b..4d377aef 100644
        case LookupIterator::MODULE_NAMESPACE:
        case LookupIterator::DATA:
        case LookupIterator::INTERCEPTOR:
-@@ -2740,6 +2762,12 @@ int JSObject::GetHeaderSize(InstanceType type) {
+@@ -2740,6 +2762,14 @@ int JSObject::GetHeaderSize(InstanceType type) {
        return JSModuleNamespace::kHeaderSize;
      case JS_DEFERRED_MODULE_NAMESPACE_TYPE:
        return JSDeferredModuleNamespace::kHeaderSize;
@@ -12985,10 +13134,12 @@ index deb7420b..4d377aef 100644
 +      return JSRegionTypedArray::kHeaderSize;
 +    case JS_REGION_FUNCTION_TYPE:
 +      return JSRegionFunction::kHeaderSize;
++    case JS_REGION_LOCAL_REF_TYPE:
++      return JSRegionLocalRef::kHeaderSize;
      case JS_SHARED_STRUCT_TYPE:
        return JSSharedStruct::kHeaderSize;
  #ifdef V8_TEMPORAL_SUPPORT
-@@ -3856,6 +3884,10 @@ Maybe<bool> JSObject::DefineOwnPropertyIgnoreAttributes(
+@@ -3856,6 +3886,10 @@ Maybe<bool> JSObject::DefineOwnPropertyIgnoreAttributes(
          UNREACHABLE();
        case LookupIterator::WASM_OBJECT:
          continue;  // {AddDataProperty} will throw if no other case is hit.
@@ -13015,10 +13166,10 @@ index 9c6f4043..0e1c4b10 100644
                                                  DirectHandle<Object> reactions,
 diff --git a/src/objects/js-region-inl.h b/src/objects/js-region-inl.h
 new file mode 100644
-index 00000000..f9514a9a
+index 00000000..5cf0a91e
 --- /dev/null
 +++ b/src/objects/js-region-inl.h
-@@ -0,0 +1,110 @@
+@@ -0,0 +1,120 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -13095,6 +13246,16 @@ index 00000000..f9514a9a
 +  column_.store(this, Smi::FromInt(column));
 +}
 +
++DEF_CAST_TRAITS(JSRegionLocalRef)
++
++int JSRegionLocalRef::ref_id() const { return ref_id_.load().value(); }
++int JSRegionLocalRef::thread() const { return thread_.load().value(); }
++
++void JSRegionLocalRef::Initialize(int ref_id, int thread) {
++  ref_id_.store(this, Smi::FromInt(ref_id));
++  thread_.store(this, Smi::FromInt(thread));
++}
++
 +DEF_CAST_TRAITS(JSRegionTypedArray)
 +
 +int JSRegionTypedArray::backing_store_id() const {
@@ -13131,10 +13292,10 @@ index 00000000..f9514a9a
 +#endif  // V8_OBJECTS_JS_REGION_INL_H_
 diff --git a/src/objects/js-region.cc b/src/objects/js-region.cc
 new file mode 100644
-index 00000000..5b12871c
+index 00000000..d25552e4
 --- /dev/null
 +++ b/src/objects/js-region.cc
-@@ -0,0 +1,3764 @@
+@@ -0,0 +1,4192 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -13950,6 +14111,10 @@ index 00000000..5b12871c
 +  return ThawResult::kThawed;
 +}
 +
++namespace {
++void RegionLocalRefsScanned(const std::unordered_set<int>& live);
++}  // namespace
++
 +void RegionRegistry::ReleaseUnusedRegions(Heap* heap) {
 +  DCHECK(heap->isolate()->is_shared_space_isolate());
 +  int count = next_region_.load(std::memory_order_relaxed);
@@ -13962,6 +14127,8 @@ index 00000000..5b12871c
 +  // know to collect them.
 +  std::unordered_map<int, std::vector<Address>> common;
 +  std::vector<bool> live_stores(RegionBackingStores::Count());
++  // Ids of Region.localRef() handles that regions still hold.
++  std::unordered_set<int> live_refs;
 +  heap->CompleteSweepingFull(CompleteSweepingReason::kHeapObjectIterator);
 +  // The GC may have moved common objects into what were chunks of regions:
 +  // only page ids and region objects tell regions now. Strings and numbers of
@@ -14014,7 +14181,11 @@ index 00000000..5b12871c
 +      int store = Cast<JSRegionTypedArray>(object)->backing_store_id();
 +      if (store >= 0) live_stores[store] = true;
 +    }
++    if (IsJSRegionLocalRef(object)) {
++      live_refs.insert(Cast<JSRegionLocalRef>(object)->ref_id());
++    }
 +  }
++  RegionLocalRefsScanned(live_refs);
 +  RegionBackingStores::ReleaseUnused(live_stores);
 +  for (auto& [region, objects] : common) {
 +    std::sort(objects.begin(), objects.end());
@@ -14816,8 +14987,6 @@ index 00000000..5b12871c
 +
 +
 +
-+// Copies a graph of plain objects and arrays into shared space, tagging every
-+// copy with the region id. Cycles and shared substructure are preserved.
 +// Functions of Region.fn. A function is its code, known by a function id:
 +// every holder with that id, in any region, is the same function. Each
 +// isolate compiles it once and keeps the JSFunction while JS refers to it, so
@@ -15011,6 +15180,309 @@ index 00000000..5b12871c
 +  }
 +};
 +
++// Region.localRef() handles. A handle is known by its id. Its target stays in
++// the isolate that made it, under a strong global handle, while a LocalRef of
++// that id lives in any isolate or a holder of it may live in a region that is
++// not freed. Holders are in shared space, so only the shared GC sees them:
++// ReleaseUnusedRegions() tells which ids it found, and the isolate that made
++// a handle drops the target after one of its GCs once nothing can reach it.
++class RegionLocalRefs {
++ public:
++  // What a LocalRef holds under the private Symbol() of its isolate.
++  enum { kId, kThread, kDescriptorLength };
++
++  // A quick no for most objects: LocalRefs have the prototype of their
++  // isolate.
++  static bool MayBeLocalRef(Isolate* isolate, Tagged<JSObject> value) {
++    State& state = Of(isolate);
++    if (state.symbol == nullptr) return false;
++    return state.prototype == nullptr ||
++           value->map()->prototype() == Tagged<Object>(*state.prototype);
++  }
++
++  // The descriptor of a LocalRef, or an empty handle for any other value.
++  static MaybeDirectHandle<FixedArray> DescriptorOf(Isolate* isolate,
++                                                    DirectHandle<Object> value) {
++    if (!IsJSObject(*value) || IsJSRegionObject(*value)) return {};
++    if (Of(isolate).symbol == nullptr) return {};
++    DirectHandle<Object> descriptor = JSReceiver::GetDataProperty(
++        isolate, Cast<JSObject>(value), Symbol(isolate));
++    if (!IsFixedArray(*descriptor)) return {};
++    return Cast<FixedArray>(descriptor);
++  }
++
++  static DirectHandle<JSObject> New(Isolate* isolate,
++                                    DirectHandle<JSReceiver> target) {
++    Drain(isolate);
++    static std::atomic<int> next{0};
++    int id = next.fetch_add(1, std::memory_order_relaxed);
++    CHECK_LT(id, Smi::kMaxValue);
++    State& state = Of(isolate);
++    if (!state.epilogue) {
++      isolate->heap()->AddGCEpilogueCallback(&AfterGC, kGCTypeAll, nullptr);
++      state.epilogue = true;
++    }
++    Address* location = isolate->global_handles()->Create(*target).location();
++    {
++      base::MutexGuard guard(Mutex());
++      Entry& entry = (*Entries())[id];
++      entry.creator = isolate;
++      entry.target = location;
++      state.made.push_back(id);
++    }
++    return Wrapper(isolate, id, isolate->id());
++  }
++
++  // This isolate's LocalRef for `id`, the same one while JS refers to it.
++  static DirectHandle<JSObject> Wrapper(Isolate* isolate, int id, int thread) {
++    State& state = Of(isolate);
++    auto it = state.wrappers.find(id);
++    if (it != state.wrappers.end()) {
++      return DirectHandle<JSObject>(
++          Cast<JSObject>(Tagged<Object>(*it->second->location)), isolate);
++    }
++    Factory* factory = isolate->factory();
++    DirectHandle<JSObject> wrapper =
++        factory->NewJSObject(isolate->object_function());
++    DirectHandle<Object> prototype =
++        state.prototype != nullptr
++            ? DirectHandle<Object>(Tagged<Object>(*state.prototype), isolate)
++            : DirectHandle<Object>(factory->null_value());
++    CHECK(JSObject::SetPrototype(isolate, wrapper, prototype, false,
++                                 kThrowOnError)
++              .FromJust());
++    DirectHandle<FixedArray> descriptor = factory->NewFixedArray(kDescriptorLength);
++    descriptor->set(kId, Smi::FromInt(id));
++    descriptor->set(kThread, Smi::FromInt(thread));
++    JSObject::AddProperty(isolate, wrapper, Symbol(isolate), descriptor,
++                          DONT_ENUM);
++
++    WrapperSlot* slot = new WrapperSlot{isolate, id, nullptr};
++    slot->location = isolate->global_handles()->Create(*wrapper).location();
++    GlobalHandles::MakeWeak(slot->location, slot, &WrapperDied,
++                            v8::WeakCallbackType::kParameter);
++    state.wrappers[id] = slot;
++    base::MutexGuard guard(Mutex());
++    auto entry = Entries()->find(id);
++    if (entry != Entries()->end()) entry->second.wrappers++;
++    return wrapper;
++  }
++
++  // The target of `id` if this isolate made it; nullptr otherwise.
++  // `released` tells whether it was this isolate's and is gone.
++  static Address* TargetHere(Isolate* isolate, int id, int thread,
++                             bool* released) {
++    base::MutexGuard guard(Mutex());
++    auto entry = Entries()->find(id);
++    if (entry != Entries()->end() && entry->second.creator == isolate) {
++      *released = false;
++      return entry->second.target;
++    }
++    *released = entry == Entries()->end() && thread == isolate->id();
++    return nullptr;
++  }
++
++  // A holder of LocalRef `descriptor` in `region`, which this isolate owns.
++  static DirectHandle<JSRegionLocalRef> NewHolder(
++      Isolate* isolate, int region, DirectHandle<FixedArray> descriptor) {
++    State& state = Of(isolate);
++    if (state.holder_map == nullptr) {
++      state.holder_map =
++          isolate->global_handles()
++              ->Create(*NewRegionMapFor(isolate, JS_REGION_LOCAL_REF_TYPE,
++                                        JSRegionLocalRef::kHeaderSize))
++              .location();
++    }
++    int id = Smi::ToInt(descriptor->get(kId));
++    {
++      // Until the next shared GC has seen this holder, it may be the only
++      // thing that refers to the target.
++      base::MutexGuard guard(Mutex());
++      auto entry = Entries()->find(id);
++      if (entry != Entries()->end()) entry->second.generation++;
++    }
++    DirectHandle<Map> map(Cast<Map>(Tagged<Object>(*state.holder_map)),
++                          isolate);
++    SharedObjectSafePublishGuard publish_guard;
++    DirectHandle<JSRegionLocalRef> holder =
++        Cast<JSRegionLocalRef>(isolate->factory()->NewJSObjectFromMapInRegion(
++            map, region, 0, NewJSObjectType::kMaybeEmbedderFieldsAndApiWrapper));
++    DisallowGarbageCollection no_gc;
++    Tagged<FixedArray> empty = ReadOnlyRoots(isolate).empty_fixed_array();
++    holder->set_region_id(region);
++    holder->set_keys(empty);
++    holder->set_values(empty);
++    holder->set_array_length(0);
++    holder->Initialize(id, Smi::ToInt(descriptor->get(kThread)));
++    return holder;
++  }
++
++  static void SetPrototype(Isolate* isolate, DirectHandle<JSReceiver> prototype) {
++    State& state = Of(isolate);
++    if (state.prototype != nullptr) return;
++    state.prototype = isolate->global_handles()->Create(*prototype).location();
++  }
++
++  // From the shared GC, all isolates stopped: the ids of holders in regions
++  // that are not freed.
++  static void Scanned(const std::unordered_set<int>& live) {
++    base::MutexGuard guard(Mutex());
++    for (auto& [id, entry] : *Entries()) {
++      entry.held = live.count(id) > 0;
++      entry.scanned = entry.generation;
++    }
++  }
++
++  // Drops the targets of this isolate that nothing can reach any more.
++  static void Drain(Isolate* isolate) {
++    State& state = Of(isolate);
++    std::vector<Address*> dead;
++    {
++      base::MutexGuard guard(Mutex());
++      std::vector<int>& made = state.made;
++      for (size_t i = 0; i < made.size();) {
++        auto entry = Entries()->find(made[i]);
++        if (entry != Entries()->end() && !entry->second.Reachable()) {
++          dead.push_back(entry->second.target);
++          Entries()->erase(entry);
++        } else if (entry != Entries()->end()) {
++          i++;
++          continue;
++        }
++        made[i] = made.back();
++        made.pop_back();
++      }
++    }
++    for (Address* location : dead) GlobalHandles::Destroy(location);
++  }
++
++  static void Forget(Isolate* isolate) {
++    State& state = Of(isolate);
++    std::vector<Address*> handles;
++    {
++      base::MutexGuard guard(Mutex());
++      for (auto& [id, slot] : state.wrappers) {
++        handles.push_back(slot->location);
++        auto entry = Entries()->find(id);
++        if (entry != Entries()->end()) entry->second.wrappers--;
++        delete slot;
++      }
++      for (int id : state.made) {
++        auto entry = Entries()->find(id);
++        if (entry == Entries()->end()) continue;
++        handles.push_back(entry->second.target);
++        Entries()->erase(entry);
++      }
++    }
++    for (Address* location :
++         {state.holder_map, state.symbol, state.prototype}) {
++      if (location != nullptr) handles.push_back(location);
++    }
++    for (Address* location : handles) GlobalHandles::Destroy(location);
++    // Keep the state: a thread may still have it cached.
++    state.wrappers.clear();
++    state.made.clear();
++    state.holder_map = state.symbol = state.prototype = nullptr;
++  }
++
++ private:
++  struct Entry {
++    Isolate* creator = nullptr;
++    // A strong global handle of the creator.
++    Address* target = nullptr;
++    // LocalRef objects of this id alive in all isolates.
++    int wrappers = 0;
++    // Whether the last shared GC found a holder in a region not freed.
++    bool held = false;
++    // Holders made so far, and how many the last shared GC could see.
++    uint64_t generation = 0;
++    uint64_t scanned = 0;
++
++    bool Reachable() const {
++      return wrappers > 0 || held || generation != scanned;
++    }
++  };
++
++  struct WrapperSlot {
++    Isolate* isolate;
++    int id;
++    Address* location;
++  };
++
++  struct State {
++    // Weak handles of this isolate's LocalRef objects by id.
++    std::unordered_map<int, WrapperSlot*> wrappers;
++    // Ids of handles this isolate made and still keeps the target of.
++    std::vector<int> made;
++    Address* holder_map = nullptr;
++    Address* symbol = nullptr;
++    Address* prototype = nullptr;
++    bool epilogue = false;
++  };
++
++  static void WrapperDied(const v8::WeakCallbackInfo<void>& data) {
++    WrapperSlot* slot = static_cast<WrapperSlot*>(data.GetParameter());
++    GlobalHandles::Destroy(slot->location);
++    Of(slot->isolate).wrappers.erase(slot->id);
++    {
++      base::MutexGuard guard(Mutex());
++      auto entry = Entries()->find(slot->id);
++      if (entry != Entries()->end()) entry->second.wrappers--;
++    }
++    delete slot;
++  }
++
++  static void AfterGC(v8::Isolate* isolate, v8::GCType, v8::GCCallbackFlags,
++                      void*) {
++    Drain(reinterpret_cast<Isolate*>(isolate));
++  }
++
++  static DirectHandle<class Symbol> Symbol(Isolate* isolate) {
++    State& state = Of(isolate);
++    if (state.symbol == nullptr) {
++      state.symbol = isolate->global_handles()
++                         ->Create(*isolate->factory()->NewPrivateSymbol())
++                         .location();
++    }
++    return DirectHandle<class Symbol>(
++        Cast<class Symbol>(Tagged<Object>(*state.symbol)), isolate);
++  }
++
++  static State& Of(Isolate* isolate) {
++    thread_local Isolate* cached_isolate = nullptr;
++    thread_local State* cached_state = nullptr;
++    if (cached_isolate == isolate) return *cached_state;
++    base::MutexGuard guard(StatesMutex());
++    cached_isolate = isolate;
++    cached_state = &(*States())[isolate];
++    return *cached_state;
++  }
++
++  // Guards the entries; States() has its own.
++  static base::Mutex& Mutex() {
++    static base::LeakyObject<base::Mutex> mutex;
++    return *mutex.get();
++  }
++  static std::unordered_map<int, Entry>* Entries() {
++    static base::LeakyObject<std::unordered_map<int, Entry>> entries;
++    return entries.get();
++  }
++  static base::Mutex& StatesMutex() {
++    static base::LeakyObject<base::Mutex> mutex;
++    return *mutex.get();
++  }
++  static std::unordered_map<Isolate*, State>* States() {
++    static base::LeakyObject<std::unordered_map<Isolate*, State>> states;
++    return states.get();
++  }
++};
++
++void RegionLocalRefsScanned(const std::unordered_set<int>& live) {
++  RegionLocalRefs::Scanned(live);
++}
++
++// Copies a graph of plain objects and arrays into shared space, tagging every
++// copy with the region id. Cycles and shared substructure are preserved.
 +class Evacuator {
 + public:
 +  Evacuator(Isolate* isolate, int region,
@@ -15039,6 +15511,15 @@ index 00000000..5b12871c
 +      DirectHandle<JSRegionFunction> holder =
 +          RegionFunctions::NewHolder(isolate_, region_, descriptor);
 +      bytes_ += JSRegionFunction::kHeaderSize;
++      copies_.Insert(value, static_cast<int>(copied_.size()));
++      copied_.push_back(indirect_handle(holder, isolate_));
++      return holder;
++    }
++    if (RegionLocalRefs::DescriptorOf(isolate_, value).ToHandle(&descriptor)) {
++      if (int* index = copies_.Find(value)) return copied_[*index];
++      DirectHandle<JSRegionLocalRef> holder =
++          RegionLocalRefs::NewHolder(isolate_, region_, descriptor);
++      bytes_ += JSRegionLocalRef::kHeaderSize;
 +      copies_.Insert(value, static_cast<int>(copied_.size()));
 +      copied_.push_back(indirect_handle(holder, isolate_));
 +      return holder;
@@ -15482,6 +15963,12 @@ index 00000000..5b12871c
 +    }
 +    return indirect_handle(function, isolate);
 +  }
++  if (IsJSRegionLocalRef(*value)) {
++    DirectHandle<JSRegionLocalRef> holder = Cast<JSRegionLocalRef>(value);
++    return indirect_handle(
++        RegionLocalRefs::Wrapper(isolate, holder->ref_id(), holder->thread()),
++        isolate);
++  }
 +  if (!IsJSRegionTypedArray(*value)) return value;
 +  DirectHandle<JSRegionTypedArray> holder = Cast<JSRegionTypedArray>(value);
 +  Factory* factory = isolate->factory();
@@ -15558,6 +16045,7 @@ index 00000000..5b12871c
 +namespace {
 +void ForgetRegionLiterals(Isolate* isolate);
 +void ForgetRegionFunctions(Isolate* isolate);
++void ForgetRegionLocalRefs(Isolate* isolate);
 +}  // namespace
 +
 +// static
@@ -15568,6 +16056,7 @@ index 00000000..5b12871c
 +  }
 +  ForgetRegionLiterals(isolate);
 +  ForgetRegionFunctions(isolate);
++  ForgetRegionLocalRefs(isolate);
 +  RegionRegistry::ForgetReadTable(isolate);
 +}
 +
@@ -15576,6 +16065,9 @@ index 00000000..5b12871c
 +void ForgetRegionLiterals(Isolate* isolate) { RegionLiterals::Forget(isolate); }
 +void ForgetRegionFunctions(Isolate* isolate) {
 +  RegionFunctions::Forget(isolate);
++}
++void ForgetRegionLocalRefs(Isolate* isolate) {
++  RegionLocalRefs::Forget(isolate);
 +}
 +
 +}  // namespace
@@ -15630,6 +16122,10 @@ index 00000000..5b12871c
 +  if (RegionFunctions::DescriptorOf(isolate, value).ToHandle(&descriptor)) {
 +    RegionRegistry::AddBytes(region, JSRegionFunction::kHeaderSize);
 +    return RegionFunctions::NewHolder(isolate, region, descriptor);
++  }
++  if (RegionLocalRefs::DescriptorOf(isolate, value).ToHandle(&descriptor)) {
++    RegionRegistry::AddBytes(region, JSRegionLocalRef::kHeaderSize);
++    return RegionLocalRefs::NewHolder(isolate, region, descriptor);
 +  }
 +  if (IsJSReceiver(*value)) {
 +    THROW_NEW_ERROR(isolate,
@@ -15758,6 +16254,90 @@ index 00000000..5b12871c
 +}
 +
 +// static
++MaybeDirectHandle<JSObject> JSRegionObject::NewLocalRef(
++    Isolate* isolate, DirectHandle<JSReceiver> target) {
++  return RegionLocalRefs::New(isolate, target);
++}
++
++// static
++void JSRegionObject::SetLocalRefPrototype(Isolate* isolate,
++                                          DirectHandle<JSReceiver> prototype) {
++  RegionLocalRefs::SetPrototype(isolate, prototype);
++}
++
++namespace {
++
++// The target of LocalRef `ref` in this isolate; throws if `ref` is not a
++// LocalRef (`method` names the caller) or this isolate did not make it.
++MaybeDirectHandle<Object> LocalRefTarget(Isolate* isolate,
++                                         DirectHandle<Object> ref,
++                                         const char* method, bool* here) {
++  DirectHandle<FixedArray> descriptor;
++  if (!RegionLocalRefs::DescriptorOf(isolate, ref).ToHandle(&descriptor)) {
++    THROW_NEW_ERROR(
++        isolate,
++        NewTypeError(MessageTemplate::kIncompatibleMethodReceiver,
++                     isolate->factory()->NewStringFromAsciiChecked(method),
++                     ref));
++  }
++  int id = Smi::ToInt(descriptor->get(RegionLocalRefs::kId));
++  int thread = Smi::ToInt(descriptor->get(RegionLocalRefs::kThread));
++  bool released = false;
++  Address* target = RegionLocalRefs::TargetHere(isolate, id, thread, &released);
++  *here = target != nullptr;
++  if (target != nullptr) {
++    return DirectHandle<Object>(Tagged<Object>(*target), isolate);
++  }
++  if (released) {
++    THROW_NEW_ERROR(isolate,
++                    NewError(MessageTemplate::kRegionLocalRefReleased));
++  }
++  return isolate->factory()->undefined_value();
++}
++
++}  // namespace
++
++// static
++MaybeDirectHandle<Object> JSRegionObject::DerefLocalRef(
++    Isolate* isolate, DirectHandle<Object> ref) {
++  bool here;
++  DirectHandle<Object> target;
++  if (!LocalRefTarget(isolate, ref, "LocalRef.prototype.deref", &here)
++           .ToHandle(&target)) {
++    return {};
++  }
++  if (here) return target;
++  DirectHandle<FixedArray> descriptor =
++      RegionLocalRefs::DescriptorOf(isolate, ref).ToHandleChecked();
++  Factory* factory = isolate->factory();
++  isolate->Throw(*RegionRegistry::NewOwnershipError(
++      isolate, -1, "other-thread", MessageTemplate::kRegionLocalRefOtherThread,
++      base::VectorOf<DirectHandle<Object>>(
++          {factory->NewNumberFromInt(
++               Smi::ToInt(descriptor->get(RegionLocalRefs::kThread))),
++           factory->NewNumberFromInt(isolate->id())})));
++  return {};
++}
++
++// static
++bool JSRegionObject::IsLocalRef(Isolate* isolate, DirectHandle<JSObject> value) {
++  return RegionLocalRefs::MayBeLocalRef(isolate, *value) &&
++         !RegionLocalRefs::DescriptorOf(isolate, value).is_null();
++}
++
++// static
++Maybe<bool> JSRegionObject::IsLocalRefHere(Isolate* isolate,
++                                           DirectHandle<Object> ref) {
++  bool here;
++  DirectHandle<Object> target;
++  if (!LocalRefTarget(isolate, ref, "LocalRef.prototype.local", &here)
++           .ToHandle(&target)) {
++    return Nothing<bool>();
++  }
++  return Just(here);
++}
++
++// static
 +MaybeDirectHandle<JSTypedArray> JSRegionObject::NewTypedArray(
 +    Isolate* isolate, int region, DirectHandle<Object> constructor,
 +    DirectHandle<Object> length) {
@@ -15824,9 +16404,9 @@ index 00000000..5b12871c
 +      {length, static_cast<int64_t>(array->array_length()),
 +       static_cast<int64_t>(values->ulength().value())});
 +  // A typed array is read as a fresh view, which equals nothing; its holder
-+  // here equals nothing either. A function is read as this isolate's copy,
-+  // which the generic path compares.
-+  if (IsJSFunction(search)) return false;
++  // here equals nothing either. A function or a LocalRef is read as this
++  // isolate's copy, which the generic path compares.
++  if (IsJSReceiver(search) && !IsJSRegionObject(search)) return false;
 +  if (IsSmi(search)) {
 +    // The common case: a small integer is the same Smi, or a heap number
 +    // with its value.
@@ -16027,21 +16607,30 @@ index 00000000..5b12871c
 +  DirectHandle<FixedArray> descriptor;
 +  bool is_function =
 +      RegionFunctions::DescriptorOf(isolate, value).ToHandle(&descriptor);
++  bool is_local_ref =
++      !is_function &&
++      RegionLocalRefs::DescriptorOf(isolate, value).ToHandle(&descriptor);
 +  if (IsJSFunction(*value) && !is_function) {
 +    RETURN_FAILURE(isolate, kThrowOnError,
 +                   NewTypeError(MessageTemplate::kRegionPlainFunction));
 +  }
 +  if (IsJSReceiver(*value) && !IsJSRegionObject(*value) &&
-+      !IsJSTypedArray(*value) && !is_function) {
++      !IsJSTypedArray(*value) && !is_function && !is_local_ref) {
 +    isolate->Throw(*OutsideReferenceError(isolate, object->region_id()));
 +    return Nothing<bool>();
 +  }
-+  // The same function again: the holder that is there already will do.
-+  if (is_function && index >= 0) {
++  // The same function or LocalRef again: the holder that is there already
++  // will do.
++  if (index >= 0) {
 +    Tagged<Object> old = object->values()->get(index);
-+    if (IsJSRegionFunction(old) &&
++    if (is_function && IsJSRegionFunction(old) &&
 +        Cast<JSRegionFunction>(old)->function_id() ==
 +            Smi::ToInt(descriptor->get(RegionFunctions::kId))) {
++      return Just(true);
++    }
++    if (is_local_ref && IsJSRegionLocalRef(old) &&
++        Cast<JSRegionLocalRef>(old)->ref_id() ==
++            Smi::ToInt(descriptor->get(RegionLocalRefs::kId))) {
 +      return Just(true);
 +    }
 +  }
@@ -16901,10 +17490,10 @@ index 00000000..5b12871c
 +}  // namespace v8
 diff --git a/src/objects/js-region.h b/src/objects/js-region.h
 new file mode 100644
-index 00000000..f2d9e7b0
+index 00000000..ea537b25
 --- /dev/null
 +++ b/src/objects/js-region.h
-@@ -0,0 +1,611 @@
+@@ -0,0 +1,649 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -17403,6 +17992,26 @@ index 00000000..f2d9e7b0
 +      Isolate* isolate, DirectHandle<String> source,
 +      DirectHandle<Object> script_name, int line, int column);
 +
++  // Region.localRef(): a LocalRef of `target`, an object of this isolate,
++  // that objects of any region can hold. Storing it stores a holder
++  // (JSRegionLocalRef); every isolate that reads one gets its own LocalRef,
++  // the same one each time, and only this isolate can deref() it. `target`
++  // lives while a LocalRef of it lives in any isolate, or a holder of it in a
++  // region that is not freed; the shared GC finds the holders. LocalRef
++  // objects get `prototype`, which the embedder sets for each isolate.
++  static MaybeDirectHandle<JSObject> NewLocalRef(Isolate* isolate,
++                                                 DirectHandle<JSReceiver> target);
++  static void SetLocalRefPrototype(Isolate* isolate,
++                                   DirectHandle<JSReceiver> prototype);
++  // ref.deref(): the target, or an OwnershipError in other isolates.
++  static MaybeDirectHandle<Object> DerefLocalRef(Isolate* isolate,
++                                                 DirectHandle<Object> ref);
++  // ref.local: whether this isolate can deref() `ref`. Throws if `ref` is not
++  // a LocalRef.
++  static Maybe<bool> IsLocalRefHere(Isolate* isolate, DirectHandle<Object> ref);
++  // Whether `value` is a LocalRef of this isolate.
++  static bool IsLocalRef(Isolate* isolate, DirectHandle<JSObject> value);
++
 +  // For Array.prototype.includes and indexOf: looks for `search` among
 +  // elements [from, length) of `array` straight in values(), with
 +  // SameValueZero or strict equality. Returns false when the caller must take
@@ -17510,6 +18119,24 @@ index 00000000..f2d9e7b0
 +
 +inline constexpr int JSRegionFunction::kHeaderSize = sizeof(JSRegionFunction);
 +
++V8_OBJECT class JSRegionLocalRef : public JSRegionObject {
++ public:
++  inline int ref_id() const;
++  inline int thread() const;
++  inline void Initialize(int ref_id, int thread);
++
++  DECL_PRINTER(JSRegionLocalRef)
++  DECL_VERIFIER(JSRegionLocalRef)
++
++  static const int kHeaderSize;
++
++ public:
++  TaggedMember<Smi> ref_id_;
++  TaggedMember<Smi> thread_;
++} V8_OBJECT_END;
++
++inline constexpr int JSRegionLocalRef::kHeaderSize = sizeof(JSRegionLocalRef);
++
 +}  // namespace internal
 +}  // namespace v8
 +
@@ -17518,10 +18145,10 @@ index 00000000..f2d9e7b0
 +#endif  // V8_OBJECTS_JS_REGION_H_
 diff --git a/src/objects/js-region.tq b/src/objects/js-region.tq
 new file mode 100644
-index 00000000..64f59595
+index 00000000..9a8b5770
 --- /dev/null
 +++ b/src/objects/js-region.tq
-@@ -0,0 +1,40 @@
+@@ -0,0 +1,51 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -17561,6 +18188,17 @@ index 00000000..64f59595
 +  script_name: String|Undefined;
 +  line: Smi;
 +  column: Smi;
++}
++
++// A Region.localRef() handle in a region: which object of which isolate it
++// refers to. The object stays in that isolate; every isolate that reads the
++// holder gets a LocalRef of its own, and only the one that made it can
++// deref() it. Has no properties of its own (empty keys and values).
++@cppObjectLayoutDefinition
++extern class JSRegionLocalRef extends JSRegionObject {
++  ref_id: Smi;
++  // Number of the isolate the object lives in, for error messages.
++  thread: Smi;
 +}
 diff --git a/src/objects/keys.cc b/src/objects/keys.cc
 index 341386ce..10d29be8 100644
@@ -17687,28 +18325,30 @@ index 943025b3..c44dcba1 100644
  
  bool IsBooleanMap(Tagged<Map> map) {
 diff --git a/src/objects/map.cc b/src/objects/map.cc
-index 36f6ad89..2f215182 100644
+index 36f6ad89..6ad36fbe 100644
 --- a/src/objects/map.cc
 +++ b/src/objects/map.cc
-@@ -335,6 +335,9 @@ VisitorId Map::GetVisitorId(Tagged<Map> map) {
+@@ -335,6 +335,10 @@ VisitorId Map::GetVisitorId(Tagged<Map> map) {
      case JS_MESSAGE_OBJECT_TYPE:
      case JS_MODULE_NAMESPACE_TYPE:
      case JS_DEFERRED_MODULE_NAMESPACE_TYPE:
 +    case JS_REGION_OBJECT_TYPE:
 +    case JS_REGION_TYPED_ARRAY_TYPE:
 +    case JS_REGION_FUNCTION_TYPE:
++    case JS_REGION_LOCAL_REF_TYPE:
      case JS_OBJECT_PROTOTYPE_TYPE:
      case JS_OBJECT_TYPE:
      case JS_PRIMITIVE_WRAPPER_TYPE:
 diff --git a/src/objects/object-list-macros.h b/src/objects/object-list-macros.h
-index 82d2df89..d9539c53 100644
+index 82d2df89..220710e1 100644
 --- a/src/objects/object-list-macros.h
 +++ b/src/objects/object-list-macros.h
-@@ -189,6 +189,9 @@ namespace internal {
+@@ -189,6 +189,10 @@ namespace internal {
    V(JSMessageObject)                            \
    V(JSModuleNamespace)                          \
    V(JSDeferredModuleNamespace)                  \
 +  V(JSRegionFunction)                           \
++  V(JSRegionLocalRef)                           \
 +  V(JSRegionObject)                             \
 +  V(JSRegionTypedArray)                         \
    V(JSObject)                                   \
@@ -17859,10 +18499,18 @@ index b53ecd4a..2272f487 100644
  
  @cppScope('SharedFunctionInfo::Flags2')
 diff --git a/src/objects/value-serializer.cc b/src/objects/value-serializer.cc
-index 3de06302..48d170f7 100644
+index 3de06302..29de09e9 100644
 --- a/src/objects/value-serializer.cc
 +++ b/src/objects/value-serializer.cc
-@@ -627,7 +627,8 @@ Maybe<bool> ValueSerializer::WriteJSReceiver(
+@@ -27,6 +27,7 @@
+ #include "src/objects/js-array-inl.h"
+ #include "src/objects/js-collection-inl.h"
+ #include "src/objects/js-regexp-inl.h"
++#include "src/objects/js-region.h"
+ #include "src/objects/js-struct.h"
+ #include "src/objects/map-updater.h"
+ #include "src/objects/object-conversions-inl.h"
+@@ -627,7 +628,8 @@ Maybe<bool> ValueSerializer::WriteJSReceiver(
    InstanceType instance_type = receiver->map()->instance_type();
    if (IsCallable(*receiver) ||
        (IsSpecialReceiverInstanceType(instance_type) &&
@@ -17872,7 +18520,18 @@ index 3de06302..48d170f7 100644
  #if V8_ENABLE_WEBASSEMBLY
         && instance_type != WASM_STRUCT_TYPE && instance_type != WASM_ARRAY_TYPE
  #endif
-@@ -701,6 +702,8 @@ Maybe<bool> ValueSerializer::WriteJSReceiver(
+@@ -655,6 +657,10 @@ Maybe<bool> ValueSerializer::WriteJSReceiver(
+     case JS_TYPED_ARRAY_PROTOTYPE_TYPE:
+     case JS_API_OBJECT_TYPE: {
+       DirectHandle<JSObject> js_object = Cast<JSObject>(receiver);
++      // Copied, it would be a plain object that refers to nothing.
++      if (JSRegionObject::IsLocalRef(isolate_, js_object)) {
++        return ThrowDataCloneError(MessageTemplate::kRegionLocalRefClone);
++      }
+       Maybe<bool> is_host_object = IsHostObject(js_object);
+       if (is_host_object.IsNothing()) {
+         return is_host_object;
+@@ -701,6 +707,8 @@ Maybe<bool> ValueSerializer::WriteJSReceiver(
      }
      case JS_SHARED_STRUCT_TYPE:
        return WriteJSSharedStruct(Cast<JSSharedStruct>(receiver));
@@ -17881,7 +18540,7 @@ index 3de06302..48d170f7 100644
  #if V8_ENABLE_WEBASSEMBLY
      case WASM_MODULE_OBJECT_TYPE:
        return WriteWasmModule(Cast<WasmModuleObject>(receiver));
-@@ -2631,7 +2634,8 @@ MaybeDirectHandle<HeapObject> ValueDeserializer::ReadSharedObject() {
+@@ -2631,7 +2639,8 @@ MaybeDirectHandle<HeapObject> ValueDeserializer::ReadSharedObject() {
    }
  
    DirectHandle<HeapObject> shared_object(

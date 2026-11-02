@@ -25,7 +25,8 @@ type RegionFunction<F extends (...args: any[]) => any = (...args: any[]) => any>
 };
 
 /** Data that can be copied into a region: primitives, typed arrays, plain
- * arrays, plain objects and functions made by Region.fn(). Other functions,
+ * arrays, plain objects, functions made by Region.fn() and LocalRef handles
+ * made by Region.localRef(). Other functions,
  * class instances, Map, Set, Date and symbols are not allowed. */
 type RegionData =
   | null
@@ -35,6 +36,7 @@ type RegionData =
   | string
   | RegionTypedArray
   | RegionFunction
+  | LocalRef<any>
   | RegionData[]
   | { readonly [key: string]: RegionData };
 
@@ -50,7 +52,8 @@ type OwnershipReason =
   | 'read-locked'
   | 'borrowed'
   | 'not-frozen'
-  | 'outside-reference';
+  | 'outside-reference'
+  | 'other-thread';
 
 /** Thrown when a thread touches a region it does not own, writes into a frozen
  * region or links a region object to an object outside the region. The
@@ -180,6 +183,12 @@ declare class Region implements Disposable {
    * region in any thread gives that thread's copy, the same one each time.
    * Throws TypeError for captured variables, eval, classes and methods. */
   static fn<F extends (...args: any[]) => any>(fn: F): RegionFunction<F>;
+  /** A handle to `value`, an object of this thread, that objects of any
+   * region can hold, like SendWrapper in Rust. Every thread reads it as its
+   * own LocalRef, the same one each time; only this thread can deref() it.
+   * `value` lives while a LocalRef of it, or a region object holding one,
+   * does; once a region is freed, its handles no longer keep anything. */
+  static localRef<T extends object>(value: T): LocalRef<T>;
 }
 
 interface RegionScope extends Disposable {
@@ -291,6 +300,17 @@ type ChannelEntry<T> = { value: T; done: false } | { value: undefined; done: tru
  * regions and copies plain data. Channels can be captured by spawn() tasks,
  * sent with postMessage() and sent through other channels.
  */
+/** A handle made by Region.localRef(). */
+declare class LocalRef<T extends object = object> {
+  private constructor();
+  private readonly brand: T;
+  /** The object, in the thread that made the handle. Other threads get an
+   * OwnershipError with reason 'other-thread'. */
+  deref(): T;
+  /** Whether this thread can deref() the handle. */
+  readonly local: boolean;
+}
+
 declare class Channel<T = any> implements AsyncIterable<T>, Iterable<T> {
   /** `capacity` values fit into the buffer; 0 (the default) means every send
    * waits for a receiver. */

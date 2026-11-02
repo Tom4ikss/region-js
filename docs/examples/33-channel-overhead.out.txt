@@ -1,2 +1,2 @@
-канал, круг: 3.5 µs
-postMessage + getMessage, круг: 3.1 µs
+канал, круг: 3.6 µs
+postMessage + getMessage, круг: 3.2 µs

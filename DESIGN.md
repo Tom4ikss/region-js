@@ -202,8 +202,19 @@
   handle) или новая компиляция. Быстрые пути (IC, CSA, итератор, Maglev, Turboshaft) видят
   диапазон `FIRST/LAST_JS_REGION_MATERIALIZED_TYPE` и уходят в рантайм, как с view
   типизированного массива. Дедупликации между разными записями нет: около 48 байт на регион.
-- **Не реализовано:** `Shared.localRef` в виде из этого документа, region-local Map с
-  дескрипторами, аллокация прямо в регион.
+- **`Region.localRef(obj)`** вместо `Shared.localRef`. Возвращает обёртку `LocalRef`
+  (обычный объект isolate с прототипом из d8 и дескриптором `[id, thread]` под приватным
+  символом). Цель лежит в isolate-создателе под сильным global handle. Запись обёртки в регион
+  создаёт `JSRegionLocalRef` (`JS_REGION_LOCAL_REF_TYPE`, в том же диапазоне
+  materialized-типов, что `JSRegionFunction`), чтение holder'а даёт обёртку этого isolate из
+  кэша (id → weak handle с колбэком). `deref()` в чужом isolate — `OwnershipError`
+  `other-thread`. Время жизни: глобальная таблица id → {создатель, цель, число живых обёрток во
+  всех isolate, нашла ли последняя общая сборка holder в неосвобождённом регионе, поколение
+  holder'ов}. `ReleaseUnusedRegions` собирает id живых holder'ов; создатель в GC epilogue
+  отпускает цель, если обёрток нет, holder'а не нашли и после той сборки новых holder'ов не
+  появлялось. Ошибка в учёте даёт `the object of this LocalRef was released`, а не висячий
+  указатель: всё идёт через таблицу.
+- **Не реализовано:** region-local Map с дескрипторами, аллокация прямо в регион.
 
 ## Принятые решения
 

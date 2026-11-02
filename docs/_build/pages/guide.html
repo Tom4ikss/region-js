@@ -89,7 +89,7 @@
 </div>
 
 <h2 id="not-allowed">Что нельзя положить в регион</h2>
-<p>В регион попадают только простые объекты (их прототип — <code>Object.prototype</code> или <code>null</code>), обычные массивы, типизированные массивы, примитивы и функции из <code>Region.fn</code> (<a href="#functions">ниже</a>). Остальные функции, <code>Map</code>, <code>Set</code>, <code>Date</code>, <code>BigInt</code>, <code>Symbol</code>, сам <code>ArrayBuffer</code>, <code>DataView</code>, экземпляры классов, наследники <code>Array</code> и объекты из другого региона вызовут ошибку. Про типизированные массивы — <a href="#typed">отдельный раздел</a>.</p>
+<p>В регион попадают только простые объекты (их прототип — <code>Object.prototype</code> или <code>null</code>), обычные массивы, типизированные массивы, примитивы, функции из <code>Region.fn</code> (<a href="#functions">ниже</a>) и ручки <code>Region.localRef</code> на объекты своего потока (<a href="#local-ref">ещё ниже</a>). Остальные функции, <code>Map</code>, <code>Set</code>, <code>Date</code>, <code>BigInt</code>, <code>Symbol</code>, сам <code>ArrayBuffer</code>, <code>DataView</code>, экземпляры классов, наследники <code>Array</code> и объекты из другого региона вызовут ошибку. Про типизированные массивы — <a href="#typed">отдельный раздел</a>.</p>
 
 <!--ex:05-not-allowed.js-->
 
@@ -100,6 +100,12 @@
 <p>Раз замыкание с функцией не переезжает, ей можно пользоваться только своими аргументами, <code>this</code>, встроенными глобальными объектами (<code>Math</code>, <code>JSON</code> и т. п.) и своим именем, чтобы вызвать себя. Захваченная переменная, <code>this</code> внешней функции у стрелки, <code>eval</code>, классы и методы объектов — <code>TypeError</code> сразу в <code>Region.fn</code>, с подсказкой, что передать аргументом. Проверку делает тот же разбор, что и у <code>spawn</code> (<a href="spawn.html#captures">захват</a>).</p>
 <!--ex:48-region-fn.js-->
 <p>Каждый регион, куда попала функция, хранит свою маленькую запись о ней, около 48 байт. Сколько бы объектов одного <code>run</code> ни ссылались на функцию, запись одна; повторная запись той же функции в поле ничего не создаёт.</p>
+
+<h2 id="local-ref">Ссылка на объект своего потока: <code>Region.localRef</code></h2>
+<p>Иногда объекту региона нужно знать про то, что в регион не положить: <code>Map</code> с кешем, обработчик, объект окна. <code>Region.localRef(obj)</code> делает для такого объекта ручку <code>LocalRef</code>, которую регион хранит как обычное значение. Сам объект остаётся в потоке, где его создали. В этом потоке <code>ref.deref()</code> возвращает его, в любом другом бросает <code>OwnershipError</code> с причиной <code>other-thread</code>. Так устроен <code>SendWrapper</code> в Rust: ручку можно отправить куда угодно, а разыменовать только дома. <code>ref.local</code> говорит, можно ли разыменовать ручку здесь.</p>
+<!--ex:49-local-ref.js-->
+<p>Каждый поток читает ручку из региона как свой объект <code>LocalRef</code>, и это один и тот же объект при каждом чтении: <code>a.ref === b.ref</code>, а в потоке-создателе это та самая ручка, которую вернул <code>Region.localRef</code>. Аргументы и захваченные переменные <code>spawn</code> едут в регионе, так что ручку можно передать задаче и напрямую. <code>postMessage</code> и <code>send</code> канала копируют обычные объекты, и копия ручки ни на что бы не ссылалась, поэтому голая ручка там — ошибка «a LocalRef cannot be copied to another thread»: положите её в объект региона и отправьте его.</p>
+<p>Объект живёт, пока жива ручка в каком-нибудь потоке или объект региона, который её держит. Ручки в регионах видит только сборка общей кучи, поэтому объект, на который осталась ссылка только из брошенного региона, отпускается не сразу, а после ближайшей общей сборки. Освобождённый регион (<code>free()</code>) свои ручки больше не держит. Цикл «объект потока ссылается на регион, регион — на объект через ручку» сам не соберётся, как цикл <code>Rc</code> в Rust: разорвите его, освободив регион или переписав поле.</p>
 
 <h2 id="typed">Типизированные массивы</h2>
 <p>В регион можно положить <code>Uint8Array</code>, <code>Float64Array</code> и остальные типизированные массивы, включая <code>BigInt64Array</code> и <code>Float16Array</code>. Они устроены иначе, чем объекты региона: регион хранит сам блок памяти, а при чтении поля вы получаете обычный локальный типизированный массив, который смотрит на эту память (view). Поэтому работа с ним идёт на полной скорости, как с любым типизированным массивом, без проверки владельца на каждом элементе.</p>
@@ -200,6 +206,7 @@
 <tr><td><code>region.id</code>, <code>region.owner</code></td><td>Номер региона и номер потока-владельца.</td></tr>
 <tr><td><code>Region.of(obj)</code></td><td>Регион, в котором лежит <code>obj</code>. Для обычного объекта — ошибка.</td></tr>
 <tr><td><code>Region.fn(f)</code></td><td>Функция, которую можно хранить в регионе. Каждый поток компилирует её сам и получает одну и ту же функцию. Замыкания у неё нет.</td></tr>
+<tr><td><code>Region.localRef(obj)</code></td><td>Ручка <code>LocalRef</code> на объект своего потока, которую можно хранить в регионе. <code>ref.deref()</code> возвращает объект в этом потоке и бросает в других, <code>ref.local</code> говорит, этот ли поток.</td></tr>
 <tr><td><code>Region.isRegionObject(value)</code></td><td>Лежит ли значение в каком-нибудь регионе. Ошибок не бросает.</td></tr>
 <tr><td><code>worker.postMessage(msg, [region])</code></td><td>Переезд: получатель становится владельцем, отправитель теряет доступ. Вместо <code>region</code> можно указать любой его объект.</td></tr>
 <tr><td><code>worker.postMessage(msg)</code></td><td>Для объектов замороженного региона — рассылка без копии.</td></tr>
@@ -249,6 +256,7 @@
 <tr><td><code>Region is not frozen by this isolate</code></td><td><code>not-frozen</code></td><td><code>thaw()</code> в потоке, у которого нет права разморозить.</td></tr>
 <tr><td><code>Region must be frozen to borrow it</code></td><td><code>not-frozen</code></td><td><code>borrow()</code> у незамороженного региона.</td></tr>
 <tr><td><code>a region object cannot reference objects outside its region; create them in it with region.run() or #{}</code></td><td><code>outside-reference</code></td><td>Запись в поле обычного объекта или объекта из другого региона.</td></tr>
+<tr><td><code>this LocalRef refers to an object of another thread (isolate X, this is isolate Y); only that thread can deref() it</code></td><td><code>other-thread</code></td><td><code>deref()</code> ручки <code>Region.localRef</code> не в том потоке, где её сделали. Поле <code>region</code> у этой ошибки равно −1.</td></tr>
 </tbody>
 </table>
 </div>

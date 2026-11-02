@@ -21,6 +21,11 @@ region.run(() => ({ scale: (x) => x * 2 }));
 const scaled = region.run(() => ({ scale: Region.fn((x) => x * 2) }));
 scaled.scale(3);
 
+// Type error: a Map stays in its thread; hold it through Region.localRef().
+region.run(() => ({ cache: new Map() }));
+const view = region.run(() => ({ cache: Region.localRef(new Map()) }));
+view.cache.deref().set('key', 1);
+
 // Type error: objects in a region have a fixed shape.
 const state = region.run(() => ({ count: 0 }));
 state.total = 1;
