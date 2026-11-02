@@ -422,7 +422,7 @@ if (region.frozen) {
 
 ## Что уже сделано
 
-Пункт 2 списка выше, без стека места вызова `spawn`:
+Пункт 2 списка выше:
 - `OwnershipError` (наследник `TypeError`) с полями `region` и `reason`, `AbortError`,
   `TimeoutError` (наследник `AbortError`) и `DeadlockError` — глобальные классы при
   `--harmony-regions`. Закрывает п. 20.
@@ -436,7 +436,9 @@ if (region.frozen) {
   события показывают файл, а не `<anonymous>`. Ошибка задачи приходит со стеком задачи, а не
   очереди ответов, и с полями `region` и `reason`, если это `OwnershipError`.
 
-Осталось: место вызова `spawn` в стеке ошибки задачи.
+- Стек ошибки задачи после её кадров продолжается строкой `at spawn()` и кадрами того, кто её
+  запустил, у вложенных задач — по такому блоку на каждый `spawn` (`tests/spawn-stack.js`).
+  Около 150 нс на `spawn`, флаг d8 `--no-spawn-stack` выключает. Помогает в пп. 16, 17.
 
 Пункт 1 списка выше: `spawn.scope` (`playground/traps/scope.js`):
 - п. 2: конвейер падает с `TypeError: Cannot add property total`, а не с `DeadlockError`;
