@@ -345,7 +345,7 @@ result.total += <span class="tok-number">1</span>;
   <span class="tok-keyword">throw</span> <span class="tok-keyword">new</span> <span class="tok-fn">RangeError</span>(<span class="tok-string">'индекс за пределами'</span>);
 });
 <span class="tok-fn">print</span>(<span class="tok-string">'главный поток закончил'</span>);</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8; код выхода 1</span></div><pre class="out">главный поток закончил
-<span class="err">undefined:322: RangeError: индекс за пределами</span>
+<span class="err">undefined:330: RangeError: индекс за пределами</span>
       task.outcome = Promise.reject(task.error);
                              ^
 <span class="err">RangeError: индекс за пределами</span>
@@ -388,10 +388,10 @@ start = performance.<span class="tok-fn">now</span>();
 <span class="tok-fn">six</span>(<span class="tok-string">'пул из 4'</span>);
 <span class="tok-api">spawn</span>.<span class="tok-api">poolSize</span> = <span class="tok-number">6</span>;
 <span class="tok-fn">six</span>(<span class="tok-string">'пул из 6'</span>);</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8; время у вас будет другим</span></div><pre class="out">результаты совпадают: true
-по очереди: 540 ms
+по очереди: 535 ms
 все сразу:  141 ms (x3.8)
-6 задач, пул из 4: 261 ms
-6 задач, пул из 6: 140 ms</pre></figure>
+6 задач, пул из 4: 260 ms
+6 задач, пул из 6: 151 ms</pre></figure>
 
 <p>Четыре задачи сразу идут примерно в 3,5 раза быстрее, чем по очереди. Ровно в 4 раза не выходит, и дело не в запуске: он стоит несколько микросекунд, а задача считается больше ста миллисекунд. Причину мы отдельно не разбирали.</p>
 <p>Все воркеры пула берут задачи из одной очереди, как рабочие потоки tokio: задача ждёт, только пока заняты все воркеры, и никогда не стоит за долгой задачей, если рядом есть свободный воркер. Воркер, который ждёт в <code>await</code>, тоже свободен: пока одна его задача ждёт канал или таймер, он выполняет другие. Если задач больше, чем воркеров, лишние ждут очереди: шесть задач с пулом из четырёх идут почти вдвое дольше одной. Пул можно увеличить, например под 6 быстрых ядер этой машины: <code>spawn.poolSize = 6</code>. Больше, чем ядер, ставить нет смысла: потоки начнут делить одни и те же ядра. Значения меньше 1 и не числа <code>spawn</code> считает за 1.</p>
@@ -641,14 +641,44 @@ poisoned: false {"inFlight":0,"served":0}</pre></figure>
   ms = performance.<span class="tok-fn">now</span>() - start;
   <span class="tok-fn">print</span>(<span class="tok-string">`${</span>M<span class="tok-string">} задач сразу (await): ${</span>ms.<span class="tok-fn">toFixed</span>(<span class="tok-number">0</span>)<span class="tok-string">} ms, последний результат ${</span>results[M - <span class="tok-number">1</span>]<span class="tok-string">}`</span>);
 })();</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8; время у вас будет другим</span></div><pre class="out">воркеров в пуле: 4
-100000 задач по очереди (join): 379 ms, 4 µs на задачу
-20000 задач сразу (await): 75 ms, последний результат 20000</pre></figure>
+100000 задач по очереди (join): 371 ms, 4 µs на задачу
+20000 задач сразу (await): 83 ms, последний результат 20000</pre></figure>
 
 <p>Задачи, запущенные все сразу, стоят примерно столько же, около 4 мкс на штуку. Почему запуск вообще стал таким дешёвым, рассказано на странице <a href="inside.html#fast-spawn">«Как это устроено»</a>.</p>
 <p>Для задач от миллисекунды и дольше эти накладные расходы почти не видны. Для мелких задач они могут оказаться больше самой работы. Как с этим быть, показано на странице <a href="practices.html#batch">«Как делать и как не делать»</a>.</p>
 
 <h2 id="frozen"><a class="anchor" href="#frozen" aria-hidden="true" tabindex="-1"></a>Заморозка в задачах</h2>
-<p>Замороженный регион задача получает общим, без переезда. Право разморозить при этом остаётся у вызывающего потока (<a href="guide.html#thaw-right">подробнее о праве</a>), и задача разморозить такой регион не может. Зато на всё время работы задача держит на него билет, как <code>borrow()</code>, поэтому может его читать, включая типизированные массивы (<a href="guide.html#borrow">без билета замороженный регион не читают</a>). Билет выдаётся на регионы, которые задача захватила или получила аргументом. Замороженный объект, который пришёл в задачу иначе, например через <code>recv()</code> из канала, читают под своим билетом: <code>using b = Region.of(x).borrow()</code>. Если задача спрячет view типизированного массива, например в <code>globalThis</code>, после её конца он окажется пустым. Запечатанный регион (<a href="guide.html#share"><code>Region.share</code></a>) билетов не требует: его читают как угодно и откуда угодно, а его view не пустеют.</p>
+<p>Замороженный регион задача получает общим, без переезда. Право разморозить при этом остаётся у вызывающего потока (<a href="guide.html#thaw-right">подробнее о праве</a>), и задача разморозить такой регион не может. Зато задача держит на него билет, как <code>borrow()</code>, поэтому может его читать, включая типизированные массивы (<a href="guide.html#borrow">без билета замороженный регион не читают</a>). Билет выдаётся на регионы, которые задача захватила или получила аргументом. Замороженный объект, который пришёл в задачу иначе, например через <code>recv()</code> из канала, читают под своим билетом: <code>using b = Region.of(x).borrow()</code>. Если задача спрячет view типизированного массива, например в <code>globalThis</code>, после её конца он окажется пустым. Запечатанный регион (<a href="guide.html#share"><code>Region.share</code></a>) билетов не требует: его читают как угодно и откуда угодно, а его view не пустеют.</p>
+<p id="frozen-ticket">Билет берётся в момент вызова <code>spawn()</code>, а не когда задача стартует, и сдаётся, когда приходит её ответ. Пока задача ждёт свободного воркера, регион уже нельзя разморозить: она прочитает ровно то, что было при вызове, а не то, что успели записать до её старта. <code>region.readers</code> считает такую задачу одним читателем и в очереди, и во время работы. Чтобы перестроить данные после задач, дождитесь их или вызовите <code>await region.thawWhenFree()</code>.</p>
+
+<figure class="example"><div class="ex-head"><span class="file"><a href="examples/47-thaw-wait.js">examples/47-thaw-wait.js</a></span><button class="copy" type="button">Копировать</button></div><pre class="code"><code><span class="tok-comment">// d8-flags: --module</span>
+<span class="tok-comment">// Задача берёт билет на замороженный регион в момент spawn(), а не при старте.</span>
+<span class="tok-comment">// region.thawWhenFree() ждёт, пока билеты сдадут, и размораживает.</span>
+<span class="tok-keyword">const</span> config = <span class="tok-keyword">new</span> <span class="tok-api">Region</span>().<span class="tok-api">run</span>(() =&gt; ({ limit: <span class="tok-number">10</span> }));
+<span class="tok-keyword">const</span> region = <span class="tok-api">Region</span>.<span class="tok-keyword">of</span>(config);
+region.<span class="tok-api">freeze</span>();
+
+<span class="tok-api">spawn</span>.<span class="tok-api">poolSize</span> = <span class="tok-number">1</span>;
+<span class="tok-keyword">const</span> busy = <span class="tok-api">spawn</span>(() =&gt; {
+  <span class="tok-keyword">const</span> end = performance.<span class="tok-fn">now</span>() + <span class="tok-number">50</span>;
+  <span class="tok-keyword">while</span> (performance.<span class="tok-fn">now</span>() &lt; end);
+});
+<span class="tok-keyword">const</span> queued = <span class="tok-api">spawn</span>((config) =&gt; config.limit, config);  <span class="tok-comment">// ждёт в очереди</span>
+
+<span class="tok-fn">print</span>(<span class="tok-string">'readers сразу после spawn:'</span>, region.<span class="tok-api">readers</span>);
+<span class="tok-keyword">try</span> {
+  region.<span class="tok-api">thaw</span>();
+} <span class="tok-keyword">catch</span> (e) {
+  <span class="tok-fn">print</span>(e.name + <span class="tok-string">':'</span>, e.message);
+}
+
+<span class="tok-keyword">await</span> region.<span class="tok-fn">thawWhenFree</span>();         <span class="tok-comment">// задачи закончились, билеты сданы</span>
+config.limit = <span class="tok-number">99</span>;
+<span class="tok-fn">print</span>(<span class="tok-string">'задача прочитала'</span>, <span class="tok-keyword">await</span> queued, <span class="tok-string">'| теперь limit ='</span>, config.limit);
+<span class="tok-keyword">await</span> busy;</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8 --module</span></div><pre class="out">readers сразу после spawn: 1
+<span class="err">OwnershipError: Region is still borrowed by 1 reader(s); region.thawWhenFree() waits for them</span>
+задача прочитала 10 | теперь limit = 99</pre></figure>
+
 <p>Если задача сама заморозила регион, право разморозить вернётся к вызывающему вместе с результатом. Так удобно строить справочник в задаче: построить, заморозить, вернуть, а потом раздать другим задачам без копий.</p>
 
 <figure class="example"><div class="ex-head"><span class="file"><a href="examples/27-spawn-freeze.js">examples/27-spawn-freeze.js</a></span><button class="copy" type="button">Копировать</button></div><pre class="code"><code><span class="tok-comment">// d8-flags: --module</span>

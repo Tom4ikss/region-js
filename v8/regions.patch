@@ -2948,10 +2948,10 @@ index 8aab5f56..0bc22f26 100644
        CheckValueInputIs(node, 1, Type::Any());
 diff --git a/src/d8/d8-channel.cc b/src/d8/d8-channel.cc
 new file mode 100644
-index 00000000..66ca881b
+index 00000000..91d15811
 --- /dev/null
 +++ b/src/d8/d8-channel.cc
-@@ -0,0 +1,1773 @@
+@@ -0,0 +1,1863 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -3008,8 +3008,9 @@ index 00000000..66ca881b
 +// A pending send or receive of one isolate. A receive may wait on several
 +// channels at once (select); whichever delivers first completes it.
 +struct ChannelWaiter {
-+  // kRead and kWrite wait for an RwLock.
-+  enum class Kind { kReceive, kSend, kRead, kWrite };
++  // kRead and kWrite wait for an RwLock, kThaw for the readers of a frozen
++  // region to go.
++  enum class Kind { kReceive, kSend, kRead, kWrite, kThaw };
 +
 +  ChannelWaiter(Kind kind, Isolate* isolate, bool blocking, uint64_t id)
 +      : kind(kind), isolate(isolate), blocking(blocking), id(id) {}
@@ -3031,6 +3032,8 @@ index 00000000..66ca881b
 +  base::SmallVector<std::shared_ptr<ChannelState>, 1> channels;
 +  // An RwLock granted to the waiter, until its thread takes the grant up.
 +  std::shared_ptr<ChannelState> granted;
++  // kThaw: the region to thaw.
++  int region = -1;
 +  // Set when a blocking waiter completes or is cancelled. The thread spins on
 +  // it first; the semaphore, which costs a kernel object, is made only when
 +  // the thread stops spinning and sleeps. Made and signalled under the
@@ -3213,6 +3216,15 @@ index 00000000..66ca881b
 +  return *isolates.get();
 +}
 +
++// Thaw waits by region id, until the region has no readers. Guarded by the
++// channels mutex.
++std::unordered_multimap<int, std::shared_ptr<ChannelWaiter>>& ThawWaiters() {
++  static base::LeakyObject<
++      std::unordered_multimap<int, std::shared_ptr<ChannelWaiter>>>
++      waiters;
++  return *waiters.get();
++}
++
 +// Why a task was aborted: the error name and message its waits fail with.
 +struct AbortReason {
 +  std::string name;
@@ -3365,10 +3377,21 @@ index 00000000..66ca881b
 +  }
 +}
 +
++void ForgetThawLocked(ChannelWaiter* waiter) {
++  auto [begin, end] = ThawWaiters().equal_range(waiter->region);
++  for (auto it = begin; it != end; ++it) {
++    if (it->second.get() != waiter) continue;
++    ThawWaiters().erase(it);
++    i::RegionRegistry::WaitForReaders(false);
++    return;
++  }
++}
++
 +void CancelLocked(ChannelWaiter* waiter,
 +                  const ChannelState* taken_from = nullptr) {
 +  if (waiter->done) return;
 +  waiter->done = true;
++  if (waiter->kind == ChannelWaiter::Kind::kThaw) ForgetThawLocked(waiter);
 +  LeaveQueuesLocked(waiter, taken_from);
 +  for (const std::shared_ptr<ChannelState>& state : waiter->channels) {
 +    // A cancelled sender leaves its value in the channel.
@@ -3735,6 +3758,40 @@ index 00000000..66ca881b
 +  return result;
 +}
 +
++// Called by the thread that dropped the last borrow of `region`, without the
++// channels mutex: the thaw waits for it go on, on their own threads.
++void ReadersFree(int region) {
++  base::MutexGuard guard(channels_mutex.Pointer());
++  auto [begin, end] = ThawWaiters().equal_range(region);
++  std::vector<std::shared_ptr<ChannelWaiter>> ready;
++  for (auto it = begin; it != end; ++it) ready.push_back(std::move(it->second));
++  ThawWaiters().erase(begin, end);
++  for (const std::shared_ptr<ChannelWaiter>& waiter : ready) {
++    i::RegionRegistry::WaitForReaders(false);
++    CompleteLocked(waiter);
++  }
++}
++
++// Queues a wait for the readers of `region` to go. It completes at once if
++// they are gone already: the last one may have left before the wait was
++// seen, see RegionRegistry::ReadersDropped().
++std::shared_ptr<ChannelWaiter> QueueThaw(Isolate* isolate, uint64_t id,
++                                         int region, double task) {
++  auto waiter = std::make_shared<ChannelWaiter>(ChannelWaiter::Kind::kThaw,
++                                                isolate, false, id);
++  waiter->region = region;
++  waiter->task = task;
++  i::RegionRegistry::WaitForReaders(true);
++  base::MutexGuard guard(channels_mutex.Pointer());
++  ThawWaiters().emplace(region, waiter);
++  RegisterLocked(waiter.get());
++  if (i::RegionRegistry::Readers(region) == 0) {
++    ForgetThawLocked(waiter.get());
++    CompleteLocked(waiter);
++  }
++  return waiter;
++}
++
 +Local<Promise> AddPending(Isolate* isolate,
 +                          std::shared_ptr<ChannelWaiter> waiter) {
 +  Local<Context> context = isolate->GetCurrentContext();
@@ -3781,6 +3838,22 @@ index 00000000..66ca881b
 +  }
 +  if (waiter->kind == ChannelWaiter::Kind::kSend) {
 +    USE(resolver->Resolve(context, Undefined(isolate_)));
++    return;
++  }
++  if (waiter->kind == ChannelWaiter::Kind::kThaw) {
++    TryCatch try_catch(isolate_);
++    bool borrowed = false;
++    if (Shell::ThawRegion(isolate_, waiter->region, &borrowed)) {
++      USE(resolver->Resolve(context, Undefined(isolate_)));
++    } else if (borrowed) {
++      // A reader came between the last one leaving and this task: wait again.
++      pending.waiter = QueueThaw(isolate_, id_, waiter->region, waiter->task);
++      pending.resolver.Reset(isolate_, resolver);
++      pending.context.Reset(isolate_, context);
++      data.pending.emplace(id_, std::move(pending));
++    } else if (try_catch.HasCaught() && !try_catch.HasTerminated()) {
++      USE(resolver->Reject(context, try_catch.Exception()));
++    }
 +    return;
 +  }
 +  if (waiter->kind == ChannelWaiter::Kind::kRead ||
@@ -4297,6 +4370,22 @@ index 00000000..66ca881b
 +}  // namespace
 +
 +// static
++Local<Promise> Channels::WaitForThaw(Isolate* isolate, int region) {
++  double task = CurrentTask(isolate);
++  std::string name, message;
++  if (AbortedTaskReason(isolate, task, &name, &message)) {
++    Local<Context> context = isolate->GetCurrentContext();
++    Local<Promise::Resolver> resolver =
++        Promise::Resolver::New(context).ToLocalChecked();
++    USE(resolver->Reject(context,
++                         NewTaskError(isolate, name.c_str(), message)));
++    return resolver->GetPromise();
++  }
++  uint64_t id = DataOf(isolate).next_id++;
++  return AddPending(isolate, QueueThaw(isolate, id, region, task));
++}
++
++// static
 +Local<FunctionTemplate> Channels::CreateLockTemplate(Isolate* isolate) {
 +  Local<FunctionTemplate> ctor = FunctionTemplate::New(isolate, LockNew);
 +  ctor->SetClassName(String::NewFromUtf8Literal(isolate, "RwLock"));
@@ -4317,6 +4406,7 @@ index 00000000..66ca881b
 +      FunctionTemplate::New(isolate, LockPoisoned, Local<Value>(), signature, 0,
 +                            ConstructorBehavior::kThrow));
 +  i::RegionRegistry::SetTaskAbortHook(AbortedTaskReason);
++  i::RegionRegistry::SetReadersFreeHook(ReadersFree);
 +  DataOf(isolate).lock_ctor.Reset(isolate, ctor);
 +  return ctor;
 +}
@@ -4727,10 +4817,10 @@ index 00000000..66ca881b
 +}  // namespace v8
 diff --git a/src/d8/d8-channel.h b/src/d8/d8-channel.h
 new file mode 100644
-index 00000000..9446d334
+index 00000000..8fe0313f
 --- /dev/null
 +++ b/src/d8/d8-channel.h
-@@ -0,0 +1,72 @@
+@@ -0,0 +1,78 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -4741,6 +4831,7 @@ index 00000000..9446d334
 +#include <memory>
 +
 +#include "include/v8-local-handle.h"
++#include "include/v8-promise.h"
 +#include "include/v8-template.h"
 +
 +namespace v8 {
@@ -4775,6 +4866,11 @@ index 00000000..9446d334
 +  static void AbortTask(Isolate* isolate, double task, const char* name,
 +                        const char* message);
 +  static void TaskEnded(Isolate* isolate, double task);
++  // region.thawWhenFree(): a promise that settles when the region, frozen by
++  // this isolate, could be thawed or not. Shell::ThawRegion() thaws it once
++  // its readers are gone. Fails as a lock wait does: with the task's abort,
++  // or with a DeadlockError.
++  static Local<Promise> WaitForThaw(Isolate* isolate, int region);
 +  // Cancels the pending operations of an isolate that is being disposed.
 +  static void ForgetIsolate(Isolate* isolate);
 +};
@@ -6039,7 +6135,7 @@ index 00000000..bd767012
 +
 +#endif  // V8_D8_D8_PORT_H_
 diff --git a/src/d8/d8.cc b/src/d8/d8.cc
-index 49121fe1..23f6f868 100644
+index 49121fe1..96fbc878 100644
 --- a/src/d8/d8.cc
 +++ b/src/d8/d8.cc
 @@ -14,6 +14,7 @@
@@ -6257,14 +6353,11 @@ index 49121fe1..23f6f868 100644
  
    // Prevent fuzzers from creating side effects.
    if (!i::v8_flags.fuzzing) {
-@@ -4830,73 +4938,1416 @@ Local<ObjectTemplate> Shell::GetOrCreateGlobalTemplate(Isolate* isolate) {
-   if (data->global_template_.IsEmpty()) {
-     data->global_template_.Reset(isolate, CreateGlobalTemplate(isolate));
-   }
--  return data->global_template_.Get(isolate);
-+  return data->global_template_.Get(isolate);
-+}
-+
+@@ -4833,70 +4941,1521 @@ Local<ObjectTemplate> Shell::GetOrCreateGlobalTemplate(Isolate* isolate) {
+   return data->global_template_.Get(isolate);
+ }
+ 
+-void Shell::ChangeDirectoryCallback(
 +void Shell::ChangeDirectoryCallback(
 +    const v8::FunctionCallbackInfo<v8::Value>& info) {
 +  DCHECK(i::ValidateCallbackInfo(info));
@@ -6358,6 +6451,10 @@ index 49121fe1..23f6f868 100644
 +                       FunctionTemplate::New(isolate, RegionTask));
 +  region_template->Set(isolate, "__interrupt",
 +                       FunctionTemplate::New(isolate, RegionInterrupt));
++  region_template->Set(isolate, "__reserve",
++                       FunctionTemplate::New(isolate, RegionReserve));
++  region_template->Set(isolate, "__takeReserved",
++                       FunctionTemplate::New(isolate, RegionTakeReserved));
 +  region_template->Set(isolate, "object",
 +                       FunctionTemplate::New(isolate, RegionCurrentObject));
 +  region_template->Set(isolate, "array",
@@ -6404,6 +6501,7 @@ index 49121fe1..23f6f868 100644
 +  for (auto [name, callback] :
 +       {std::pair{"freeze", RegionFreeze}, std::pair{"seal", RegionSeal},
 +        std::pair{"thaw", RegionThaw},
++        std::pair{"thawWhenFree", RegionThawWhenFree},
 +        std::pair{"borrow", RegionBorrow}, std::pair{"free", RegionFree},
 +        std::pair{"enter", RegionEnter}, std::pair{"object", RegionNewObject},
 +        std::pair{"array", RegionNewArray},
@@ -6425,7 +6523,7 @@ index 49121fe1..23f6f868 100644
 +  region_template->InstanceTemplate()->SetInternalFieldCount(1);
 +  PerIsolateData::Get(isolate)->SetRegionCtor(region_template);
 +
-+  // Borrow tokens: [region id, released].
++  // Borrow tokens: [region id, released, kind], see BorrowKind.
 +  Local<FunctionTemplate> borrow_template = FunctionTemplate::New(isolate);
 +  Local<Signature> borrow_signature = Signature::New(isolate, borrow_template);
 +  borrow_template->SetClassName(
@@ -6440,7 +6538,7 @@ index 49121fe1..23f6f868 100644
 +                         ->factory()
 +                         ->dispose_symbol()),
 +      release);
-+  borrow_template->InstanceTemplate()->SetInternalFieldCount(2);
++  borrow_template->InstanceTemplate()->SetInternalFieldCount(3);
 +  PerIsolateData::Get(isolate)->SetRegionBorrowCtor(borrow_template);
 +  return region_template;
 +}
@@ -6712,6 +6810,60 @@ index 49121fe1..23f6f868 100644
 +  }
 +}
 +
++namespace {
++
++// What a borrow token's release() gives back: a borrow, a reservation of
++// spawn(), or a task's use of a reservation.
++enum class BorrowKind { kBorrow, kReservation, kTaken };
++
++void NewBorrowToken(const v8::FunctionCallbackInfo<v8::Value>& info,
++                    BorrowKind kind) {
++  Isolate* isolate = info.GetIsolate();
++  if (info.Length() < 1) return;
++  i::Tagged<i::Object> value = *Utils::OpenDirectHandle(*info[0]);
++  if (!i::IsJSRegionObject(value)) return;
++  int region = i::Cast<i::JSRegionObject>(value)->region_id();
++  if (i::RegionRegistry::IsSealed(region)) return;
++  Local<Object> token;
++  if (!PerIsolateData::Get(isolate)
++           ->GetRegionBorrowCtor()
++           ->InstanceTemplate()
++           ->NewInstance(isolate->GetCurrentContext())
++           .ToLocal(&token)) {
++    return;
++  }
++  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
++  if (kind == BorrowKind::kReservation) {
++    if (!i::RegionRegistry::Reserve(region)) return;
++  } else {
++    // Only the runner calls this, while spawn() holds the reservation.
++    if (!i::RegionRegistry::IsFrozen(region)) return;
++    i::RegionRegistry::TakeReserved(region, i_isolate);
++  }
++  token->SetInternalField(0, Int32::New(isolate, region));
++  token->SetInternalField(1, v8::False(isolate));
++  token->SetInternalField(2, Int32::New(isolate, static_cast<int>(kind)));
++  info.GetReturnValue().Set(token);
++}
++
++}  // namespace
++
++// Region.__reserve(value): for spawn(), a token for a borrow of the frozen
++// region of `value` that no isolate holds yet, or undefined if the region is
++// not frozen. Its release() gives the borrow back.
++// Region.__takeReserved(value): on the task's thread, while that token is
++// held, a token for the task's use of the borrow.
++void Shell::RegionReserve(const v8::FunctionCallbackInfo<v8::Value>& info) {
++  DCHECK(i::ValidateCallbackInfo(info));
++  NewBorrowToken(info, BorrowKind::kReservation);
++}
++
++void Shell::RegionTakeReserved(
++    const v8::FunctionCallbackInfo<v8::Value>& info) {
++  DCHECK(i::ValidateCallbackInfo(info));
++  NewBorrowToken(info, BorrowKind::kTaken);
++}
++
 +// Region.__interrupt(task, error): the awaits of an aborted task that wait
 +// for a promise still pending throw `error` now. Gives how many did.
 +void Shell::RegionInterrupt(const v8::FunctionCallbackInfo<v8::Value>& info) {
@@ -6895,11 +7047,9 @@ index 49121fe1..23f6f868 100644
 +                                                   : "Region is not owned by this isolate");
 +}
 +
-+void Shell::RegionThaw(const v8::FunctionCallbackInfo<v8::Value>& info) {
-+  DCHECK(i::ValidateCallbackInfo(info));
-+  Isolate* isolate = info.GetIsolate();
-+  int region = RegionIdOf(info);
++bool Shell::ThawRegion(Isolate* isolate, int region, bool* borrowed) {
 +  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
++  *borrowed = false;
 +  switch (i::RegionRegistry::Thaw(region, i_isolate)) {
 +    case i::RegionRegistry::ThawResult::kThawed:
 +      i::RegionRegistry::Remember(region, i::RegionRegistry::Event::kMoved,
@@ -6907,22 +7057,60 @@ index 49121fe1..23f6f868 100644
 +      // Views taken while frozen are immutable and would outlive the freeze;
 +      // reading the field again gives a writable one.
 +      i::JSRegionObject::DetachViews(i_isolate, region);
-+      return;
-+    case i::RegionRegistry::ThawResult::kBorrowed: {
-+      std::string message =
-+          "Region is still borrowed by " +
-+          std::to_string(i::RegionRegistry::Readers(region)) + " reader(s)";
-+      ThrowRegionError(isolate, region, message, "borrowed");
-+      return;
-+    }
++      return true;
++    case i::RegionRegistry::ThawResult::kBorrowed:
++      *borrowed = true;
++      return false;
 +    case i::RegionRegistry::ThawResult::kNotFrozenByIsolate:
 +      ThrowRegionError(isolate, region, i::RegionRegistry::IsFreed(region)
 +                              ? "Region was freed"
 +                          : i::RegionRegistry::IsSealed(region)
 +                              ? "Region is sealed and cannot be thawed"
 +                              : "Region is not frozen by this isolate");
-+      return;
++      return false;
 +  }
++  UNREACHABLE();
++}
++
++void Shell::RegionThaw(const v8::FunctionCallbackInfo<v8::Value>& info) {
++  DCHECK(i::ValidateCallbackInfo(info));
++  Isolate* isolate = info.GetIsolate();
++  int region = RegionIdOf(info);
++  bool borrowed;
++  if (ThawRegion(isolate, region, &borrowed) || !borrowed) return;
++  std::string message =
++      "Region is still borrowed by " +
++      std::to_string(i::RegionRegistry::Readers(region)) +
++      " reader(s); region.thawWhenFree() waits for them";
++  ThrowRegionError(isolate, region, message, "borrowed");
++}
++
++// region.thawWhenFree(): thaws the region once its readers, spawn() tasks
++// among them, are gone.
++void Shell::RegionThawWhenFree(
++    const v8::FunctionCallbackInfo<v8::Value>& info) {
++  DCHECK(i::ValidateCallbackInfo(info));
++  Isolate* isolate = info.GetIsolate();
++  Local<Context> context = isolate->GetCurrentContext();
++  int region = RegionIdOf(info);
++  TryCatch try_catch(isolate);
++  bool borrowed;
++  if (!ThawRegion(isolate, region, &borrowed) && borrowed) {
++    info.GetReturnValue().Set(Channels::WaitForThaw(isolate, region));
++    return;
++  }
++  if (try_catch.HasTerminated()) {
++    try_catch.ReThrow();
++    return;
++  }
++  Local<Promise::Resolver> resolver =
++      Promise::Resolver::New(context).ToLocalChecked();
++  if (try_catch.HasCaught()) {
++    USE(resolver->Reject(context, try_catch.Exception()));
++  } else {
++    USE(resolver->Resolve(context, Undefined(isolate)));
++  }
++  info.GetReturnValue().Set(resolver->GetPromise());
 +}
 +
 +void Shell::RegionBorrow(const v8::FunctionCallbackInfo<v8::Value>& info) {
@@ -6949,6 +7137,8 @@ index 49121fe1..23f6f868 100644
 +  }
 +  borrow->SetInternalField(0, Int32::New(isolate, region));
 +  borrow->SetInternalField(1, v8::False(isolate));
++  borrow->SetInternalField(
++      2, Int32::New(isolate, static_cast<int>(BorrowKind::kBorrow)));
 +  info.GetReturnValue().Set(borrow);
 +}
 +
@@ -6958,9 +7148,20 @@ index 49121fe1..23f6f868 100644
 +  Local<Object> borrow = info.This();
 +  if (borrow->GetInternalField(1).As<Value>()->IsTrue()) return;
 +  borrow->SetInternalField(1, v8::True(info.GetIsolate()));
-+  i::RegionRegistry::Unborrow(
-+      borrow->GetInternalField(0).As<Int32>()->Value(),
-+      reinterpret_cast<i::Isolate*>(info.GetIsolate()));
++  int region = borrow->GetInternalField(0).As<Int32>()->Value();
++  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(info.GetIsolate());
++  switch (static_cast<BorrowKind>(
++      borrow->GetInternalField(2).As<Int32>()->Value())) {
++    case BorrowKind::kBorrow:
++      i::RegionRegistry::Unborrow(region, i_isolate);
++      return;
++    case BorrowKind::kReservation:
++      i::RegionRegistry::Unreserve(region);
++      return;
++    case BorrowKind::kTaken:
++      i::RegionRegistry::DropReserved(region, i_isolate);
++      return;
++  }
 +}
 +
 +void Shell::RegionFrozen(const v8::FunctionCallbackInfo<v8::Value>& info) {
@@ -7601,9 +7802,8 @@ index 49121fe1..23f6f868 100644
 +    return;
 +  }
 +  info.GetReturnValue().Set(Utils::ToLocal(i::Cast<i::JSObject>(result)));
- }
- 
--void Shell::ChangeDirectoryCallback(
++}
++
 +}  // namespace
 +
 +// region.typedArray(Float64Array, length) and Region.typedArray(...) for the
@@ -7730,7 +7930,7 @@ index 49121fe1..23f6f868 100644
  }
  
  Local<ObjectTemplate> Shell::CreateAsyncHookTemplate(Isolate* isolate) {
-@@ -5376,9 +6827,1096 @@ MaybeLocal<Context> Shell::CreateEvaluationContext(Isolate* isolate) {
+@@ -5376,9 +6935,1128 @@ MaybeLocal<Context> Shell::CreateEvaluationContext(Isolate* isolate) {
    }
  #endif  // V8_ENABLE_HARDWARE_WATCHPOINT_SUPPORT
  
@@ -7746,11 +7946,13 @@ index 49121fe1..23f6f868 100644
 +  'use strict';
 +  // Messages are flat arrays, which the serializer handles faster than
 +  // nested objects:
-+  //   task:    [id, key, code, argc, input, this, arguments, ...captures, ...args]
++  //   task:    [id, key, reserved, argc, input, this, arguments, ...captures,
++  //             ...args]
 +  //   success: [id, value], or [id, box, 1] with the value in a region array
 +  //   failure: [id, undefined, error name, error message]
-+  // `code` is sent only with the first task of a kind; `input` is a region
-+  // array with the values that had to be copied, or null.
++  // `reserved` lists the frozen regions spawn() borrowed for the task, as
++  // ",id,id,", or is undefined; `input` is a region array with the values that had to be
++  // copied, or null. The code goes to the port once; a task carries its key.
 +  const kSlots = 5;
 +
 +  // Task runner of a pool worker. A task is a factory, compiled once per
@@ -7808,21 +8010,26 @@ index 49121fe1..23f6f868 100644
 +// Like std::thread::scope: a task gets the regions it was given for its
 +// whole run. Moved regions go back with its reply, frozen ones are borrowed
 +// meanwhile, and a region the task froze goes back with the right to thaw it.
++// spawn() borrowed the frozen ones already, until the reply: the task takes
++// that borrow up.
 +class __TaskRegions {
 +  objects = [];
 +  ids = new Set();
 +  borrows = [];
-+  add(value, info) {
++  add(value, info, reserved) {
 +    const id = info >> 3;
 +    if (this.ids.has(id)) return;
 +    this.ids.add(id);
 +    this.objects.push(value);
-+    if ((info & 7) === 1) {
-+      try {
-+        this.borrows.push(__rawBorrow.call(Region.of(value)));
-+      } catch {
-+        // Thawed meanwhile: reads in the task report it.
-+      }
++    if ((info & 7) !== 1) return;
++    if (reserved?.includes(',' + id + ',')) {
++      this.borrows.push(Region.__takeReserved(value));
++      return;
++    }
++    try {
++      this.borrows.push(__rawBorrow.call(Region.of(value)));
++    } catch {
++      // Thawed before spawn() could borrow it: reads in the task report it.
 +    }
 +  }
 +}
@@ -7968,7 +8175,7 @@ index 49121fe1..23f6f868 100644
 +      const info = Region.__info(value);
 +      // A sealed region needs neither a borrow nor a way back.
 +      if (info >= 0 && (info & 7) !== 4) {
-+        (regions ??= new __TaskRegions()).add(value, info);
++        (regions ??= new __TaskRegions()).add(value, info, data[2]);
 +      }
 +    }
 +  }
@@ -7979,7 +8186,7 @@ index 49121fe1..23f6f868 100644
 +  try {
 +    let factory = __factories.get(data[1]);
 +    if (!factory) {
-+      factory = (0, eval)(data[2] ?? __port.code(data[1]));
++      factory = (0, eval)(__port.code(data[1]));
 +      __factories.set(data[1], factory);
 +    }
 +    const argc = data[3];
@@ -8029,6 +8236,7 @@ index 49121fe1..23f6f868 100644
 +  // is reported like any unhandled rejection unless it is joined or awaited.
 +  const settle = (task, reply) => {
 +    task.settled = true;
++    unreserve(task.reserved);
 +    if (task.parent !== undefined) {
 +      const siblings = children.get(task.parent);
 +      siblings.delete(task);
@@ -8126,7 +8334,7 @@ index 49121fe1..23f6f868 100644
 +      const task = {
 +        id, settled: false, ok: false, joined: false, value: undefined,
 +        error: undefined, outcome: null, resolve: null, reject: null,
-+        parent: undefined,
++        parent: undefined, reserved: null,
 +      };
 +      this.#tasks.set(id, task);
 +      return task;
@@ -8475,10 +8683,18 @@ index 49121fe1..23f6f868 100644
 +    return null;
 +  };
 +
++  const unreserve = (reserved) => {
++    if (reserved) for (const token of reserved) token.release();
++  };
++
 +  // Captured region objects travel by reference: a frozen region is shared,
 +  // any other region is moved and comes back with the reply. Channels are
 +  // shared. Primitives are sent as they are, other data is copied into a
 +  // region, which also rejects what cannot be sent.
++  //
++  // A frozen region is borrowed from here until the task ends, as by
++  // std::thread::scope: thaw() fails meanwhile, and region.thawWhenFree()
++  // waits. The task takes its own borrow when it starts.
 +  globalThis.spawn = function spawn(callback, ...args) {
 +    // [code id, receiver, arguments, ...captured values]
 +    const plan = Region.prepareSpawn(callback);
@@ -8491,7 +8707,6 @@ index 49121fe1..23f6f868 100644
 +    }
 +    const names = factory.names;
 +    const id = nextTaskId++;
-+    // The code goes to the port once; a task carries its key.
 +    const message = [id, key, undefined, args.length, null];
 +    const count = 2 + names.length + args.length;
 +    const labelOf = (i) => i === 0 ? 'this' : i === 1 ? 'arguments'
@@ -8499,54 +8714,71 @@ index 49121fe1..23f6f868 100644
 +    let copied = null;
 +    let transfer = null;
 +    let moved = null;
-+    for (let i = 0; i < count; i++) {
-+      const value = i === 1 ? (plan[2] && Array.from(plan[2]))
-+          : i < 2 + names.length ? plan[i + 1]
-+          : args[i - 2 - names.length];
-+      if (value === null || (typeof value !== 'object' && typeof value !== 'function')) {
-+        message.push(value);
-+        continue;
-+      }
-+      const info = Region.__info(value);
-+      if (info < 0) {
-+        if (isChannel(value)) {
++    let reserved = null;
++    let task;
++    try {
++      for (let i = 0; i < count; i++) {
++        const value = i === 1 ? (plan[2] && Array.from(plan[2]))
++            : i < 2 + names.length ? plan[i + 1]
++            : args[i - 2 - names.length];
++        if (value === null || (typeof value !== 'object' && typeof value !== 'function')) {
 +          message.push(value);
-+        } else {
-+          message.push(undefined);
-+          (copied ??= new Array(count))[i] = value;
++          continue;
 +        }
-+        continue;
++        const info = Region.__info(value);
++        if (info < 0) {
++          if (isChannel(value)) {
++            message.push(value);
++          } else {
++            message.push(undefined);
++            (copied ??= new Array(count))[i] = value;
++          }
++          continue;
++        }
++        message.push(value);
++        const state = info & 7;
++        if (state === 1 || state === 2) {
++          const region = ',' + (info >> 3) + ',';
++          if (message[2]?.includes(region)) continue;
++          const token = Region.__reserve(value);
++          if (token) {
++            (reserved ??= []).push(token);
++            message[2] = (message[2] ?? '') + region.slice(message[2] ? 1 : 0);
++          }
++          continue;
++        }
++        if (state === 4) continue;  // Sealed: shared without a borrow.
++        const region = info >> 3;
++        if (moved?.has(region)) continue;
++        // The region has to be here to be moved: not given to another task.
++        if (state === 3) {
++          let reason = 'region ' + region + ' is not owned by this thread';
++          try {
++            Reflect.has(value, 'length');
++          } catch (e) {
++            reason = e.message;
++          }
++          throw new TypeError('spawn() cannot move ' + labelOf(i) + ': ' + reason);
++        }
++        (moved ??= new Set()).add(region);
++        (transfer ??= []).push(value);
 +      }
-+      message.push(value);
-+      const state = info & 7;
-+      if (state === 1 || state === 2 || state === 4) continue;  // Shared.
-+      const region = info >> 3;
-+      if (moved?.has(region)) continue;
-+      // The region has to be here to be moved: not given to another task.
-+      if (state === 3) {
-+        let reason = 'region ' + region + ' is not owned by this thread';
++      if (copied) {
++        const input = new Region();
 +        try {
-+          Reflect.has(value, 'length');
++          message[4] = input.run(() => copied);
 +        } catch (e) {
-+          reason = e.message;
++          throw describeUnsendable(copied, labelOf) ?? e;
 +        }
-+        throw new TypeError('spawn() cannot move ' + labelOf(i) + ': ' + reason);
++        (transfer ??= []).push(input);
 +      }
-+      (moved ??= new Set()).add(region);
-+      (transfer ??= []).push(value);
++      pool ??= new Pool();
++      task = pool.send(id, key, factory.code, message, transfer ?? undefined);
++    } catch (e) {
++      unreserve(reserved);
++      throw e;
 +    }
-+    if (copied) {
-+      const input = new Region();
-+      try {
-+        message[4] = input.run(() => copied);
-+      } catch (e) {
-+        throw describeUnsendable(copied, labelOf) ?? e;
-+      }
-+      (transfer ??= []).push(input);
-+    }
-+    pool ??= new Pool();
-+    const task =
-+        pool.send(id, key, factory.code, message, transfer ?? undefined);
++    task.reserved = reserved;
 +    const parent = Region.__task();
 +    if (parent !== undefined) {
 +      task.parent = parent;
@@ -8827,7 +9059,7 @@ index 49121fe1..23f6f868 100644
  namespace {
  int LineFromOffset(Local<debug::Script> script, int offset) {
    debug::Location location = script->GetSourceLocation(offset);
-@@ -6538,6 +9076,7 @@ void SourceGroup::JoinThread(const i::ParkedScope& parked) {
+@@ -6538,6 +9216,7 @@ void SourceGroup::JoinThread(const i::ParkedScope& parked) {
  void SerializationDataQueue::Enqueue(std::unique_ptr<SerializationData> data) {
    base::MutexGuard lock_guard(&mutex_);
    data_.push_back(std::move(data));
@@ -8835,7 +9067,7 @@ index 49121fe1..23f6f868 100644
  }
  
  bool SerializationDataQueue::Dequeue(
-@@ -6547,6 +9086,7 @@ bool SerializationDataQueue::Dequeue(
+@@ -6547,6 +9226,7 @@ bool SerializationDataQueue::Dequeue(
    if (data_.empty()) return false;
    *out_data = std::move(data_[0]);
    data_.erase(data_.begin());
@@ -8843,7 +9075,7 @@ index 49121fe1..23f6f868 100644
    return true;
  }
  
-@@ -6558,6 +9098,7 @@ bool SerializationDataQueue::IsEmpty() {
+@@ -6558,6 +9238,7 @@ bool SerializationDataQueue::IsEmpty() {
  void SerializationDataQueue::Clear() {
    base::MutexGuard lock_guard(&mutex_);
    data_.clear();
@@ -8851,7 +9083,7 @@ index 49121fe1..23f6f868 100644
  }
  
  Worker::Worker(Isolate* parent_isolate, const char* script)
-@@ -6668,6 +9209,12 @@ std::unique_ptr<SerializationData> Worker::GetMessage(Isolate* requester) {
+@@ -6668,6 +9349,12 @@ std::unique_ptr<SerializationData> Worker::GetMessage(Isolate* requester) {
        out_queue_.Dequeue(&result);
        break;
      }
@@ -8864,16 +9096,18 @@ index 49121fe1..23f6f868 100644
      out_semaphore_.ParkedWait(
          reinterpret_cast<i::Isolate*>(requester)->main_thread_local_isolate());
    }
-@@ -6705,6 +9252,8 @@ void Worker::Terminate() {
-   // returning to the event queue. Since we checked the state before, and we are
-   // holding the {worker_mutex_}, it's safe to access the isolate.
-   isolate_->TerminateExecution();
+@@ -6698,6 +9385,10 @@ void Worker::Terminate() {
+   base::MutexGuard lock_guard(&worker_mutex_);
+   auto expected = State::kRunning;
+   if (!state_.compare_exchange_strong(expected, State::kTerminating)) return;
 +  // A worker blocked in a channel operation would not notice the interrupt.
++  // This goes before the task below: woken by it, an event loop asks
++  // Channels::HasPendingWaits() whether to wait on, which must say no by then.
 +  Channels::TerminateIsolate(isolate_);
- }
- 
- void Worker::EnterTerminatedState() {
-@@ -6791,6 +9340,7 @@ Worker* Worker::GetCurrentWorker() { return current_worker_; }
+   std::unique_ptr<v8::Task> task(
+       new TerminateTask(task_manager_, shared_from_this()));
+   task_runner_->PostTask(std::move(task));
+@@ -6791,6 +9482,7 @@ Worker* Worker::GetCurrentWorker() { return current_worker_; }
  void Worker::ExecuteInThread() {
    Isolate::CreateParams create_params = GetDefaultIsolateCreateParams();
    isolate_ = Isolate::New(create_params);
@@ -8881,7 +9115,7 @@ index 49121fe1..23f6f868 100644
  
    // TODO(mdanylo): can we omit dump disable here?
  #ifdef V8_DUMPLING
-@@ -6926,6 +9476,7 @@ void Worker::ExecuteInThread() {
+@@ -6926,6 +9618,7 @@ void Worker::ExecuteInThread() {
      platform::NotifyIsolateShutdown(g_default_platform, isolate_);
    }
  
@@ -8889,7 +9123,7 @@ index 49121fe1..23f6f868 100644
    isolate_->Dispose();
    isolate_ = nullptr;
  
-@@ -7190,6 +9741,8 @@ bool Shell::SetOptions(int argc, char* argv[]) {
+@@ -7190,6 +9883,8 @@ bool Shell::SetOptions(int argc, char* argv[]) {
        options.expected_to_throw = true;
      } else if (FlagMatches("--no-fail", &argv[i])) {
        options.no_fail = true;
@@ -8898,7 +9132,7 @@ index 49121fe1..23f6f868 100644
      } else if (FlagMatches("--dump-counters", &argv[i])) {
        options.dump_counters = true;
      } else if (FlagMatches("--dump-counters-nvp", &argv[i])) {
-@@ -7310,6 +9863,9 @@ bool Shell::SetOptions(int argc, char* argv[]) {
+@@ -7310,6 +10005,9 @@ bool Shell::SetOptions(int argc, char* argv[]) {
                                    argv, &i)) {
        // Value is expressed in MB.
        options.max_serializer_memory = atoi(flag_value) * i::MB;
@@ -8908,7 +9142,7 @@ index 49121fe1..23f6f868 100644
      } else if (FlagMatches("--bundle", &argv[i])) {
        options.bundle = true;
  #ifdef V8_FUZZILLI
-@@ -7921,6 +10477,27 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7921,6 +10619,27 @@ class Serializer : public ValueSerializer::Delegate {
      return true;
    }
  
@@ -8936,7 +9170,7 @@ index 49121fe1..23f6f868 100644
   private:
    Maybe<bool> PrepareTransfer(Local<Context> context, Local<Value> transfer) {
      if (transfer->IsArray()) {
-@@ -7929,6 +10506,22 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7929,6 +10648,22 @@ class Serializer : public ValueSerializer::Delegate {
        for (uint32_t i = 0; i < length; ++i) {
          Local<Value> element;
          if (transfer_array->Get(context, i).ToLocal(&element)) {
@@ -8959,7 +9193,7 @@ index 49121fe1..23f6f868 100644
            if (!element->IsArrayBuffer()) {
              ThrowError(isolate_,
                         "Transfer array elements must be an ArrayBuffer");
-@@ -7961,7 +10554,64 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7961,7 +10696,64 @@ class Serializer : public ValueSerializer::Delegate {
      }
    }
  
@@ -9024,7 +9258,7 @@ index 49121fe1..23f6f868 100644
      for (const auto& global_array_buffer : array_buffers_) {
        Local<ArrayBuffer> array_buffer =
            Local<ArrayBuffer>::New(isolate_, global_array_buffer);
-@@ -7987,6 +10637,7 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7987,6 +10779,7 @@ class Serializer : public ValueSerializer::Delegate {
    ValueSerializer serializer_;
    std::unique_ptr<SerializationData> data_;
    std::vector<Global<ArrayBuffer>> array_buffers_;
@@ -9032,7 +9266,7 @@ index 49121fe1..23f6f868 100644
    std::vector<Global<SharedArrayBuffer>> shared_array_buffers_;
    std::vector<Global<WasmModuleObject>> wasm_modules_;
    std::vector<std::shared_ptr<v8::BackingStore>> backing_stores_;
-@@ -8013,6 +10664,21 @@ class Deserializer : public ValueDeserializer::Delegate {
+@@ -8013,6 +10806,21 @@ class Deserializer : public ValueDeserializer::Delegate {
        return MaybeLocal<Value>();
      }
  
@@ -9054,7 +9288,7 @@ index 49121fe1..23f6f868 100644
      uint32_t index = 0;
      for (const auto& backing_store : data_->backing_stores()) {
        Local<ArrayBuffer> array_buffer =
-@@ -8049,6 +10715,21 @@ class Deserializer : public ValueDeserializer::Delegate {
+@@ -8049,6 +10857,21 @@ class Deserializer : public ValueDeserializer::Delegate {
      return nullptr;
    }
  
@@ -9076,7 +9310,7 @@ index 49121fe1..23f6f868 100644
   private:
    Isolate* isolate_;
    ValueDeserializer deserializer_;
-@@ -8309,9 +10990,13 @@ int Shell::Main(int argc, char* argv[]) {
+@@ -8309,9 +11132,13 @@ int Shell::Main(int argc, char* argv[]) {
    // The platform is owned by wrapper platform despite the `std::move` below.
    START_IGNORE_LIFETIME_SAFETY_WARNINGS()
    g_default_platform = g_platform.get();
@@ -9090,7 +9324,7 @@ index 49121fe1..23f6f868 100644
    }
    if (options.stress_delay_tasks) {
      int64_t random_seed = i::v8_flags.fuzzer_random_seed;
-@@ -8438,6 +11123,7 @@ int Shell::Main(int argc, char* argv[]) {
+@@ -8438,6 +11265,7 @@ int Shell::Main(int argc, char* argv[]) {
    }
  
    Isolate* isolate = Isolate::New(create_params);
@@ -9099,7 +9333,7 @@ index 49121fe1..23f6f868 100644
  #ifdef V8_FUZZILLI
  
 diff --git a/src/d8/d8.h b/src/d8/d8.h
-index 0c7ad50a..aeb4bb36 100644
+index 0c7ad50a..a59e4cae 100644
 --- a/src/d8/d8.h
 +++ b/src/d8/d8.h
 @@ -8,6 +8,7 @@
@@ -9326,7 +9560,18 @@ index 0c7ad50a..aeb4bb36 100644
    static std::unique_ptr<SerializationData> SerializeValue(
        Isolate* isolate, Local<Value> value, Local<Value> transfer);
    static MaybeLocal<Value> DeserializeValue(
-@@ -1007,6 +1131,50 @@ class Shell : public i::AllStatic {
+@@ -954,6 +1078,10 @@ class Shell : public i::AllStatic {
+ 
+   static void PromiseRejectCallback(v8::PromiseRejectMessage reject_message);
+ 
++  // Thaws `region` for `isolate`. Fails with an exception, or, if the region
++  // is still borrowed, with `*borrowed` set and no exception.
++  static bool ThawRegion(Isolate* isolate, int region, bool* borrowed);
++
+  private:
+   static inline int DeserializationRunCount() {
+     return options.stress_deserialize ? 1000 : 1;
+@@ -1007,6 +1135,55 @@ class Shell : public i::AllStatic {
    static Local<ObjectTemplate> GetOrCreateGlobalTemplate(Isolate* isolate);
    static Local<ObjectTemplate> CreateOSTemplate(Isolate* isolate);
    static Local<FunctionTemplate> CreateWorkerTemplate(Isolate* isolate);
@@ -9343,11 +9588,16 @@ index 0c7ad50a..aeb4bb36 100644
 +  static void RegionFreeze(const v8::FunctionCallbackInfo<v8::Value>& info);
 +  static void RegionSeal(const v8::FunctionCallbackInfo<v8::Value>& info);
 +  static void RegionThaw(const v8::FunctionCallbackInfo<v8::Value>& info);
++  static void RegionThawWhenFree(
++      const v8::FunctionCallbackInfo<v8::Value>& info);
 +  static void RegionBorrow(const v8::FunctionCallbackInfo<v8::Value>& info);
 +  static void RegionIsRegionObject(
 +      const v8::FunctionCallbackInfo<v8::Value>& info);
 +  static void RegionInfo(const v8::FunctionCallbackInfo<v8::Value>& info);
 +  static void RegionTask(const v8::FunctionCallbackInfo<v8::Value>& info);
++  static void RegionReserve(const v8::FunctionCallbackInfo<v8::Value>& info);
++  static void RegionTakeReserved(
++      const v8::FunctionCallbackInfo<v8::Value>& info);
 +  static void RegionInterrupt(
 +      const v8::FunctionCallbackInfo<v8::Value>& info);
 +  static void RegionEnter(const v8::FunctionCallbackInfo<v8::Value>& info);
@@ -12415,10 +12665,10 @@ index 00000000..844041ef
 +#endif  // V8_OBJECTS_JS_REGION_INL_H_
 diff --git a/src/objects/js-region.cc b/src/objects/js-region.cc
 new file mode 100644
-index 00000000..532dfc48
+index 00000000..cbc9a5b8
 --- /dev/null
 +++ b/src/objects/js-region.cc
-@@ -0,0 +1,3352 @@
+@@ -0,0 +1,3407 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -12473,6 +12723,9 @@ index 00000000..532dfc48
 +std::atomic<int> RegionRegistry::owner_ids_[RegionRegistry::kMaxRegions];
 +std::atomic<uintptr_t> RegionRegistry::frozen_by_[RegionRegistry::kMaxRegions];
 +std::atomic<int> RegionRegistry::readers_[RegionRegistry::kMaxRegions];
++std::atomic<RegionRegistry::ReadersFreeHook>
++    RegionRegistry::readers_free_hook_{nullptr};
++std::atomic<int> RegionRegistry::readers_waits_{0};
 +std::atomic<int> RegionRegistry::generations_[RegionRegistry::kMaxRegions];
 +std::atomic<int> RegionRegistry::handles_[RegionRegistry::kMaxRegions];
 +std::atomic<bool> RegionRegistry::in_use_[RegionRegistry::kMaxRegions];
@@ -13386,14 +13639,66 @@ index 00000000..532dfc48
 +void RegionRegistry::Unborrow(int region, Isolate* isolate,
 +                              bool detach_views) {
 +  // Views go first: once the counter drops, the region may be thawed.
++  DropReserved(region, isolate, detach_views);
++  int previous = readers_[region].fetch_sub(1, std::memory_order_acq_rel);
++  CHECK_GT(previous, 0);
++  ReadersDropped(region, previous);
++}
++
++bool RegionRegistry::Reserve(int region) {
++  if (IsLocked(region)) return false;
++  int readers = readers_[region].load(std::memory_order_acquire);
++  while (readers >= 0) {
++    if (!IsFrozen(region)) return false;
++    if (readers_[region].compare_exchange_weak(readers, readers + 1,
++                                               std::memory_order_acq_rel)) {
++      AddHandle(region);
++      return true;
++    }
++  }
++  return false;
++}
++
++void RegionRegistry::Unreserve(int region) {
++  int previous = readers_[region].fetch_sub(1, std::memory_order_acq_rel);
++  CHECK_GT(previous, 0);
++  RemoveHandle(region);
++  ReadersDropped(region, previous);
++}
++
++void RegionRegistry::TakeReserved(int region, Isolate* isolate) {
++  DCHECK_GT(Readers(region), 0);
++  RegionViews::ChangeBorrows(isolate, region, 1);
++  SetReadable(region, isolate, true);
++}
++
++void RegionRegistry::DropReserved(int region, Isolate* isolate,
++                                  bool detach_views) {
 +  if (RegionViews::ChangeBorrows(isolate, region, -1) == 0) {
 +    if (detach_views) JSRegionObject::DetachFrozenViewsIfUnused(isolate, region);
 +    if (!IsFrozenBy(region, isolate) && !IsSealed(region)) {
 +      SetReadable(region, isolate, false);
 +    }
 +  }
-+  int previous = readers_[region].fetch_sub(1, std::memory_order_acq_rel);
-+  CHECK_GT(previous, 0);
++}
++
++void RegionRegistry::ReadersDropped(int region, int previous) {
++  if (previous != 1) return;
++  // Pairs with the fence in WaitForReaders(): either the waiter sees the
++  // counter at 0, or this thread sees the waiter and calls the hook.
++  std::atomic_thread_fence(std::memory_order_seq_cst);
++  if (readers_waits_.load(std::memory_order_relaxed) == 0) return;
++  ReadersFreeHook hook = readers_free_hook_.load(std::memory_order_acquire);
++  if (hook) hook(region);
++}
++
++void RegionRegistry::SetReadersFreeHook(ReadersFreeHook hook) {
++  readers_free_hook_.store(hook, std::memory_order_release);
++}
++
++void RegionRegistry::WaitForReaders(bool wait) {
++  readers_waits_.fetch_add(wait ? 1 : -1, std::memory_order_relaxed);
++  std::atomic_thread_fence(std::memory_order_seq_cst);
 +}
 +
 +bool RegionRegistry::IsBorrowedBy(int region, Isolate* isolate) {
@@ -15773,10 +16078,10 @@ index 00000000..532dfc48
 +}  // namespace v8
 diff --git a/src/objects/js-region.h b/src/objects/js-region.h
 new file mode 100644
-index 00000000..fc4af08e
+index 00000000..405002c6
 --- /dev/null
 +++ b/src/objects/js-region.h
-@@ -0,0 +1,540 @@
+@@ -0,0 +1,559 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -15972,6 +16277,21 @@ index 00000000..fc4af08e
 +  // `detach_views` is false for an isolate that is going away.
 +  static void Unborrow(int region, Isolate* isolate, bool detach_views = true);
 +  static bool IsBorrowedBy(int region, Isolate* isolate);
++  // A borrow that no isolate holds yet: spawn() takes one for each frozen
++  // region it passes, until the task ends, so that the region cannot thaw
++  // before the task starts. It also keeps the region id from being reused.
++  // Fails unless frozen. The task's isolate takes it up (TakeReserved) for
++  // as long as it runs, without counting another reader.
++  static bool Reserve(int region);
++  static void Unreserve(int region);
++  static void TakeReserved(int region, Isolate* isolate);
++  static void DropReserved(int region, Isolate* isolate,
++                           bool detach_views = true);
++  // Called, on the thread that dropped it, when the last borrow of a frozen
++  // region goes, if any thread waits for that (WaitForReaders).
++  using ReadersFreeHook = void (*)(int region);
++  static void SetReadersFreeHook(ReadersFreeHook hook);
++  static void WaitForReaders(bool wait);
 +  // Marks whether `isolate` may read frozen `region`, in its read table.
 +  static void SetReadable(int region, Isolate* isolate, bool readable);
 +  static void ForgetReadTable(Isolate* isolate);
@@ -16009,6 +16329,10 @@ index 00000000..fc4af08e
 +  static std::atomic<uintptr_t> frozen_by_[kMaxRegions];
 +  // Number of borrows of a frozen region, kNotFrozen otherwise.
 +  static std::atomic<int> readers_[kMaxRegions];
++  static void ReadersDropped(int region, int previous);
++  static std::atomic<ReadersFreeHook> readers_free_hook_;
++  // Number of threads waiting for the readers of a region to go.
++  static std::atomic<int> readers_waits_;
 +  static std::atomic<int> generations_[kMaxRegions];
 +  static std::atomic<int> handles_[kMaxRegions];
 +  static std::atomic<bool> in_use_[kMaxRegions];

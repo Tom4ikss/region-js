@@ -98,7 +98,7 @@
 
 <h3 id="bilet-posetitelya"><a class="anchor" href="#bilet-posetitelya" aria-hidden="true" tabindex="-1"></a>Билет посетителя</h3>
 <p>В зал пускают по билету: <code>region.borrow()</code>. Без билета замороженный регион читает только тот, кто его выставил. Остальные потоки берут билет, иначе получат <code>OwnershipError</code>. Задачам <code>spawn</code> билет на регионы, которые им достались, выдаётся сам.</p>
-<p>Пока на руках есть хотя бы один билет, экспонат не снимут: <code>thaw()</code> бросит ошибку. Поэтому данные не поменяются посреди вашего чтения. Когда вы дочитали, верните билет: <code>release()</code>. С новым синтаксисом <code>using</code> он вернётся сам при выходе из блока.</p>
+<p>Пока на руках есть хотя бы один билет, экспонат не снимут: <code>thaw()</code> бросит ошибку, а <code>thawWhenFree()</code> подождёт последнего посетителя. Поэтому данные не поменяются посреди вашего чтения. Когда вы дочитали, верните билет: <code>release()</code>. С новым синтаксисом <code>using</code> он вернётся сам при выходе из блока.</p>
 
 <h2 id="vse-sostoyaniya-regiona"><a class="anchor" href="#vse-sostoyaniya-regiona" aria-hidden="true" tabindex="-1"></a>Все состояния региона</h2>
 <figure class="diagram">

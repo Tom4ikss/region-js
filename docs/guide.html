@@ -464,7 +464,7 @@ start = performance.<span class="tok-fn">now</span>();
 тот же объект? false | те же байты? true
 это обычный Uint8Array: true 4
 новая длина: 16
-8 МБ копией: 0.64 ms, через transfer: 0.08 ms
+8 МБ копией: 0.50 ms, через transfer: 0.04 ms
 исходный после transfer: 0 | в регионе: 1000000 1000000</pre></figure>
 
 <ul>
@@ -735,7 +735,7 @@ prices.apple = <span class="tok-number">55</span>;
 } <span class="tok-keyword">catch</span> (e) {
   <span class="tok-fn">print</span>(<span class="tok-string">'borrow незамороженного:'</span>, <span class="tok-fn">String</span>(e));
 }</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8</span></div><pre class="out">readers: 1
-<span class="err">thaw с читателем: OwnershipError: Region is still borrowed by 1 reader(s)</span>
+<span class="err">thaw с читателем: OwnershipError: Region is still borrowed by 1 reader(s); region.thawWhenFree() waits for them</span>
 после release, readers: 0
 внутри блока, readers: 1 | apple = 50
 после блока, readers: 0
@@ -744,6 +744,7 @@ prices.apple = <span class="tok-number">55</span>;
 
 <p>Брать билет можно в любом потоке, в том числе в воркере: <code>Region.of(obj).borrow()</code>. Без билета замороженный регион читают только тот поток, который его заморозил (или получил право разморозить), и задачи <code>spawn</code>, которые захватили регион или получили его аргументом: им билет выдаётся сам, на всё время задачи (<a href="spawn.html#frozen">подробнее</a>). Остальные получают <code>OwnershipError: region N is frozen; borrow it to read it</code>, и на обычных полях, и на типизированных массивах. Это касается и объекта, который пришёл через <code>postMessage</code> или канал.</p>
 <p>Зато пока билет у вас, <code>thaw()</code> не пройдёт: он бросит «Region is still borrowed by N reader(s)». Поэтому читатель никогда не увидит разморозку посреди чтения и не прочитает устаревшее значение.</p>
+<p>Ждать, пока билеты сдадут, не надо циклом с повторами: <code>await region.thawWhenFree()</code> разморозит регион, как только последний читатель сдаст билет, и выполнится. Если читателей нет, регион размораживается сразу. Если билет держит тот же поток и сдать его некому, промис отказывает с <code>DeadlockError</code>, а в отменённой задаче — с её <code>AbortError</code>. Когда ждут несколько <code>thawWhenFree()</code> одного региона, размораживает первый, остальные отказывают, как <code>thaw()</code> уже размороженного региона.</p>
 <p><code>region.borrowWhile(fn)</code> берёт билет, вызывает <code>fn</code> и сдаёт билет, когда <code>fn</code> закончилась. Если <code>fn</code> вернула промис, билет сдаётся, когда промис выполнится или отклонится. <code>borrowWhile</code> возвращает то, что вернула <code>fn</code> (для асинхронной функции — промис с её результатом). Внутри задач <code>spawn</code> для асинхронной работы нужен именно он, потому что обычный билет живёт не дольше задачи (<a href="spawn.html#borrow">подробнее на странице про spawn</a>).</p>
 
 <h2 id="free"><a class="anchor" href="#free" aria-hidden="true" tabindex="-1"></a>Освободить регион: <code>free</code></h2>
@@ -872,8 +873,8 @@ worker.<span class="tok-api">terminate</span>();</code></pre><div class="out-hea
   <span class="tok-fn">print</span>(<span class="tok-string">'главный поток после переезда:'</span>, <span class="tok-fn">String</span>(e));
 }
 worker.<span class="tok-api">terminate</span>();</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8; время у вас будет другим</span></div><pre class="out">узлов в дереве: 131071
-копия (structured clone): 132.13 ms
-переезд региона:          0.17 ms
+копия (structured clone): 134.21 ms
+переезд региона:          0.15 ms
 <span class="err">главный поток после переезда: OwnershipError: region 0 belongs to another thread (isolate 1, this is isolate 0) (sent at 02-before-after.js:13:10)</span></pre></figure>
 
 <p>Видно два разных текста ошибки. Сразу после отправки регион ещё в пути: «was sent to another thread and has not been received yet». Когда воркер получил сообщение, владелец уже он: «belongs to another thread». Обе ошибки заканчиваются местом отправки. <code>Object.keys</code>, <code>JSON.stringify</code> и прочее перечисление ключей проверяют владельца так же, как чтение поля.</p>
@@ -920,7 +921,7 @@ worker.<span class="tok-api">terminate</span>();</code></pre><div class="out-hea
 }
 worker.<span class="tok-api">terminate</span>();</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8; время у вас будет другим</span></div><pre class="out">тот же самый объект: true
 ходов: 2000 | последний писал: воркер
-один круг туда-обратно: 12.1 µs
+один круг туда-обратно: 15.2 µs
 Region.of для обычного объекта: Region.of() expects an object from a region</pre></figure>
 
 <p>Тысяча кругов «туда и обратно», и в конце в руках тот же самый объект: <code>current === state</code>. Один круг — два переезда и две пересылки сообщения — занимает около 10–11 микросекунд, от запуска к запуску по-разному.</p>
@@ -940,6 +941,7 @@ Region.of для обычного объекта: Region.of() expects an object 
 <tr><td><code>worker.postMessage(msg)</code></td><td>Для объектов замороженного региона — рассылка без копии.</td></tr>
 <tr><td><code>worker.postMessage(msg, [frozenRegion])</code></td><td>Для замороженного региона — передать право разморозить.</td></tr>
 <tr><td><code>region.freeze()</code>, <code>region.thaw()</code></td><td>Заморозить (читают все под билетом, не пишет никто) и разморозить (только тот, кто заморозил или получил право, и только без читателей).</td></tr>
+<tr><td><code>region.thawWhenFree()</code></td><td>Промис: разморозить, когда сданы все билеты.</td></tr>
 <tr><td><code>region.frozen</code>, <code>region.readers</code></td><td>Заморожен ли регион и сколько билетов сейчас выдано.</td></tr>
 <tr><td><code>region.frozenHere</code></td><td>Есть ли у текущего потока право разморозить регион.</td></tr>
 <tr><td><code>region.borrow()</code></td><td>Билет читателя: без него замороженный регион читает только тот, кто его заморозил, и задачи <code>spawn</code>, которым он достался. У билета есть <code>release()</code>, и его можно объявить через <code>using</code>.</td></tr>
@@ -1009,7 +1011,7 @@ region 0 was sent to another thread and has not been received yet (sent at 44-er
 <tr><td><code>Region is sealed: its objects are shared, send them without a transfer list</code></td><td><code>sealed</code></td><td>Запечатанный регион в списке transfer.</td></tr>
 <tr><td><code>region N is in an RwLock; use it through lock.read() or lock.write()</code></td><td><code>locked</code></td><td>Обращение к региону, который лежит в <code>RwLock</code>, мимо guard. Своими текстами <code>free()</code>, <code>freeze()</code>, список transfer и второй <code>RwLock</code> на тот же регион.</td></tr>
 <tr><td><code>region N is locked for reading; use lock.write() to change it</code></td><td><code>read-locked</code></td><td>Запись под <code>lock.read()</code>.</td></tr>
-<tr><td><code>Region is still borrowed by N reader(s)</code></td><td><code>borrowed</code></td><td><code>thaw()</code> и <code>free()</code>, пока не сданы билеты.</td></tr>
+<tr><td><code>Region is still borrowed by N reader(s)</code></td><td><code>borrowed</code></td><td><code>thaw()</code> и <code>free()</code>, пока не сданы билеты, в том числе билеты задач <code>spawn</code>, которые ещё ждут в очереди. Дождаться их — <code>thawWhenFree()</code>.</td></tr>
 <tr><td><code>Region is not frozen by this isolate</code></td><td><code>not-frozen</code></td><td><code>thaw()</code> в потоке, у которого нет права разморозить.</td></tr>
 <tr><td><code>Region must be frozen to borrow it</code></td><td><code>not-frozen</code></td><td><code>borrow()</code> у незамороженного региона.</td></tr>
 <tr><td><code>a region object cannot reference objects outside its region; copy them in with Region.object() or Region.array()</code></td><td><code>outside-reference</code></td><td>Запись в поле обычного объекта или объекта из другого региона.</td></tr>

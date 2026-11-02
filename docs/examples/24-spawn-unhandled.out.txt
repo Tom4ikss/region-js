@@ -1,5 +1,5 @@
 главный поток закончил
-undefined:322: RangeError: индекс за пределами
+undefined:330: RangeError: индекс за пределами
       task.outcome = Promise.reject(task.error);
                              ^
 RangeError: индекс за пределами

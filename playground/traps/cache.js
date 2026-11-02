@@ -1,6 +1,7 @@
 // Кэш цен: замороженный регион, который читают задачи, а главный поток время от
 // времени перестраивает (thaw, обновить, freeze). Чтения асинхронные.
-// ./run.sh cache.js [first|swap|borrow-await|channel-read|rwlock|rwlock-await]
+// ./run.sh cache.js [first|wait|swap|borrow-await|borrow-await-wait|channel-read|
+//                    rwlock|rwlock-await]
 const VARIANT = globalThis.arguments?.[0] ?? 'first';
 
 const sleep = (ms) => new Promise((resolve) => {
@@ -34,7 +35,9 @@ const refresh = async (version) => {
     return;
   }
   const region = Region.of(cache);
-  for (let attempt = 0; ; attempt++) {
+  if (VARIANT.endsWith('wait')) {
+    await region.thawWhenFree();           // ждать, пока читатели уйдут
+  } else for (let attempt = 0; ; attempt++) {
     try {
       region.thaw();
       break;
@@ -48,7 +51,7 @@ const refresh = async (version) => {
   region.freeze();
 };
 
-if (VARIANT === 'first' || VARIANT === 'swap') {
+if (VARIANT === 'first' || VARIANT === 'wait' || VARIANT === 'swap') {
   const reads = [];
   for (let round = 1; round <= 5; round++) {
     for (let i = 0; i < 8; i++) reads.push(spawn(lookup, cache, 'sku' + i));
@@ -63,7 +66,7 @@ if (VARIANT === 'first' || VARIANT === 'swap') {
   print('ответы:', JSON.stringify(seen));
 }
 
-if (VARIANT === 'borrow-await') {
+if (VARIANT === 'borrow-await' || VARIANT === 'borrow-await-wait') {
   // Главный поток сам читает кэш под билетом и ждёт посередине.
   const region = Region.of(cache);
   const handler = async () => {
