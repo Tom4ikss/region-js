@@ -1,6 +1,6 @@
 // Сервер на минималках: запросы приходят в канал, каждый обрабатывает задача
 // spawn с таймаутом, общее состояние (счётчики и журнал) лежит в RwLock.
-// ./run.sh server.js [first|lock-await|half-write|abort-region|region-busy|check-then-use]
+// ./run.sh server.js [first|lock-await|half-write|shield|abort-region|region-busy|check-then-use]
 const VARIANT = globalThis.arguments?.[0] ?? 'first';
 
 const sleep = (ms) => new Promise((resolve) => {
@@ -33,6 +33,20 @@ const handle = async (req, state) => {
   {
     using g = await state.write();
     g.value.inFlight++;
+  }
+  if (VARIANT === 'shield') {
+    // Уборка под spawn.shield(): отмена её не прерывает.
+    try {
+      await sleep(req.cost);
+    } finally {
+      await spawn.shield(async () => {
+        using g = await state.write();
+        g.value.inFlight--;
+      });
+    }
+    using g = await state.write();
+    g.value.served++;
+    return req.id;
   }
   if (VARIANT === 'half-write') {
     using g = await state.write();

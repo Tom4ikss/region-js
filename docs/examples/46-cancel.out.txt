@@ -2,5 +2,7 @@ TimeoutError: spawn() task did not finish in 20 ms
 {"title":"final","words":0}
 TimeoutError: spawn() task did not finish in 20 ms
 poisoned: true
-PoisonError: the RwLock is poisoned: a writer did not finish (released at 46-cancel.js:27:17); check its value, then call clearPoison()
+PoisonError: the RwLock is poisoned: a writer did not finish (released at 46-cancel.js:28:17); check its value, then call clearPoison()
 {"inFlight":1,"served":0}
+TimeoutError: spawn() task did not finish in 20 ms
+poisoned: false {"inFlight":0,"served":0}

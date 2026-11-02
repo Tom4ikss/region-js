@@ -249,6 +249,87 @@ const busy = (ms) => {
   check('not poisoned by a reader', lock.poisoned === false);
 }
 
+// spawn.shield(): cleanup that the abort does not interrupt. The handle
+// settles after it; awaiting the shield then throws the abort, unless the
+// shield failed, whose error comes as it is.
+{
+  const state = new RwLock({ inFlight: 0, served: 0 });
+  const log = new Region().run(() => []);
+  const task = spawn(async (state, log) => {
+    {
+      using g = await state.write();
+      g.value.inFlight++;
+    }
+    try {
+      await (globalThis.kept = new Promise(() => {}));
+      log.push('work done');
+    } finally {
+      log.push('aborted: ' + spawn.aborted());
+      try {
+        await spawn.shield(async () => {
+          log.push('in shield: ' + spawn.aborted());
+          await Promise.resolve();
+          using g = await state.write();
+          g.value.inFlight--;
+          log.push('cleaned up');
+          return 'cleanup value';
+        });
+      } catch (e) {
+        log.push('after shield: ' + e.name);
+      }
+      try {
+        await spawn.shield(() => {
+          throw new RangeError('cleanup failed');
+        });
+      } catch (e) {
+        log.push('failed shield: ' + e.name);
+      }
+    }
+  }, state, log);
+  busy(30);
+  task.abort();
+  const result = await outcome(task);
+  check('shielded task still aborted', result.startsWith('AbortError'), result);
+  check('shield ran to the end', log.join(', ') ===
+        'aborted: true, in shield: false, cleaned up, after shield: AbortError, ' +
+        'failed shield: RangeError', log.join(', '));
+  check('lock not poisoned', state.poisoned === false);
+  using g = await state.read();
+  check('invariant kept', g.value.inFlight === 0, JSON.stringify(g.value));
+}
+
+// A shield nobody awaits still ends before the task; waits in it and tasks
+// it spawns are not aborted.
+{
+  const ch = new Channel(1);
+  const log = new Region().run(() => []);
+  const task = spawn(async (ch, log) => {
+    spawn.shield(async () => {
+      const child = spawn(async (ch) => (await ch.recv()).value, ch);
+      log.push('child got ' + await child);
+    });
+    await (globalThis.kept = new Promise(() => {}));
+  }, ch, log);
+  busy(30);
+  task.abort();
+  busy(30);
+  await ch.send(7);
+  const result = await outcome(task);
+  check('task aborted', result.startsWith('AbortError'), result);
+  check('shield ended first', log.join() === 'child got 7', log.join());
+}
+
+// Outside a task, and in a task that is not aborted, it just runs fn.
+{
+  check('outside a task', (await spawn.shield(async () => 'here')) === 'here');
+  const value = await outcome(spawn(async () => spawn.shield(async () => {
+    await null;
+    return 'shielded';
+  })));
+  check('not aborted', value === 'value "shielded"', value);
+  check('bad argument', (await outcome(spawn.shield(1))).startsWith('TypeError'));
+}
+
 // Code that never awaits still has to check spawn.aborted().
 {
   const task = spawn(() => {

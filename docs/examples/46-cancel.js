@@ -1,5 +1,6 @@
 // d8-flags: --module
-// Отмена прерывает обычный await, а писатель, отменённый под локом, отравляет лок.
+// Отмена прерывает обычный await, писатель, отменённый под локом, отравляет
+// лок, а уборку под spawn.shield() отмена не прерывает.
 const sleep = (ms) => new Promise((resolve) => {
   const end = performance.now() + ms;
   const tick = () => (performance.now() >= end ? resolve() : setTimeout(tick, 0));
@@ -40,3 +41,29 @@ try {
 stats.clearPoison();           // данные проверены
 using g = await stats.read();
 print(JSON.stringify(g.value));
+
+// Уборка под spawn.shield(): отмена её не прерывает, и счётчик сходится.
+const fair = new RwLock({ inFlight: 0, served: 0 });
+const work = spawn(async (fair) => {
+  {
+    using g = await fair.write();
+    g.value.inFlight++;
+  }
+  try {
+    await sleep(1000);
+    using g = await fair.write();
+    g.value.served++;
+  } finally {
+    await spawn.shield(async () => {
+      using g = await fair.write();
+      g.value.inFlight--;
+    });
+  }
+}, fair).timeout(20);
+try {
+  await work;
+} catch (e) {
+  print(String(e));
+}
+using f = await fair.read();
+print('poisoned:', fair.poisoned, JSON.stringify(f.value));

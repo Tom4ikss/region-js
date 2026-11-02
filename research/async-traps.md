@@ -460,9 +460,9 @@ if (region.frozen) {
   `RwLock`. В `server.js` (`half-write`) чтение состояния после прогона падает с
   `PoisonError: the RwLock is poisoned: a writer did not finish (released at server.js:44:16)`.
 
-Осталось по п. 10: инвариант, растянутый на два захвата лока (`inFlight++` в одном,
-`inFlight--` в другом), отравление не ловит, `served 14 inFlight 4` в варианте по умолчанию
-остаётся. Перенести `inFlight--` в `finally` тоже нельзя: в отменённой задаче `await
-state.write()` бросает. Нужна асинхронная уборка, которую отмена не прерывает (как
-shielded cancel scope в Trio), или блок, который знает, что его задачи отменены. Код без
-`await` по-прежнему проверяет `spawn.aborted()`.
+Инвариант, растянутый на два захвата лока (`inFlight++` в одном, `inFlight--` в другом),
+отравление не ловит: в варианте по умолчанию по-прежнему `served 14 inFlight 4`. Для него
+есть `spawn.shield(fn)`, как shielded cancel scope в Trio: уборка в `finally` под shield
+отмена не прерывает. В `server.js` (`shield`) после прогона `served 16 inFlight 0`: 4 задачи
+отменены по таймауту, и каждая вернула счётчик. Код без `await` по-прежнему проверяет
+`spawn.aborted()`.

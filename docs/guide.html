@@ -464,7 +464,7 @@ start = performance.<span class="tok-fn">now</span>();
 тот же объект? false | те же байты? true
 это обычный Uint8Array: true 4
 новая длина: 16
-8 МБ копией: 0.48 ms, через transfer: 0.05 ms
+8 МБ копией: 0.64 ms, через transfer: 0.08 ms
 исходный после transfer: 0 | в регионе: 1000000 1000000</pre></figure>
 
 <ul>
@@ -872,8 +872,8 @@ worker.<span class="tok-api">terminate</span>();</code></pre><div class="out-hea
   <span class="tok-fn">print</span>(<span class="tok-string">'главный поток после переезда:'</span>, <span class="tok-fn">String</span>(e));
 }
 worker.<span class="tok-api">terminate</span>();</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8; время у вас будет другим</span></div><pre class="out">узлов в дереве: 131071
-копия (structured clone): 127.54 ms
-переезд региона:          0.20 ms
+копия (structured clone): 132.13 ms
+переезд региона:          0.17 ms
 <span class="err">главный поток после переезда: OwnershipError: region 0 belongs to another thread (isolate 1, this is isolate 0) (sent at 02-before-after.js:13:10)</span></pre></figure>
 
 <p>Видно два разных текста ошибки. Сразу после отправки регион ещё в пути: «was sent to another thread and has not been received yet». Когда воркер получил сообщение, владелец уже он: «belongs to another thread». Обе ошибки заканчиваются местом отправки. <code>Object.keys</code>, <code>JSON.stringify</code> и прочее перечисление ключей проверяют владельца так же, как чтение поля.</p>
@@ -920,7 +920,7 @@ worker.<span class="tok-api">terminate</span>();</code></pre><div class="out-hea
 }
 worker.<span class="tok-api">terminate</span>();</code></pre><div class="out-head"><span>Вывод</span><span class="hint">настоящий вывод d8; время у вас будет другим</span></div><pre class="out">тот же самый объект: true
 ходов: 2000 | последний писал: воркер
-один круг туда-обратно: 11.7 µs
+один круг туда-обратно: 12.1 µs
 Region.of для обычного объекта: Region.of() expects an object from a region</pre></figure>
 
 <p>Тысяча кругов «туда и обратно», и в конце в руках тот же самый объект: <code>current === state</code>. Один круг — два переезда и две пересылки сообщения — занимает около 10–11 микросекунд, от запуска к запуску по-разному.</p>
@@ -955,6 +955,7 @@ Region.of для обычного объекта: Region.of() expects an object 
 <tr><td><code>region.freed</code>, <code>region.byteSize</code>, <code>Region.stats()</code></td><td>Освобождён ли регион, сколько байт в него скопировано, и сводка по всем регионам процесса.</td></tr>
 <tr><td><code>spawn(fn, ...args)</code></td><td>Запустить функцию в отдельном потоке. См. <a href="spawn.html">следующую страницу</a>.</td></tr>
 <tr><td><code>spawn.scope(async (s) =&gt; ...)</code></td><td>Блок задач <code>s.spawn(...)</code>: ждёт их все, первая ошибка отменяет остальные. См. <a href="spawn.html#scope">spawn.scope</a>.</td></tr>
+<tr><td><code>spawn.shield(fn)</code></td><td>Уборка, которую отмена задачи не прерывает: её <code>await</code> не бросают. См. <a href="spawn.html#abort">отмену</a>.</td></tr>
 <tr><td><code>spawn.poolSize</code></td><td>Сколько воркеров в пуле <code>spawn</code>, по умолчанию 4.</td></tr>
 <tr><td><code>spawn.idle()</code></td><td>Промис, который выполнится, когда закончатся все задачи, запущенные этим потоком.</td></tr>
 <tr><td><code>new Channel(capacity)</code></td><td>Канал между потоками: <code>send</code>, <code>recv</code>, <code>close</code>, <code>Channel.select</code> и блокирующие версии. См. <a href="channels.html">страницу про каналы</a>.</td></tr>

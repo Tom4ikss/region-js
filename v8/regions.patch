@@ -960,7 +960,7 @@ index 36439464..29842b91 100644
      case Builtin::kInterpreterEntryTrampolineForProfiling:
      // Tiering builtins are set directly into the dispatch table and never
 diff --git a/src/builtins/promise-reaction-job.tq b/src/builtins/promise-reaction-job.tq
-index 768997fd..ed1142eb 100644
+index 768997fd..6d0bc394 100644
 --- a/src/builtins/promise-reaction-job.tq
 +++ b/src/builtins/promise-reaction-job.tq
 @@ -71,6 +71,8 @@ extern builtin ResumeGeneratorTrampoline(Context, JSAny, JSGeneratorObject):
@@ -972,16 +972,19 @@ index 768997fd..ed1142eb 100644
  transitioning macro ResumeGenerator(
      implicit context: Context)(generator: JSGeneratorObject, argument: JSAny,
      reactionType: constexpr PromiseReactionType): void {
-@@ -80,11 +82,18 @@ transitioning macro ResumeGenerator(
+@@ -80,11 +82,21 @@ transitioning macro ResumeGenerator(
      static_assert(reactionType == kPromiseReactionReject);
      generator.resume_mode = SmiConstant(kGeneratorResumeModeThrow);
    }
-+  // The await of an aborted d8 spawn() task throws the task's error.
++  // An await of an aborted d8 spawn() task that got a value throws the
++  // task's error instead.
 +  let sent: JSAny = argument;
-+  const abortError = RegionAwaitAbortError(context);
-+  if (abortError != Undefined) {
-+    generator.resume_mode = SmiConstant(kGeneratorResumeModeThrow);
-+    sent = UnsafeCast<JSAny>(abortError);
++  if constexpr (reactionType == kPromiseReactionFulfill) {
++    const abortError = RegionAwaitAbortError(context);
++    if (abortError != Undefined) {
++      generator.resume_mode = SmiConstant(kGeneratorResumeModeThrow);
++      sent = UnsafeCast<JSAny>(abortError);
++    }
 +  }
    if (Is<JSAsyncGeneratorObject>(generator)) {
      const asyncGen = %RawDownCast<JSAsyncGeneratorObject>(generator);
@@ -993,7 +996,7 @@ index 768997fd..ed1142eb 100644
      const asyncGen = %RawDownCast<JSAsyncGeneratorObject>(generator);
      AsyncGeneratorResumeNext(context, asyncGen);
 diff --git a/src/codegen/code-stub-assembler.cc b/src/codegen/code-stub-assembler.cc
-index 976c1b3e..e5e7cb99 100644
+index 976c1b3e..8df931ee 100644
 --- a/src/codegen/code-stub-assembler.cc
 +++ b/src/codegen/code-stub-assembler.cc
 @@ -40,6 +40,7 @@
@@ -1023,7 +1026,7 @@ index 976c1b3e..e5e7cb99 100644
    const bool kHandlePrivateNames = mode == HasPropertyLookupMode::kHasProperty;
    TryPrototypeChainLookup(object, object, key, lookup_property_in_holder,
                            lookup_element_in_holder, &return_false,
-@@ -21983,6 +21996,225 @@ void CodeStubAssembler::SharedValueBarrier(
+@@ -21983,6 +21996,231 @@ void CodeStubAssembler::SharedValueBarrier(
    BIND(&done);
  }
  
@@ -1085,6 +1088,12 @@ index 976c1b3e..e5e7cb99 100644
 +TNode<Object> CodeStubAssembler::SetAwaitResumeMode(
 +    TNode<Context> context, TNode<JSGeneratorObject> generator,
 +    TNode<Object> value, int resume_mode) {
++  if (resume_mode != JSGeneratorObject::kNext) {
++    StoreObjectFieldNoWriteBarrier(generator,
++                                   offsetof(JSGeneratorObject, resume_mode_),
++                                   SmiConstant(resume_mode));
++    return value;
++  }
 +  TVARIABLE(Object, var_value, value);
 +  TVARIABLE(Smi, var_mode, SmiConstant(resume_mode));
 +  Label done(this), aborted(this, Label::kDeferred);
@@ -1250,10 +1259,10 @@ index 976c1b3e..e5e7cb99 100644
    TVARIABLE(ArrayList, result);
    Label empty(this), nonempty(this), done(this);
 diff --git a/src/codegen/code-stub-assembler.h b/src/codegen/code-stub-assembler.h
-index f214a151..01d62ff7 100644
+index f214a151..3be4ffb4 100644
 --- a/src/codegen/code-stub-assembler.h
 +++ b/src/codegen/code-stub-assembler.h
-@@ -2805,6 +2805,54 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
+@@ -2805,6 +2805,55 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
    void SharedValueBarrier(TNode<Context> context,
                            TVariable<Object>* var_shared_value);
  
@@ -1277,8 +1286,9 @@ index f214a151..01d62ff7 100644
 +  // task. Calls the runtime only while this isolate has one.
 +  TNode<Object> RegionAwaitAbortError(TNode<Context> context);
 +  // Sets |resume_mode| on |generator|, about to resume an await with
-+  // |value|, and gives the value to resume it with: with an error from
-+  // RegionAwaitAbortError, the mode is kThrow and the value that error.
++  // |value|, and gives the value to resume it with. An await that got a
++  // value throws the error from RegionAwaitAbortError instead, if any; one
++  // that got a rejection throws that as it is.
 +  TNode<Object> SetAwaitResumeMode(TNode<Context> context,
 +                                   TNode<JSGeneratorObject> generator,
 +                                   TNode<Object> value, int resume_mode);
@@ -2938,10 +2948,10 @@ index 8aab5f56..0bc22f26 100644
        CheckValueInputIs(node, 1, Type::Any());
 diff --git a/src/d8/d8-channel.cc b/src/d8/d8-channel.cc
 new file mode 100644
-index 00000000..89c1b721
+index 00000000..66ca881b
 --- /dev/null
 +++ b/src/d8/d8-channel.cc
-@@ -0,0 +1,1772 @@
+@@ -0,0 +1,1773 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -4224,7 +4234,8 @@ index 00000000..89c1b721
 +  bool aborted = AbortedTaskReason(isolate, task, nullptr, nullptr);
 +  auto& held = DataOf(isolate).held;
 +  for (size_t i = held.size(); i-- > 0;) {
-+    if (held[i].task != task) continue;
++    // Also those taken in spawn.shield(), with -(task + 1).
++    if (held[i].task != task && held[i].task != -task - 1) continue;
 +    IsolateChannels::Held guard = std::move(held[i]);
 +    held.erase(held.begin() + i);
 +    ReleaseHeld(isolate, guard.state, guard.write, false,
@@ -6028,7 +6039,7 @@ index 00000000..bd767012
 +
 +#endif  // V8_D8_D8_PORT_H_
 diff --git a/src/d8/d8.cc b/src/d8/d8.cc
-index 49121fe1..e8254e4f 100644
+index 49121fe1..23f6f868 100644
 --- a/src/d8/d8.cc
 +++ b/src/d8/d8.cc
 @@ -14,6 +14,7 @@
@@ -7719,7 +7730,7 @@ index 49121fe1..e8254e4f 100644
  }
  
  Local<ObjectTemplate> Shell::CreateAsyncHookTemplate(Isolate* isolate) {
-@@ -5376,9 +6827,1050 @@ MaybeLocal<Context> Shell::CreateEvaluationContext(Isolate* isolate) {
+@@ -5376,9 +6827,1096 @@ MaybeLocal<Context> Shell::CreateEvaluationContext(Isolate* isolate) {
    }
  #endif  // V8_ENABLE_HARDWARE_WATCHPOINT_SUPPORT
  
@@ -7924,7 +7935,7 @@ index 49121fe1..e8254e4f 100644
 +    // A task with no await left cannot run again: its awaits were for
 +    // promises nothing else refers to, and were collected. It ends here.
 +    if (Region.__interrupt(id, error) === 0 && __live.has(id)) {
-+      spawn.idle().then(() => __fail(id, __live.get(id), error));
++      __idle(id).then(() => __fail(id, __live.get(id), error));
 +    }
 +    spawn.__abortChildren(id);
 +  });
@@ -7975,15 +7986,16 @@ index 49121fe1..e8254e4f 100644
 +    const callback = factory(values).apply(values[0], values[1] ?? []);
 +    result = callback(...values.slice(count - argc));
 +  } catch (e) {
-+    if (spawn.pending() === 0) {
++    if (spawn.pending() === 0 && !spawn.__shielded(id)) {
 +      __fail(id, regions, e);
 +    } else {
-+      spawn.idle().then(() => __fail(id, regions, e));
++      __idle(id).then(() => __fail(id, regions, e));
 +    }
 +    return;
 +  }
 +  // Like std::thread::scope, a task ends only after the tasks it spawned.
-+  if (typeof result?.then !== 'function' && spawn.pending() === 0) {
++  if (typeof result?.then !== 'function' && spawn.pending() === 0 &&
++      !spawn.__shielded(id)) {
 +    __reply(id, regions, result);
 +    return;
 +  }
@@ -7997,10 +8009,16 @@ index 49121fe1..e8254e4f 100644
 +  try {
 +    value = await result;
 +  } catch (e) {
-+    spawn.idle().then(() => __fail(id, regions, e));
++    __idle(id).then(() => __fail(id, regions, e));
 +    return;
 +  }
-+  spawn.idle().then(() => __reply(id, regions, value));
++  __idle(id).then(() => __reply(id, regions, value));
++}
++
++// Resolves once the shields of the task and the tasks it spawned are done.
++function __idle(id) {
++  const shields = spawn.__shielded(id);
++  return shields ? shields.then(() => __idle(id)) : spawn.idle();
 +}`;
 +
 +  const noop = () => {};
@@ -8557,6 +8575,45 @@ index 49121fe1..e8254e4f 100644
 +  // Outside a task nothing is aborted; pool workers replace this.
 +  spawn.aborted = () => false;
 +
++  // spawn.shield(fn): fn runs as if its task were not aborted, like a
++  // shielded cancel scope in Trio: its awaits, channel and lock waits do not
++  // fail with the abort, and the tasks it spawns are not aborted with it.
++  // The task ends only after its shields. Its code awaits with
++  // -(task + 1) as continuation data, which no abort names.
++  const openShields = new Map();
++  const shielded = async (fn) => await fn();
++  spawn.shield = function shield(fn) {
++    if (typeof fn !== 'function') {
++      return Promise.reject(new TypeError('spawn.shield() expects a function'));
++    }
++    const id = Region.__task();
++    if (id === undefined || id < 0) return shielded(fn);
++    Region.__task(-id - 1);
++    let done;
++    try {
++      done = shielded(fn);
++    } finally {
++      Region.__task(id);
++    }
++    const open = openShields.get(id) ?? { count: 0, waiters: [] };
++    open.count++;
++    openShields.set(id, open);
++    const close = () => {
++      if (--open.count > 0) return;
++      openShields.delete(id);
++      for (const resolve of open.waiters) resolve();
++    };
++    done.then(close, close);
++    return done;
++  };
++  // Resolves once the shields of task `id` have finished; null if none.
++  Object.defineProperty(spawn, '__shielded', {
++    value: (id) => {
++      const open = openShields.get(id);
++      return open ? new Promise((resolve) => open.waiters.push(resolve)) : null;
++    },
++  });
++
 +  // Structured concurrency, like std::thread::scope: runs `body(s)` and
 +  // settles once it and every task it started with s.spawn() have finished.
 +  // The first failure, of `body` or of a task, aborts the other tasks and
@@ -8770,7 +8827,7 @@ index 49121fe1..e8254e4f 100644
  namespace {
  int LineFromOffset(Local<debug::Script> script, int offset) {
    debug::Location location = script->GetSourceLocation(offset);
-@@ -6538,6 +9030,7 @@ void SourceGroup::JoinThread(const i::ParkedScope& parked) {
+@@ -6538,6 +9076,7 @@ void SourceGroup::JoinThread(const i::ParkedScope& parked) {
  void SerializationDataQueue::Enqueue(std::unique_ptr<SerializationData> data) {
    base::MutexGuard lock_guard(&mutex_);
    data_.push_back(std::move(data));
@@ -8778,7 +8835,7 @@ index 49121fe1..e8254e4f 100644
  }
  
  bool SerializationDataQueue::Dequeue(
-@@ -6547,6 +9040,7 @@ bool SerializationDataQueue::Dequeue(
+@@ -6547,6 +9086,7 @@ bool SerializationDataQueue::Dequeue(
    if (data_.empty()) return false;
    *out_data = std::move(data_[0]);
    data_.erase(data_.begin());
@@ -8786,7 +8843,7 @@ index 49121fe1..e8254e4f 100644
    return true;
  }
  
-@@ -6558,6 +9052,7 @@ bool SerializationDataQueue::IsEmpty() {
+@@ -6558,6 +9098,7 @@ bool SerializationDataQueue::IsEmpty() {
  void SerializationDataQueue::Clear() {
    base::MutexGuard lock_guard(&mutex_);
    data_.clear();
@@ -8794,7 +8851,7 @@ index 49121fe1..e8254e4f 100644
  }
  
  Worker::Worker(Isolate* parent_isolate, const char* script)
-@@ -6668,6 +9163,12 @@ std::unique_ptr<SerializationData> Worker::GetMessage(Isolate* requester) {
+@@ -6668,6 +9209,12 @@ std::unique_ptr<SerializationData> Worker::GetMessage(Isolate* requester) {
        out_queue_.Dequeue(&result);
        break;
      }
@@ -8807,7 +8864,7 @@ index 49121fe1..e8254e4f 100644
      out_semaphore_.ParkedWait(
          reinterpret_cast<i::Isolate*>(requester)->main_thread_local_isolate());
    }
-@@ -6705,6 +9206,8 @@ void Worker::Terminate() {
+@@ -6705,6 +9252,8 @@ void Worker::Terminate() {
    // returning to the event queue. Since we checked the state before, and we are
    // holding the {worker_mutex_}, it's safe to access the isolate.
    isolate_->TerminateExecution();
@@ -8816,7 +8873,7 @@ index 49121fe1..e8254e4f 100644
  }
  
  void Worker::EnterTerminatedState() {
-@@ -6791,6 +9294,7 @@ Worker* Worker::GetCurrentWorker() { return current_worker_; }
+@@ -6791,6 +9340,7 @@ Worker* Worker::GetCurrentWorker() { return current_worker_; }
  void Worker::ExecuteInThread() {
    Isolate::CreateParams create_params = GetDefaultIsolateCreateParams();
    isolate_ = Isolate::New(create_params);
@@ -8824,7 +8881,7 @@ index 49121fe1..e8254e4f 100644
  
    // TODO(mdanylo): can we omit dump disable here?
  #ifdef V8_DUMPLING
-@@ -6926,6 +9430,7 @@ void Worker::ExecuteInThread() {
+@@ -6926,6 +9476,7 @@ void Worker::ExecuteInThread() {
      platform::NotifyIsolateShutdown(g_default_platform, isolate_);
    }
  
@@ -8832,7 +8889,7 @@ index 49121fe1..e8254e4f 100644
    isolate_->Dispose();
    isolate_ = nullptr;
  
-@@ -7190,6 +9695,8 @@ bool Shell::SetOptions(int argc, char* argv[]) {
+@@ -7190,6 +9741,8 @@ bool Shell::SetOptions(int argc, char* argv[]) {
        options.expected_to_throw = true;
      } else if (FlagMatches("--no-fail", &argv[i])) {
        options.no_fail = true;
@@ -8841,7 +8898,7 @@ index 49121fe1..e8254e4f 100644
      } else if (FlagMatches("--dump-counters", &argv[i])) {
        options.dump_counters = true;
      } else if (FlagMatches("--dump-counters-nvp", &argv[i])) {
-@@ -7310,6 +9817,9 @@ bool Shell::SetOptions(int argc, char* argv[]) {
+@@ -7310,6 +9863,9 @@ bool Shell::SetOptions(int argc, char* argv[]) {
                                    argv, &i)) {
        // Value is expressed in MB.
        options.max_serializer_memory = atoi(flag_value) * i::MB;
@@ -8851,7 +8908,7 @@ index 49121fe1..e8254e4f 100644
      } else if (FlagMatches("--bundle", &argv[i])) {
        options.bundle = true;
  #ifdef V8_FUZZILLI
-@@ -7921,6 +10431,27 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7921,6 +10477,27 @@ class Serializer : public ValueSerializer::Delegate {
      return true;
    }
  
@@ -8879,7 +8936,7 @@ index 49121fe1..e8254e4f 100644
   private:
    Maybe<bool> PrepareTransfer(Local<Context> context, Local<Value> transfer) {
      if (transfer->IsArray()) {
-@@ -7929,6 +10460,22 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7929,6 +10506,22 @@ class Serializer : public ValueSerializer::Delegate {
        for (uint32_t i = 0; i < length; ++i) {
          Local<Value> element;
          if (transfer_array->Get(context, i).ToLocal(&element)) {
@@ -8902,7 +8959,7 @@ index 49121fe1..e8254e4f 100644
            if (!element->IsArrayBuffer()) {
              ThrowError(isolate_,
                         "Transfer array elements must be an ArrayBuffer");
-@@ -7961,7 +10508,64 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7961,7 +10554,64 @@ class Serializer : public ValueSerializer::Delegate {
      }
    }
  
@@ -8967,7 +9024,7 @@ index 49121fe1..e8254e4f 100644
      for (const auto& global_array_buffer : array_buffers_) {
        Local<ArrayBuffer> array_buffer =
            Local<ArrayBuffer>::New(isolate_, global_array_buffer);
-@@ -7987,6 +10591,7 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7987,6 +10637,7 @@ class Serializer : public ValueSerializer::Delegate {
    ValueSerializer serializer_;
    std::unique_ptr<SerializationData> data_;
    std::vector<Global<ArrayBuffer>> array_buffers_;
@@ -8975,7 +9032,7 @@ index 49121fe1..e8254e4f 100644
    std::vector<Global<SharedArrayBuffer>> shared_array_buffers_;
    std::vector<Global<WasmModuleObject>> wasm_modules_;
    std::vector<std::shared_ptr<v8::BackingStore>> backing_stores_;
-@@ -8013,6 +10618,21 @@ class Deserializer : public ValueDeserializer::Delegate {
+@@ -8013,6 +10664,21 @@ class Deserializer : public ValueDeserializer::Delegate {
        return MaybeLocal<Value>();
      }
  
@@ -8997,7 +9054,7 @@ index 49121fe1..e8254e4f 100644
      uint32_t index = 0;
      for (const auto& backing_store : data_->backing_stores()) {
        Local<ArrayBuffer> array_buffer =
-@@ -8049,6 +10669,21 @@ class Deserializer : public ValueDeserializer::Delegate {
+@@ -8049,6 +10715,21 @@ class Deserializer : public ValueDeserializer::Delegate {
      return nullptr;
    }
  
@@ -9019,7 +9076,7 @@ index 49121fe1..e8254e4f 100644
   private:
    Isolate* isolate_;
    ValueDeserializer deserializer_;
-@@ -8309,9 +10944,13 @@ int Shell::Main(int argc, char* argv[]) {
+@@ -8309,9 +10990,13 @@ int Shell::Main(int argc, char* argv[]) {
    // The platform is owned by wrapper platform despite the `std::move` below.
    START_IGNORE_LIFETIME_SAFETY_WARNINGS()
    g_default_platform = g_platform.get();
@@ -9033,7 +9090,7 @@ index 49121fe1..e8254e4f 100644
    }
    if (options.stress_delay_tasks) {
      int64_t random_seed = i::v8_flags.fuzzer_random_seed;
-@@ -8438,6 +11077,7 @@ int Shell::Main(int argc, char* argv[]) {
+@@ -8438,6 +11123,7 @@ int Shell::Main(int argc, char* argv[]) {
    }
  
    Isolate* isolate = Isolate::New(create_params);
@@ -12358,10 +12415,10 @@ index 00000000..844041ef
 +#endif  // V8_OBJECTS_JS_REGION_INL_H_
 diff --git a/src/objects/js-region.cc b/src/objects/js-region.cc
 new file mode 100644
-index 00000000..cd62e58c
+index 00000000..532dfc48
 --- /dev/null
 +++ b/src/objects/js-region.cc
-@@ -0,0 +1,3342 @@
+@@ -0,0 +1,3352 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -13542,7 +13599,11 @@ index 00000000..cd62e58c
 +  // The awaits of the task on pending promises, and the promises that its
 +  // suspended async functions and generators settle: an await of one of
 +  // those waits for another await of the task, which throws first.
++  // Code in spawn.shield() awaits with -(task + 1): it is not interrupted,
++  // and an await for it waits too.
++  const double shielded = -task - 1;
 +  std::vector<std::pair<Address, Address>> found;
++  int shielded_awaits = 0;
 +  std::unordered_set<Address> settled_by_task;
 +  {
 +    HeapObjectIterator iterator(isolate->heap());
@@ -13555,11 +13616,17 @@ index 00000000..cd62e58c
 +           next = Cast<PromiseReaction>(next)->next()) {
 +        Tagged<PromiseReaction> reaction = Cast<PromiseReaction>(next);
 +        Tagged<Object> data = reaction->continuation_preserved_embedder_data();
-+        if (!IsNumber(data) || Object::NumberValue(data) != task) continue;
++        if (!IsNumber(data)) continue;
++        double owner = Object::NumberValue(data);
++        if (owner != task && owner != shielded) continue;
 +        Tagged<JSGeneratorObject> generator =
 +            awaiting(reaction->fulfill_handler());
 +        if (generator.is_null()) continue;
-+        found.emplace_back(promise.ptr(), reaction.ptr());
++        if (owner == task) {
++          found.emplace_back(promise.ptr(), reaction.ptr());
++        } else {
++          shielded_awaits++;
++        }
 +        if (IsJSAsyncFunctionObject(generator)) {
 +          settled_by_task.insert(
 +              Cast<JSAsyncFunctionObject>(generator)->promise().ptr());
@@ -13601,7 +13668,7 @@ index 00000000..cd62e58c
 +    JSPromise::TriggerPromiseReactions(isolate, reaction, error,
 +                                       PromiseReaction::kReject);
 +  }
-+  return static_cast<int>(found.size());
++  return static_cast<int>(found.size()) + shielded_awaits;
 +#else
 +  return 0;
 +#endif  // V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA
@@ -15706,10 +15773,10 @@ index 00000000..cd62e58c
 +}  // namespace v8
 diff --git a/src/objects/js-region.h b/src/objects/js-region.h
 new file mode 100644
-index 00000000..aeaeadd0
+index 00000000..fc4af08e
 --- /dev/null
 +++ b/src/objects/js-region.h
-@@ -0,0 +1,538 @@
+@@ -0,0 +1,540 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -15813,8 +15880,10 @@ index 00000000..aeaeadd0
 +  // The awaits of `task` that wait for a promise that is still pending
 +  // resume now, throwing `error`, as if the promise had been rejected; the
 +  // promise no longer resumes them. An await for an async function of the
-+  // task that waits too is left to it. Gives how many awaits the task has:
-+  // with none, its code can never run again, unless it does not await.
++  // task that waits too is left to it, and so are awaits of its code in
++  // spawn.shield(), which awaits with -(task + 1). Gives how many awaits
++  // the task has: with none, its code can never run again, unless it does
++  // not await.
 +  static int InterruptTaskAwaits(Isolate* isolate, double task,
 +                                 DirectHandle<Object> error);
 +

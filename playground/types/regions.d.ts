@@ -260,6 +260,12 @@ declare namespace spawn {
   function idle(): Promise<void>;
   /** Whether the running task was aborted; false outside tasks. */
   function aborted(): boolean;
+  /** Runs `fn` as if the task were not aborted, like a shielded cancel scope
+   * in Trio: its awaits, channel and lock waits do not fail with the abort,
+   * and the tasks it spawns are not aborted with the task. The task ends
+   * only after its shields. In an aborted task, awaiting the shield throws
+   * the abort once `fn` has finished, or the error of `fn`. */
+  function shield<T>(fn: () => T | PromiseLike<T>): Promise<T>;
 }
 
 /** What a receive gives: the value, or `done: true` once the channel is
