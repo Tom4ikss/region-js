@@ -6279,7 +6279,7 @@ index 00000000..bd767012
 +
 +#endif  // V8_D8_D8_PORT_H_
 diff --git a/src/d8/d8.cc b/src/d8/d8.cc
-index 49121fe1..69e999f8 100644
+index 49121fe1..fde4d63b 100644
 --- a/src/d8/d8.cc
 +++ b/src/d8/d8.cc
 @@ -14,6 +14,7 @@
@@ -6600,8 +6600,11 @@ index 49121fe1..69e999f8 100644
 +                       FunctionTemplate::New(isolate, RegionInterrupt));
 +  region_template->Set(isolate, "__forgetAwaits",
 +                       FunctionTemplate::New(isolate, RegionForgetAwaits));
-+  region_template->Set(isolate, "__callerStack",
-+                       FunctionTemplate::New(isolate, RegionCallerStack));
++  // Without it spawn() does not look at its caller at all.
++  if (options.spawn_stack) {
++    region_template->Set(isolate, "__callerStack",
++                         FunctionTemplate::New(isolate, RegionCallerStack));
++  }
 +  region_template->Set(isolate, "__callerStackText",
 +                       FunctionTemplate::New(isolate, RegionCallerStackText));
 +  region_template->Set(isolate, "__reserve",
@@ -6958,15 +6961,12 @@ index 49121fe1..69e999f8 100644
 +}  // namespace
 +
 +// Region.__callerStack(): the id of the frames that called spawn(), for the
-+// stack of its task's error (see CallerStacks); -1 without region history.
++// stack of its task's error (see CallerStacks). Absent with --no-spawn-stack.
 +void Shell::RegionCallerStack(const v8::FunctionCallbackInfo<v8::Value>& info) {
 +  DCHECK(i::ValidateCallbackInfo(info));
-+  int id = -1;
-+  if (Shell::options.region_history) {
-+    id = CallerStacks::For(reinterpret_cast<i::Isolate*>(info.GetIsolate()))
-+             ->Find();
-+  }
-+  info.GetReturnValue().Set(id);
++  info.GetReturnValue().Set(
++      CallerStacks::For(reinterpret_cast<i::Isolate*>(info.GetIsolate()))
++          ->Find());
 +}
 +
 +// Region.__callerStackText(id): those frames as lines of a stack trace,
@@ -8114,7 +8114,7 @@ index 49121fe1..69e999f8 100644
  }
  
  Local<ObjectTemplate> Shell::CreateAsyncHookTemplate(Isolate* isolate) {
-@@ -5376,9 +6971,1179 @@ MaybeLocal<Context> Shell::CreateEvaluationContext(Isolate* isolate) {
+@@ -5376,9 +6971,1182 @@ MaybeLocal<Context> Shell::CreateEvaluationContext(Isolate* isolate) {
    }
  #endif  // V8_ENABLE_HARDWARE_WATCHPOINT_SUPPORT
  
@@ -8883,6 +8883,9 @@ index 49121fe1..69e999f8 100644
 +    return null;
 +  };
 +
++  // Where spawn() was called; undefined with --no-spawn-stack.
++  const callerStack = Region.__callerStack;
++
 +  const unreserve = (reserved) => {
 +    if (reserved) for (const token of reserved) token.release();
 +  };
@@ -8980,7 +8983,7 @@ index 49121fe1..69e999f8 100644
 +    }
 +    task.reserved = reserved;
 +    // Where spawn() was called, for the stack of the task's error.
-+    task.site = Region.__callerStack();
++    task.site = callerStack ? callerStack() : -1;
 +    const parent = Region.__task();
 +    if (parent !== undefined) {
 +      task.parent = parent;
@@ -9294,7 +9297,7 @@ index 49121fe1..69e999f8 100644
  namespace {
  int LineFromOffset(Local<debug::Script> script, int offset) {
    debug::Location location = script->GetSourceLocation(offset);
-@@ -6538,6 +9303,7 @@ void SourceGroup::JoinThread(const i::ParkedScope& parked) {
+@@ -6538,6 +9306,7 @@ void SourceGroup::JoinThread(const i::ParkedScope& parked) {
  void SerializationDataQueue::Enqueue(std::unique_ptr<SerializationData> data) {
    base::MutexGuard lock_guard(&mutex_);
    data_.push_back(std::move(data));
@@ -9302,7 +9305,7 @@ index 49121fe1..69e999f8 100644
  }
  
  bool SerializationDataQueue::Dequeue(
-@@ -6547,6 +9313,7 @@ bool SerializationDataQueue::Dequeue(
+@@ -6547,6 +9316,7 @@ bool SerializationDataQueue::Dequeue(
    if (data_.empty()) return false;
    *out_data = std::move(data_[0]);
    data_.erase(data_.begin());
@@ -9310,7 +9313,7 @@ index 49121fe1..69e999f8 100644
    return true;
  }
  
-@@ -6558,6 +9325,7 @@ bool SerializationDataQueue::IsEmpty() {
+@@ -6558,6 +9328,7 @@ bool SerializationDataQueue::IsEmpty() {
  void SerializationDataQueue::Clear() {
    base::MutexGuard lock_guard(&mutex_);
    data_.clear();
@@ -9318,7 +9321,7 @@ index 49121fe1..69e999f8 100644
  }
  
  Worker::Worker(Isolate* parent_isolate, const char* script)
-@@ -6668,6 +9436,12 @@ std::unique_ptr<SerializationData> Worker::GetMessage(Isolate* requester) {
+@@ -6668,6 +9439,12 @@ std::unique_ptr<SerializationData> Worker::GetMessage(Isolate* requester) {
        out_queue_.Dequeue(&result);
        break;
      }
@@ -9331,7 +9334,7 @@ index 49121fe1..69e999f8 100644
      out_semaphore_.ParkedWait(
          reinterpret_cast<i::Isolate*>(requester)->main_thread_local_isolate());
    }
-@@ -6698,6 +9472,10 @@ void Worker::Terminate() {
+@@ -6698,6 +9475,10 @@ void Worker::Terminate() {
    base::MutexGuard lock_guard(&worker_mutex_);
    auto expected = State::kRunning;
    if (!state_.compare_exchange_strong(expected, State::kTerminating)) return;
@@ -9342,7 +9345,7 @@ index 49121fe1..69e999f8 100644
    std::unique_ptr<v8::Task> task(
        new TerminateTask(task_manager_, shared_from_this()));
    task_runner_->PostTask(std::move(task));
-@@ -6791,6 +9569,7 @@ Worker* Worker::GetCurrentWorker() { return current_worker_; }
+@@ -6791,6 +9572,7 @@ Worker* Worker::GetCurrentWorker() { return current_worker_; }
  void Worker::ExecuteInThread() {
    Isolate::CreateParams create_params = GetDefaultIsolateCreateParams();
    isolate_ = Isolate::New(create_params);
@@ -9350,7 +9353,7 @@ index 49121fe1..69e999f8 100644
  
    // TODO(mdanylo): can we omit dump disable here?
  #ifdef V8_DUMPLING
-@@ -6926,6 +9705,7 @@ void Worker::ExecuteInThread() {
+@@ -6926,6 +9708,7 @@ void Worker::ExecuteInThread() {
      platform::NotifyIsolateShutdown(g_default_platform, isolate_);
    }
  
@@ -9358,16 +9361,18 @@ index 49121fe1..69e999f8 100644
    isolate_->Dispose();
    isolate_ = nullptr;
  
-@@ -7190,6 +9970,8 @@ bool Shell::SetOptions(int argc, char* argv[]) {
+@@ -7190,6 +9973,10 @@ bool Shell::SetOptions(int argc, char* argv[]) {
        options.expected_to_throw = true;
      } else if (FlagMatches("--no-fail", &argv[i])) {
        options.no_fail = true;
 +    } else if (FlagMatches("--no-region-history", &argv[i])) {
 +      options.region_history = false;
++    } else if (FlagMatches("--no-spawn-stack", &argv[i])) {
++      options.spawn_stack = false;
      } else if (FlagMatches("--dump-counters", &argv[i])) {
        options.dump_counters = true;
      } else if (FlagMatches("--dump-counters-nvp", &argv[i])) {
-@@ -7310,6 +10092,9 @@ bool Shell::SetOptions(int argc, char* argv[]) {
+@@ -7310,6 +10097,9 @@ bool Shell::SetOptions(int argc, char* argv[]) {
                                    argv, &i)) {
        // Value is expressed in MB.
        options.max_serializer_memory = atoi(flag_value) * i::MB;
@@ -9377,7 +9382,7 @@ index 49121fe1..69e999f8 100644
      } else if (FlagMatches("--bundle", &argv[i])) {
        options.bundle = true;
  #ifdef V8_FUZZILLI
-@@ -7921,6 +10706,27 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7921,6 +10711,27 @@ class Serializer : public ValueSerializer::Delegate {
      return true;
    }
  
@@ -9405,7 +9410,7 @@ index 49121fe1..69e999f8 100644
   private:
    Maybe<bool> PrepareTransfer(Local<Context> context, Local<Value> transfer) {
      if (transfer->IsArray()) {
-@@ -7929,6 +10735,22 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7929,6 +10740,22 @@ class Serializer : public ValueSerializer::Delegate {
        for (uint32_t i = 0; i < length; ++i) {
          Local<Value> element;
          if (transfer_array->Get(context, i).ToLocal(&element)) {
@@ -9428,7 +9433,7 @@ index 49121fe1..69e999f8 100644
            if (!element->IsArrayBuffer()) {
              ThrowError(isolate_,
                         "Transfer array elements must be an ArrayBuffer");
-@@ -7961,7 +10783,64 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7961,7 +10788,64 @@ class Serializer : public ValueSerializer::Delegate {
      }
    }
  
@@ -9493,7 +9498,7 @@ index 49121fe1..69e999f8 100644
      for (const auto& global_array_buffer : array_buffers_) {
        Local<ArrayBuffer> array_buffer =
            Local<ArrayBuffer>::New(isolate_, global_array_buffer);
-@@ -7987,6 +10866,7 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7987,6 +10871,7 @@ class Serializer : public ValueSerializer::Delegate {
    ValueSerializer serializer_;
    std::unique_ptr<SerializationData> data_;
    std::vector<Global<ArrayBuffer>> array_buffers_;
@@ -9501,7 +9506,7 @@ index 49121fe1..69e999f8 100644
    std::vector<Global<SharedArrayBuffer>> shared_array_buffers_;
    std::vector<Global<WasmModuleObject>> wasm_modules_;
    std::vector<std::shared_ptr<v8::BackingStore>> backing_stores_;
-@@ -8013,6 +10893,21 @@ class Deserializer : public ValueDeserializer::Delegate {
+@@ -8013,6 +10898,21 @@ class Deserializer : public ValueDeserializer::Delegate {
        return MaybeLocal<Value>();
      }
  
@@ -9523,7 +9528,7 @@ index 49121fe1..69e999f8 100644
      uint32_t index = 0;
      for (const auto& backing_store : data_->backing_stores()) {
        Local<ArrayBuffer> array_buffer =
-@@ -8049,6 +10944,21 @@ class Deserializer : public ValueDeserializer::Delegate {
+@@ -8049,6 +10949,21 @@ class Deserializer : public ValueDeserializer::Delegate {
      return nullptr;
    }
  
@@ -9545,7 +9550,7 @@ index 49121fe1..69e999f8 100644
   private:
    Isolate* isolate_;
    ValueDeserializer deserializer_;
-@@ -8309,9 +11219,13 @@ int Shell::Main(int argc, char* argv[]) {
+@@ -8309,9 +11224,13 @@ int Shell::Main(int argc, char* argv[]) {
    // The platform is owned by wrapper platform despite the `std::move` below.
    START_IGNORE_LIFETIME_SAFETY_WARNINGS()
    g_default_platform = g_platform.get();
@@ -9559,7 +9564,7 @@ index 49121fe1..69e999f8 100644
    }
    if (options.stress_delay_tasks) {
      int64_t random_seed = i::v8_flags.fuzzer_random_seed;
-@@ -8438,6 +11352,7 @@ int Shell::Main(int argc, char* argv[]) {
+@@ -8438,6 +11357,7 @@ int Shell::Main(int argc, char* argv[]) {
    }
  
    Isolate* isolate = Isolate::New(create_params);
@@ -9568,7 +9573,7 @@ index 49121fe1..69e999f8 100644
  #ifdef V8_FUZZILLI
  
 diff --git a/src/d8/d8.h b/src/d8/d8.h
-index 0c7ad50a..a8560481 100644
+index 0c7ad50a..57d23972 100644
 --- a/src/d8/d8.h
 +++ b/src/d8/d8.h
 @@ -8,6 +8,7 @@
@@ -9753,17 +9758,19 @@ index 0c7ad50a..a8560481 100644
    // See Shell::GetOrCreateLeafInterfaceTypeTemplate.
    Global<FunctionTemplate> leaf_interface_type_template_;
    // The template of the global object of all contexts that d8 creates in this
-@@ -574,6 +677,9 @@ class ShellOptions {
+@@ -574,6 +677,11 @@ class ShellOptions {
    bool test_shell = false;
    DisallowReassignment<bool> expected_to_throw = {"throws", false};
    DisallowReassignment<bool> no_fail = {"no-fail", false};
 +  // Remember where regions were sent, frozen, freed or locked, for the
 +  // texts of OwnershipError.
 +  DisallowReassignment<bool> region_history = {"region-history", true};
++  // Add where spawn() was called to the stack of a task's error.
++  DisallowReassignment<bool> spawn_stack = {"spawn-stack", true};
    DisallowReassignment<bool> dump_counters = {"dump-counters", false};
    DisallowReassignment<bool> dump_counters_nvp = {"dump-counters-nvp", false};
    DisallowReassignment<bool> dump_system_memory_stats = {
-@@ -641,6 +747,9 @@ class ShellOptions {
+@@ -641,6 +749,9 @@ class ShellOptions {
    DisallowReassignment<bool> expose_fast_api = {"expose-fast-api", false};
    DisallowReassignment<size_t> max_serializer_memory = {"max-serializer-memory",
                                                          1 * i::MB};
@@ -9773,7 +9780,7 @@ index 0c7ad50a..a8560481 100644
    DisallowReassignment<bool> bundle = {"bundle", false};
  };
  
-@@ -713,6 +822,21 @@ class Shell : public i::AllStatic {
+@@ -713,6 +824,21 @@ class Shell : public i::AllStatic {
  
    static bool HandleUnhandledPromiseRejections(Isolate* isolate);
  
@@ -9795,7 +9802,7 @@ index 0c7ad50a..a8560481 100644
    static std::unique_ptr<SerializationData> SerializeValue(
        Isolate* isolate, Local<Value> value, Local<Value> transfer);
    static MaybeLocal<Value> DeserializeValue(
-@@ -954,6 +1078,10 @@ class Shell : public i::AllStatic {
+@@ -954,6 +1080,10 @@ class Shell : public i::AllStatic {
  
    static void PromiseRejectCallback(v8::PromiseRejectMessage reject_message);
  
@@ -9806,7 +9813,7 @@ index 0c7ad50a..a8560481 100644
   private:
    static inline int DeserializationRunCount() {
      return options.stress_deserialize ? 1000 : 1;
-@@ -1007,6 +1135,52 @@ class Shell : public i::AllStatic {
+@@ -1007,6 +1137,52 @@ class Shell : public i::AllStatic {
    static Local<ObjectTemplate> GetOrCreateGlobalTemplate(Isolate* isolate);
    static Local<ObjectTemplate> CreateOSTemplate(Isolate* isolate);
    static Local<FunctionTemplate> CreateWorkerTemplate(Isolate* isolate);
