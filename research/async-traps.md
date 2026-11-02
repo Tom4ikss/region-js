@@ -483,3 +483,24 @@ if (region.frozen) {
   подсказкой про `thawWhenFree()`. Билет, который этот же поток держит через `await`,
   по-прежнему задерживает перестройку на всё ожидание (200 мс в `borrow-await-wait`): это
   слой (d), правило ESLint. Если сдать билет некому, ожидание падает с `DeadlockError`.
+
+Пункт 5 списка выше: правила ESLint с потоком управления через `await`
+(`playground/eslint-plugin-regions/`, тесты `tests/flow-rules.test.mjs`):
+- п. 4: `no-write-to-spawn-copy` — запись в захваченный или переданный задаче обычный объект
+  или массив (`stats.batches++`, `report.done.push(i)` в `fanout.js`, `plain-back`) и
+  присваивание захваченной переменной вызывающего.
+- п. 6: `no-use-after-send` — первое обращение к региону после `send` в той же функции
+  (`pipeline.js`, `use-after-send`).
+- п. 11: `no-await-holding-guard` — `await` при живом guard `RwLock` или билете `borrow()`
+  (`server.js`, `lock-await` и `half-write`; `cache.js`, `rwlock-await` и `borrow-await`),
+  предупреждение.
+- п. 12: `no-guard-value-escape` — ссылка из `guard.value`, которой пользуются как объектом
+  после конца guard (`cache.js`, `rwlock`), и `return guard.value`.
+- п. 19: `no-stale-region-check` — `await` между проверкой `frozen`, `sealed`, `readers` или
+  `poisoned` и использованием региона без повторной проверки (`server.js`,
+  `check-then-use`), предупреждение.
+
+Анализ по позициям в тексте одной функции, без типов: регионом считается переменная из
+`что-то.run(...)`, обычными данными — литерал `{}` или `[]`. Ложных срабатываний на
+`playground/examples/` нет, в `tests/` и `docs/examples/` правила отмечают только места,
+где ошибка сделана нарочно.

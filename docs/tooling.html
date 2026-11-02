@@ -47,7 +47,7 @@
 <p class="lead">Большую часть ошибок с регионами и <code>spawn</code> d8 покажет только при запуске. Часть из них можно увидеть раньше, прямо в редакторе. Для этого есть песочница <code>playground/</code>: типы, правила Biome и небольшой плагин ESLint. На этой странице — что ловит каждый из них и как их подключить.</p>
 
 <h2 id="layers"><a class="anchor" href="#layers" aria-hidden="true" tabindex="-1"></a>Кто что ловит</h2>
-<p>Проверок три слоя, и у каждого свои возможности. Типы знают, что можно положить в регион и какие у него методы. Biome находит шаблоны в коде, например <code>class</code> внутри колбэка <code>spawn</code>. ESLint умеет следить за порядком выполнения: что задача запущена, а регион трогают до её конца. Остальное видно только при запуске.</p>
+<p>Проверок три слоя, и у каждого свои возможности. Типы знают, что можно положить в регион и какие у него методы. Biome находит шаблоны в коде, например <code>class</code> внутри колбэка <code>spawn</code>. ESLint умеет следить за порядком выполнения: что задача запущена, а регион трогают до её конца, или что между проверкой и использованием стоит <code>await</code>. Остальное видно только при запуске.</p>
 <div class="table-wrap">
 <table>
 <thead><tr><th>Ошибка</th><th>Чем ловится</th></tr></thead>
@@ -59,6 +59,11 @@
 <tr><td><code>spawn(...).join()</code></td><td>Biome, предупреждение</td></tr>
 <tr><td>Ручку задачи никто не ждёт, в том числе в колбэке <code>map</code></td><td>ESLint, <a href="#no-floating-spawn"><code>no-floating-spawn</code></a>, предупреждение</td></tr>
 <tr><td>Захваченный регион трогают, пока задача идёт; задачи в цикле хотят один регион; задача пишет в замороженный регион</td><td>ESLint, <a href="#no-region-use-while-spawned"><code>no-region-use-while-spawned</code></a></td></tr>
+<tr><td>Регион трогают после <code>send</code> в канал</td><td>ESLint, <a href="#no-use-after-send"><code>no-use-after-send</code></a></td></tr>
+<tr><td>Задача меняет обычный объект или переменную вызывающего, а меняется её копия</td><td>ESLint, <a href="#no-write-to-spawn-copy"><code>no-write-to-spawn-copy</code></a></td></tr>
+<tr><td><code>await</code>, пока держат guard <code>RwLock</code> или билет <code>borrow()</code></td><td>ESLint, <a href="#no-await-holding-guard"><code>no-await-holding-guard</code></a>, предупреждение</td></tr>
+<tr><td>Ссылка из <code>guard.value</code> живёт дольше guard</td><td>ESLint, <a href="#no-guard-value-escape"><code>no-guard-value-escape</code></a></td></tr>
+<tr><td><code>if (region.frozen)</code>, потом <code>await</code>, потом регион</td><td>ESLint, <a href="#no-stale-region-check"><code>no-stale-region-check</code></a>, предупреждение</td></tr>
 <tr><td><code>borrowWhile(async ...)</code>, промис которого никто не ждёт</td><td>ESLint, <a href="#no-floating-borrow-while"><code>no-floating-borrow-while</code></a></td></tr>
 <tr><td>Захваченная переменная с <code>Map</code> или функцией внутри, захваченный <code>this</code> с методами, захват до инициализации, чужой регион, голый <code>borrow()</code> в асинхронной задаче, массив поверх <code>SharedArrayBuffer</code></td><td>только при запуске</td></tr>
 </tbody>
@@ -112,7 +117,7 @@ error TS2339: Property 'total' does not exist on type '{ count: number; }'.</pre
 <p>Правило про <code>join()</code> срабатывает только на цепочку <code>spawn(...).join()</code> и не знает, в каком потоке код. В воркере или в коротком скрипте d8 <code>join()</code> уместен, и предупреждение можно игнорировать. Почему в главном потоке лучше <code>await</code>, показано в <a href="practices.html#await">практике 7</a>.</p>
 
 <h2 id="eslint"><a class="anchor" href="#eslint" aria-hidden="true" tabindex="-1"></a>ESLint</h2>
-<p>Плагин <code>eslint-plugin-regions/</code> подключён в <code>eslint.config.mjs</code> набором <code>recommended</code>. В нём три правила. ESLint видит области видимости переменных и порядок выражений, поэтому может сказать «регион уехал в задачу на строке 3, а на строке 4 его читают».</p>
+<p>Плагин <code>eslint-plugin-regions/</code> подключён в <code>eslint.config.mjs</code> набором <code>recommended</code>. В нём восемь правил. ESLint видит области видимости переменных и порядок выражений, поэтому может сказать «регион уехал в задачу на строке 3, а на строке 4 его читают».</p>
 
 <h3 id="no-floating-spawn"><a class="anchor" href="#no-floating-spawn" aria-hidden="true" tabindex="-1"></a><code>regions/no-floating-spawn</code></h3>
 <p>Ручку задачи никто не ждёт: ни <code>await</code>, ни <code>join()</code>, ни возврата из функции. Результат и ошибка такой задачи теряются (ошибку d8 всё же покажет, см. <a href="spawn.html#unhandled">«Ошибки не теряются»</a>). Это предупреждение, а не ошибка.</p>
@@ -152,6 +157,101 @@ error  This spawn() runs repeatedly and every task wants to move 'counter': only
 error  'config' is in a frozen region: tasks can read it but writing throws OwnershipError. Thaw it first, or let one task own it instead of freezing</pre>
 <p>Правило понимает, что задача закончилась, если её ждут через <code>await</code> (в том числе в <code>Promise.all</code>) или <code>join()</code>, и что замороженный регион не уезжает, а становится общим. Заморозку оно отслеживает по вызовам <code>freeze()</code> и <code>thaw()</code> до <code>spawn</code>.</p>
 <p>Анализ простой, и у него есть границы. Регионом правило считает переменную, созданную через <code>что-то.run(...)</code>. Объекты региона, полученные иначе (результат задачи, поле другого объекта, литерал <code>#{}</code>), оно не отслеживает. С опцией <code>checkAllCaptures</code> оно проверяет все захваченные переменные, но тогда будет ругаться и на обычные данные, которые просто копируются. Обращения из колбэков, которые выполнятся позже (таймеры, обработчики), правило не отмечает: оно не знает, закончится ли задача к тому времени.</p>
+
+<h3 id="no-use-after-send"><a class="anchor" href="#no-use-after-send" aria-hidden="true" tabindex="-1"></a><code>regions/no-use-after-send</code></h3>
+<p><code>send</code> отдаёт регион получателю, как <code>spawn</code> отдаёт его задаче, только назад он не возвращается. Следующее обращение отправителя падает с <code>OwnershipError</code>, и правило показывает его сразу.</p>
+<div class="versus">
+<figure class="snippet bad"><div class="snippet-head"><span class="mark" aria-hidden="true"></span>Плохо</div><pre class="code"><code><span class="tok-keyword">const</span> batch = <span class="tok-keyword">new</span> <span class="tok-api">Region</span>().<span class="tok-api">run</span>(() =&gt; ({ rows: [], total: <span class="tok-number">0</span> }));
+<span class="tok-keyword">await</span> out.<span class="tok-api">send</span>(batch);
+<span class="tok-fn">print</span>(<span class="tok-string">'sent'</span>, batch.rows.length);</code></pre></figure>
+</div>
+<pre class="shell wrap">error  'batch' was sent on line 2, and its region moved to the receiver: using it here throws OwnershipError. Use it before sending, or freeze the region to share it read-only</pre>
+<p>Регион здесь тот же, что у правила выше: переменная из <code>что-то.run(...)</code>. Замороженный регион канал не отдаёт, а делит, и правило это знает. Отмечается только первое обращение после <code>send</code> в той же функции. Обращение в другой ветке <code>if</code> или после нового присваивания переменной не считается. Отправку в цикле переменной, объявленной снаружи цикла, правило не видит: второй круг падает уже в d8.</p>
+
+<h3 id="no-write-to-spawn-copy"><a class="anchor" href="#no-write-to-spawn-copy" aria-hidden="true" tabindex="-1"></a><code>regions/no-write-to-spawn-copy</code></h3>
+<p>Обычные объекты и массивы, захваченные задачей или переданные аргументом, копируются в воркер. Задача меняет копию, вызывающий своих изменений не видит, и ошибки нет: просто неверный результат. То же с присваиванием захваченной переменной.</p>
+<div class="versus">
+<figure class="snippet bad"><div class="snippet-head"><span class="mark" aria-hidden="true"></span>Плохо</div><pre class="code"><code><span class="tok-keyword">const</span> stats = { batches: <span class="tok-number">0</span> };
+<span class="tok-keyword">await</span> Promise.<span class="tok-fn">all</span>([<span class="tok-number">0</span>, <span class="tok-number">1</span>, <span class="tok-number">2</span>].<span class="tok-fn">map</span>(() =&gt; <span class="tok-api">spawn</span>((stats) =&gt; { stats.batches++; }, stats)));
+<span class="tok-fn">print</span>(stats.batches); <span class="tok-comment">// 0</span>
+
+<span class="tok-keyword">let</span> done = <span class="tok-number">0</span>;
+<span class="tok-keyword">await</span> <span class="tok-api">spawn</span>(() =&gt; { done++; });</code></pre></figure>
+<figure class="snippet good"><div class="snippet-head"><span class="mark" aria-hidden="true"></span>Хорошо</div><pre class="code"><code><span class="tok-keyword">const</span> stats = <span class="tok-keyword">new</span> <span class="tok-api">Region</span>().<span class="tok-api">run</span>(() =&gt; ({ batches: <span class="tok-number">0</span> }));
+<span class="tok-keyword">for</span> (<span class="tok-keyword">let</span> i = <span class="tok-number">0</span>; i &lt; <span class="tok-number">3</span>; i++) <span class="tok-keyword">await</span> <span class="tok-api">spawn</span>((stats) =&gt; { stats.batches++; }, stats);
+
+<span class="tok-keyword">const</span> done = <span class="tok-keyword">await</span> <span class="tok-api">spawn</span>(() =&gt; <span class="tok-number">1</span>);</code></pre></figure>
+</div>
+<pre class="shell wrap">error  'stats' is plain data, so the spawn() task works on its own copy: this change never reaches the caller. Return the result from the task, or create the object in a region (region.run(() =&gt; ...)) so that the task gets the object itself
+error  'done' is a variable of the caller, and the spawn() task has its own copy of it: this assignment never reaches the caller. Return the value from the task instead</pre>
+<p>Обычными данными правило считает <code>const</code> или ни разу не переприсвоенный <code>let</code> с литералом <code>{}</code> или <code>[]</code>, вне функций с <code>'use region'</code>. Запись — присваивание поля, <code>++</code>, <code>delete</code>, <code>push</code> и другие меняющие методы массивов, <code>Object.assign</code>. Если задача возвращает объект (<code>return stats</code>), правило молчит: копию меняют, чтобы вернуть. Параметр функции вызывающего правило не проверяет: откуда он, неизвестно.</p>
+
+<h3 id="no-await-holding-guard"><a class="anchor" href="#no-await-holding-guard" aria-hidden="true" tabindex="-1"></a><code>regions/no-await-holding-guard</code></h3>
+<p>Guard <code>RwLock</code>, который держат через <code>await</code>, держат всё время ожидания: писатели, а для write-лока и все остальные, стоят в очереди. В <code>traps/server.js</code> так 20 запросов из 20 упираются в таймаут. С билетом <code>borrow()</code> то же самое: пока идёт ожидание, <code>thaw()</code> падает, а <code>thawWhenFree()</code> ждёт. Это как <code>await_holding_lock</code> в clippy.</p>
+<div class="versus">
+<figure class="snippet bad"><div class="snippet-head"><span class="mark" aria-hidden="true"></span>Плохо</div><pre class="code"><code><span class="tok-keyword">async</span> <span class="tok-keyword">function</span> <span class="tok-fn">handle</span>(req, state) {
+  <span class="tok-keyword">using</span> g = <span class="tok-keyword">await</span> state.<span class="tok-fn">write</span>();
+  g.value.inFlight++;
+  <span class="tok-keyword">await</span> <span class="tok-fn">sleep</span>(req.cost); <span class="tok-comment">// работа под локом</span>
+  g.value.served++;
+}</code></pre></figure>
+<figure class="snippet good"><div class="snippet-head"><span class="mark" aria-hidden="true"></span>Хорошо</div><pre class="code"><code><span class="tok-keyword">async</span> <span class="tok-keyword">function</span> <span class="tok-fn">handle</span>(req, state) {
+  { <span class="tok-keyword">using</span> g = <span class="tok-keyword">await</span> state.<span class="tok-fn">write</span>(); g.value.inFlight++; }
+  <span class="tok-keyword">await</span> <span class="tok-fn">sleep</span>(req.cost);
+  <span class="tok-keyword">using</span> g = <span class="tok-keyword">await</span> state.<span class="tok-fn">write</span>();
+  g.value.inFlight--;
+  g.value.served++;
+}</code></pre></figure>
+</div>
+<pre class="shell wrap">warning  'g' holds the lock across this await: every task that wants the lock waits until the awaited work is done. Do the waiting before taking the lock or after releasing it (end the block of the guard or call release())
+warning  'b' keeps the region borrowed across this await: until the awaited work is done thaw() fails and thawWhenFree() waits. Read what you need, release the borrow, then wait</pre>
+<p>Guard, объявленный через <code>using</code>, правило считает живым до конца блока, а обычную переменную — до её <code>release()</code>. Guard без <code>using</code> и без <code>release()</code> оно не отслеживает. Отмечается первое <code>await</code> под guard, в том числе <code>for await</code>, но не <code>await</code> в колбэках, которые выполнятся позже. Иногда держать лок через <code>await</code> нужно, например чтобы два шага шли без чужих записей между ними, поэтому это предупреждение.</p>
+
+<h3 id="no-guard-value-escape"><a class="anchor" href="#no-guard-value-escape" aria-hidden="true" tabindex="-1"></a><code>regions/no-guard-value-escape</code></h3>
+<p>Объекты <code>RwLock</code> доступны, только пока держат guard. Ссылка, вынесенная из <code>guard.value</code> за блок, после его конца падает с <code>OwnershipError: region N is in an RwLock</code>. Ошибка понятная, но приходит поздно, обычно после <code>await</code>.</p>
+<div class="versus">
+<figure class="snippet bad"><div class="snippet-head"><span class="mark" aria-hidden="true"></span>Плохо</div><pre class="code"><code><span class="tok-keyword">async</span> <span class="tok-keyword">function</span> <span class="tok-fn">price</span>(lock) {
+  <span class="tok-keyword">let</span> prices;
+  {
+    <span class="tok-keyword">using</span> r = <span class="tok-keyword">await</span> lock.<span class="tok-fn">read</span>();
+    prices = r.value.prices;
+  }
+  <span class="tok-keyword">await</span> <span class="tok-fn">sleep</span>(<span class="tok-number">5</span>);
+  <span class="tok-keyword">return</span> prices.tea;
+}</code></pre></figure>
+<figure class="snippet good"><div class="snippet-head"><span class="mark" aria-hidden="true"></span>Хорошо</div><pre class="code"><code><span class="tok-keyword">async</span> <span class="tok-keyword">function</span> <span class="tok-fn">price</span>(lock) {
+  <span class="tok-keyword">let</span> tea;
+  {
+    <span class="tok-keyword">using</span> r = <span class="tok-keyword">await</span> lock.<span class="tok-fn">read</span>();
+    tea = r.value.prices.tea;
+  }
+  <span class="tok-keyword">await</span> <span class="tok-fn">sleep</span>(<span class="tok-number">5</span>);
+  <span class="tok-keyword">return</span> tea;
+}</code></pre></figure>
+</div>
+<pre class="shell wrap">error  'prices' was taken from 'r.value' on line 5, and the guard is released before this use: it throws OwnershipError. Copy the data you need while the guard is held, or do this work under the guard</pre>
+<p>Без типов правило не знает, объект в переменной или число, поэтому смотрит, как её используют после guard. Обращение к полю, вызов метода, <code>for...of</code> и spread — это объект, и правило его отметит. Число или строку можно спокойно выносить, как <code>tea</code> выше. Отмечается и <code>return r.value</code>: guard отпускается на выходе из функции, и вызывающий получает объект, которым нельзя пользоваться.</p>
+
+<h3 id="no-stale-region-check"><a class="anchor" href="#no-stale-region-check" aria-hidden="true" tabindex="-1"></a><code>regions/no-stale-region-check</code></h3>
+<p>Пока <code>await</code> ждёт, работают другие задачи и другой код этого потока. За это время регион могут разморозить, изменить и заморозить снова. Проверка <code>region.frozen</code> до <code>await</code> после него уже ничего не говорит, но ошибки не будет: код просто прочитает другие данные.</p>
+<div class="versus">
+<figure class="snippet bad"><div class="snippet-head"><span class="mark" aria-hidden="true"></span>Плохо</div><pre class="code"><code><span class="tok-keyword">const</span> reader = <span class="tok-keyword">async</span> () =&gt; {
+  <span class="tok-keyword">if</span> (region.<span class="tok-api">frozen</span>) {
+    <span class="tok-keyword">await</span> <span class="tok-fn">sleep</span>(<span class="tok-number">20</span>);
+    <span class="tok-keyword">using</span> b = region.<span class="tok-api">borrow</span>();
+    <span class="tok-keyword">return</span> cfg.limit; <span class="tok-comment">// уже 20, хотя при проверке было 10</span>
+  }
+};</code></pre></figure>
+<figure class="snippet good"><div class="snippet-head"><span class="mark" aria-hidden="true"></span>Хорошо</div><pre class="code"><code><span class="tok-keyword">const</span> reader = <span class="tok-keyword">async</span> () =&gt; {
+  <span class="tok-keyword">await</span> <span class="tok-fn">sleep</span>(<span class="tok-number">20</span>);
+  <span class="tok-keyword">if</span> (region.<span class="tok-api">frozen</span>) {
+    <span class="tok-keyword">using</span> b = region.<span class="tok-api">borrow</span>();
+    <span class="tok-keyword">return</span> cfg.limit;
+  }
+};</code></pre></figure>
+</div>
+<pre class="shell wrap">warning  'region.frozen' was checked on line 2, but this await lets other code run first: the region can be thawed, changed or frozen again, a lock poisoned or cleared, before the code below uses it. Check again after the await</pre>
+<p>Правило смотрит на <code>if</code>, в условии которого есть <code>frozen</code>, <code>frozenHere</code>, <code>sealed</code>, <code>readers</code> или <code>poisoned</code>, у переменной или у <code>Region.of(x)</code>. Оно отмечает первое <code>await</code> в ветке, если после него используют ту же переменную или объект, созданный в ней через <code>run</code>. Повторная проверка после <code>await</code> снимает предупреждение.</p>
 
 <h3 id="no-floating-borrow-while"><a class="anchor" href="#no-floating-borrow-while" aria-hidden="true" tabindex="-1"></a><code>regions/no-floating-borrow-while</code></h3>
 <p><code>borrowWhile</code> с асинхронной функцией держит билет, пока не выполнится её промис. Если этот промис не вернуть из задачи и не дождаться, задача закончится раньше, и билет сдадут посреди работы (<a href="spawn.html#borrow">подробнее</a>).</p>
@@ -199,6 +299,11 @@ error  'config' is in a frozen region: tasks can read it but writing throws Owne
 <li class="h2"><a href="#eslint">ESLint</a></li>
 <li class="h3"><a href="#no-floating-spawn">regions/no-floating-spawn</a></li>
 <li class="h3"><a href="#no-region-use-while-spawned">regions/no-region-use-while-spawned</a></li>
+<li class="h3"><a href="#no-use-after-send">regions/no-use-after-send</a></li>
+<li class="h3"><a href="#no-write-to-spawn-copy">regions/no-write-to-spawn-copy</a></li>
+<li class="h3"><a href="#no-await-holding-guard">regions/no-await-holding-guard</a></li>
+<li class="h3"><a href="#no-guard-value-escape">regions/no-guard-value-escape</a></li>
+<li class="h3"><a href="#no-stale-region-check">regions/no-stale-region-check</a></li>
 <li class="h3"><a href="#no-floating-borrow-while">regions/no-floating-borrow-while</a></li>
 <li class="h2"><a href="#literals">Литералы #{} в редакторе</a></li>
 <li class="h2"><a href="#runtime">Что видно только при запуске</a></li>

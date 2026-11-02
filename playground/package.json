@@ -5,7 +5,7 @@
     "typecheck": "tsc -p jsconfig.json",
     "lint": "biome lint",
     "lint:regions": "eslint examples",
-    "test:rules": "node eslint-plugin-regions/tests/no-region-use-while-spawned.test.mjs"
+    "test:rules": "node eslint-plugin-regions/tests/no-region-use-while-spawned.test.mjs && node eslint-plugin-regions/tests/flow-rules.test.mjs"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.6.2",

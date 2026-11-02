@@ -2,48 +2,13 @@
 // comes back when the task finishes. Touching it in between throws
 // OwnershipError at run time; this rule reports it while you type.
 
-const isFunction = (node) =>
-  node.type === 'ArrowFunctionExpression' || node.type === 'FunctionExpression';
-
-// spawn(), and s.spawn() of spawn.scope() or set.spawn() of JoinSet.
-const isSpawnCall = (node) =>
-  node.type === 'CallExpression' &&
-  ((node.callee.type === 'Identifier' && node.callee.name === 'spawn') ||
-    (node.callee.type === 'MemberExpression' &&
-      !node.callee.computed &&
-      node.callee.object.type === 'Identifier' &&
-      node.callee.property.name === 'spawn'));
+import {
+  findVariable, isFrozenAt as isFrozenAmong, isFunction, isSpawnCall, isWriteThrough, methodCallOn, regionSource,
+} from './util.mjs';
 
 const isStatementOrFunction = (node) =>
   node.type.endsWith('Statement') || node.type.endsWith('Declaration') || isFunction(node) ||
   node.type === 'Program';
-
-const methodCallOn = (call, name) =>
-  call.type === 'CallExpression' &&
-  call.callee.type === 'MemberExpression' &&
-  !call.callee.computed &&
-  call.callee.property.name === name;
-
-// Whether `identifier` is the root of a write: `x.a = 1`, `x.a.b++`, `delete x[k]`.
-function isWriteThrough(identifier) {
-  let node = identifier;
-  while (node.parent.type === 'MemberExpression' && node.parent.object === node) node = node.parent;
-  if (node === identifier) return false;
-  const parent = node.parent;
-  return (
-    (parent.type === 'AssignmentExpression' && parent.left === node) ||
-    (parent.type === 'UpdateExpression' && parent.argument === node) ||
-    (parent.type === 'UnaryExpression' && parent.operator === 'delete' && parent.argument === node)
-  );
-}
-
-function findVariable(scope, name) {
-  for (let current = scope; current; current = current.upper) {
-    const variable = current.set.get(name);
-    if (variable) return variable;
-  }
-  return null;
-}
 
 /** @type {import('eslint').Rule.RuleModule} */
 export default {
@@ -82,35 +47,7 @@ export default {
     const spawnCalls = [];
     const freezeCalls = [];
 
-    // The expression a variable's region was created from: `x` in `const v = x.run(...)`.
-    function regionSource(variable) {
-      for (const def of variable.defs) {
-        let init = def.type === 'Variable' ? def.node.init : null;
-        if (init?.type === 'AwaitExpression') init = init.argument;
-        if (init && methodCallOn(init, 'run')) return init.callee.object;
-      }
-      return null;
-    }
-
-    // Whether the region of `variable` is frozen at `position`, judging by the
-    // last freeze()/thaw() before it on `region` or `Region.of(variable)`.
-    function isFrozenAt(variable, region, position) {
-      let frozen = false;
-      for (const { node, frozen: freezes } of freezeCalls) {
-        if (node.range[0] > position) break;
-        const target = node.callee.object;
-        const onRegion =
-          region?.type === 'Identifier' && target.type === 'Identifier' && target.name === region.name;
-        const onRegionOf =
-          methodCallOn(target, 'of') &&
-          target.callee.object.type === 'Identifier' &&
-          target.callee.object.name === 'Region' &&
-          target.arguments[0]?.type === 'Identifier' &&
-          target.arguments[0].name === variable.name;
-        if (onRegion || onRegionOf) frozen = freezes;
-      }
-      return frozen;
-    }
+    const isFrozenAt = (variable, region, position) => isFrozenAmong(freezeCalls, variable, region, position);
 
     function capturedVariables(call) {
       const captured = new Set();

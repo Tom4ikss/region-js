@@ -5,7 +5,7 @@
 - **Автокомплит и ошибки типов** — встроенный TypeScript читает `types/regions.d.ts`
   через `jsconfig.json`, ничего ставить не нужно.
 - **Правила Biome и ESLint** — поставь расширения Biome и ESLint (VSCode предложит их сам)
-  и выполни `npm install`. Правила Biome лежат в `rules/*.grit`, правило ESLint — в
+  и выполни `npm install`. Правила Biome лежат в `rules/*.grit`, правила ESLint — в
   `eslint-plugin-regions/`: Biome не умеет проверять порядок выполнения, ESLint умеет.
 - **Запуск** — Cmd+Shift+B запускает открытый файл через d8 из настройки
   `regions.d8Path` в `.vscode/settings.json`.
@@ -18,8 +18,8 @@
 ```sh
 npm run typecheck   # ошибки типов
 npm run lint          # правила Biome
-npm run lint:regions  # правило ESLint про регионы в задачах
-npm run test:rules    # тесты правила ESLint
+npm run lint:regions  # правила ESLint про регионы, задачи и локи
+npm run test:rules    # тесты правил ESLint
 ```
 
 `experimental/` — файлы с литералами `#{}`. В `npm run typecheck` они не входят: `tsc` из
@@ -44,6 +44,11 @@ npm run test:rules    # тесты правила ESLint
 | `spawn(...)` без `await` / `join()` | ESLint, `regions/no-floating-spawn`, предупреждение |
 | обращение к захваченному региону, пока задача идёт | ESLint, `regions/no-region-use-while-spawned` |
 | `borrowWhile(async ...)`, промис которого никто не ждёт | ESLint, `regions/no-floating-borrow-while` |
+| регион трогают после `send` в канал | ESLint, `regions/no-use-after-send` |
+| задача меняет обычный объект или переменную вызывающего (меняется копия) | ESLint, `regions/no-write-to-spawn-copy` |
+| `await`, пока держат guard `RwLock` или `borrow()` | ESLint, `regions/no-await-holding-guard`, предупреждение |
+| ссылка из `guard.value` живёт дольше guard | ESLint, `regions/no-guard-value-escape` |
+| `if (region.frozen)`, `await`, потом регион | ESLint, `regions/no-stale-region-check`, предупреждение |
 
 Что видно только при запуске: захваченный `this` с методами, захват переменной до её
 инициализации, доступ к региону без владения.

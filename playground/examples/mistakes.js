@@ -38,6 +38,42 @@ const counting = spawn(() => { counter.value++; });
 print(counter.value);
 await counting;
 
+// ESLint error: `stats` is plain data, the task changes its own copy.
+const stats = { batches: 0 };
+await spawn((stats) => { stats.batches++; }, stats);
+
+// ESLint error: `batch` went to the receiver with its region.
+const batches = new Channel(1);
+const batch = new Region().run(() => ({ rows: [1, 2] }));
+await batches.send(batch);
+print(batch.rows.length);
+
+// ESLint warning: the write lock is held across the await.
+const lock = new RwLock({ served: 0, prices: { tea: 3 } });
+{
+  using g = await lock.write();
+  await batches.recv();
+  g.value.served++;
+}
+
+// ESLint error: `prices` is used after its guard is released.
+let prices;
+{
+  using r = await lock.read();
+  prices = r.value.prices;
+}
+print(prices.tea);
+
+// ESLint warning: the region can be thawed while the await waits.
+const shared = new Region();
+const config = shared.run(() => ({ limit: 10 }));
+shared.freeze();
+if (shared.frozen) {
+  await batches.recv();
+  using _borrow = shared.borrow();
+  print(config.limit);
+}
+
 // Lint warning: nobody awaits this task, its result and errors are lost.
 spawn(() => 1);
 
