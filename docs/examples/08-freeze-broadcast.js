@@ -1,4 +1,4 @@
-// Заморозка: читать могут все, писать никто. Рассылка одного объекта трём воркерам.
+// Freezing: everyone can read, nobody can write. Broadcasting one object to three workers.
 const region = new Region();
 const config = region.run(() => ({ api: 'https://example.test', retries: 3, flags: ['a', 'b', 'c'] }));
 
@@ -8,7 +8,7 @@ print('frozen:', region.frozen);
 try {
   config.retries = 5;
 } catch (e) {
-  print('владелец пишет:', String(e));
+  print('the owner writes:', String(e));
 }
 
 const workers = [0, 1, 2].map(
@@ -20,14 +20,14 @@ const workers = [0, 1, 2].map(
         try { unborrowed = config.api; } catch (e) { unborrowed = String(e); }
         let reply;
         {
-          // Читать замороженный регион можно только под билетом.
+          // A frozen region can be read only under a borrow.
           using borrow = Region.of(config).borrow();
           let write;
-          try { config.retries = 0; write = 'записал'; } catch (e) { write = 'запись запрещена'; }
-          reply = 'воркер ${i}: ' + config.api + ', флаг ' + config.flags[${i}] + ', ' + write +
-                  (${i} === 0 ? '\\n  без билета: ' + unborrowed : '');
+          try { config.retries = 0; write = 'wrote'; } catch (e) { write = 'write denied'; }
+          reply = 'worker ${i}: ' + config.api + ', flag ' + config.flags[${i}] + ', ' + write +
+                  (${i} === 0 ? '\\n  without a borrow: ' + unborrowed : '');
         }
-        // Билет уже отдан: главный поток сможет сделать thaw().
+        // The borrow is already released: the main thread can call thaw().
         postMessage(reply);
       };
       `,
@@ -35,12 +35,12 @@ const workers = [0, 1, 2].map(
     ),
 );
 
-// Без transfer list: замороженный регион не переезжает, а становится общим.
+// No transfer list: a frozen region does not move, it becomes shared.
 for (const w of workers) w.postMessage({ config });
 for (const w of workers) print(w.getMessage());
-print('главный поток тоже читает:', config.retries);
+print('the main thread reads too:', config.retries);
 
 region.thaw();
 config.retries = 5;
-print('после thaw владелец пишет:', config.retries);
+print('after thaw the owner writes:', config.retries);
 for (const w of workers) w.terminate();

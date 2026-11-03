@@ -1,2 +1,2 @@
->> неделя: 3 строки, аргументов 2
+>> week: 3 rows, 2 arguments
 TypeError: spawn() cannot send this: a region object can hold only functions made by Region.fn()

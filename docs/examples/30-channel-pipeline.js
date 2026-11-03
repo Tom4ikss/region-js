@@ -1,5 +1,5 @@
 // d8-flags: --module
-// Конвейер: одна задача производит заказы, три их считают, главный поток собирает.
+// A pipeline: one task produces orders, three price them, the main thread collects the results.
 const orders = new Channel(8);
 const priced = new Channel(8);
 
@@ -27,5 +27,5 @@ for (let i = 0; i < 12; i++) {
 }
 await producer;
 const counts = await Promise.all(pricers);
-print('суммы:', totals.join(' '));
-print('всего посчитано:', counts.reduce((a, b) => a + b, 0));
+print('totals:', totals.join(' '));
+print('priced in all:', counts.reduce((a, b) => a + b, 0));

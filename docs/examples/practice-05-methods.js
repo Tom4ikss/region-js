@@ -1,11 +1,11 @@
-// Практика 5. Методы массива на массиве региона, на копии и на обычном массиве; цикл for.
-// Сумма квадратов чётных чисел в массиве из 1 000 000 элементов.
+// Practice 5. Array methods on a region array, on a copy and on a plain array; a for loop.
+// The sum of squares of the even numbers in an array of 1,000,000 elements.
 const region = new Region();
 const numbers = region.run(() => Array.from({ length: 1_000_000 }, (_, i) => i % 1000));
-const plain = Array.from({ length: 1_000_000 }, (_, i) => i % 1000);   // те же значения, вне региона
+const plain = Array.from({ length: 1_000_000 }, (_, i) => i % 1000);   // the same values, outside a region
 
-// Функции продублированы, чтобы подсказки движка для массива региона
-// и для обычного массива не смешивались в одном месте кода.
+// The functions are duplicated so that the engine's feedback for the region array
+// and for the plain array does not mix in one place in the code.
 const methodsOnRegion = () => numbers.filter((x) => x % 2 === 0).map((x) => x * x).reduce((a, b) => a + b, 0);
 const loopOnRegion = () => {
   let total = 0;
@@ -50,12 +50,12 @@ const best = (fn) => {
   }
   return min.toFixed(2).padStart(6);
 };
-print(`регион, filter/map/reduce:          ${best(methodsOnRegion)} ms`);
-print(`регион, цикл for:                   ${best(loopOnRegion)} ms`);
-print(`копия циклом, filter/map/reduce:    ${best(methodsOnCopy)} ms`);
-print(`копия циклом, цикл for:             ${best(loopOnCopy)} ms`);
-print(`обычный массив, filter/map/reduce:  ${best(methodsOnPlain)} ms`);
-print(`обычный массив, цикл for:           ${best(loopOnPlain)} ms`);
+print(`region, filter/map/reduce:          ${best(methodsOnRegion)} ms`);
+print(`region, for loop:                   ${best(loopOnRegion)} ms`);
+print(`loop copy, filter/map/reduce:       ${best(methodsOnCopy)} ms`);
+print(`loop copy, for loop:                ${best(loopOnCopy)} ms`);
+print(`plain array, filter/map/reduce:     ${best(methodsOnPlain)} ms`);
+print(`plain array, for loop:              ${best(loopOnPlain)} ms`);
 const expected = loopOnPlain();
-print('результаты совпадают:', [methodsOnRegion, loopOnRegion, methodsOnCopy, loopOnCopy, methodsOnPlain]
+print('results match:', [methodsOnRegion, loopOnRegion, methodsOnCopy, loopOnCopy, methodsOnPlain]
   .every((fn) => fn() === expected));

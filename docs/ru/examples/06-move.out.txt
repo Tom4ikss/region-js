@@ -1,0 +1,5 @@
+главный поток: OwnershipError: region 0 was sent to another thread and has not been received yet (sent at 06-move.js:17:8)
+воркер: paid, сумма 200
+главный поток пишет: OwnershipError: region 0 belongs to another thread (isolate 1, this is isolate 0) (sent at 06-move.js:17:8)
+главный поток, Object.keys: OwnershipError: region 0 belongs to another thread (isolate 1, this is isolate 0) (sent at 06-move.js:17:8)
+владелец региона теперь isolate 1

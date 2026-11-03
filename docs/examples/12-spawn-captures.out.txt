@@ -1,4 +1,4 @@
-захваченные данные и функция: арбуз=50 банан=50 вишня=50 груша=50 ежевика=70
-регион вернулся, runs = 2
-аргументом, runs = 12
-замороженный регион: привет / пока | главный поток читает: привет
+captured data and function: apple=50 banana=60 cherry=60 durian=60 elderberry=100
+the region came back, runs = 2
+as an argument, runs = 12
+frozen region: hola / adiós | the main thread reads: hola

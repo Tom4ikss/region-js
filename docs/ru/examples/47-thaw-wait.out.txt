@@ -1,0 +1,3 @@
+readers сразу после spawn: 1
+OwnershipError: Region is still borrowed by 1 reader(s); region.thawWhenFree() waits for them
+задача прочитала 10 | теперь limit = 99

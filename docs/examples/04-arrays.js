@@ -1,4 +1,4 @@
-// Массивы в регионе: что работает, что нет.
+// Arrays in a region: what works and what does not.
 const tryIt = (label, fn) => {
   try {
     print(label + ':', fn());
@@ -19,23 +19,23 @@ tryIt('spread', () => Math.max(...scores));
 tryIt('map/filter', () => scores.map((x) => x * 10).filter((x) => x > 10).join(','));
 tryIt('slice', () => scores.slice(1, 3).join(','));
 tryIt('includes', () => scores.includes(4));
-tryIt('запись по индексу', () => {
+tryIt('write by index', () => {
   scores[0] = 9;
   return scores[0];
 });
 tryIt('push', () => scores.push(2, 6));
-tryIt('pop', () => scores.pop() + ', длина ' + scores.length);
+tryIt('pop', () => scores.pop() + ', length ' + scores.length);
 tryIt('splice', () => scores.splice(1, 2).join(',') + ' → ' + scores.join(','));
 tryIt('length = 2', () => {
   scores.length = 2;
   return scores.join(',');
 });
-tryIt('новое поле у объекта', () => {
+tryIt('new field on an object', () => {
   const user = region.run(() => ({ name: 'Ann' }));
   user.age = 30;
 });
 
-// Перечисление ключей и JSON работают как у обычных объектов.
+// Key enumeration and JSON work as with ordinary objects.
 const point = region.run(() => ({ x: 1, y: 2 }));
 tryIt('Array.isArray', () => Array.isArray(scores));
 tryIt('Object.keys', () => JSON.stringify(Object.keys(point)));
@@ -47,11 +47,11 @@ tryIt('for...in', () => {
 });
 tryIt('JSON.stringify', () => JSON.stringify({ point, scores }));
 tryIt('flat', () => region.run(() => [[1, 2], [3]]).flat().join(','));
-tryIt('spread объекта', () => {
-  const copy = { ...point, z: 3 }; // обычный объект, в него можно добавлять поля
+tryIt('object spread', () => {
+  const copy = { ...point, z: 3 }; // a plain object, fields can be added to it
   return JSON.stringify(copy);
 });
-tryIt('деструктуризация', () => {
+tryIt('destructuring', () => {
   const { x, y } = point;
   return x + y;
 });

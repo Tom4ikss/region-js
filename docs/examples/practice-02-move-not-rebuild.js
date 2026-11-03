@@ -1,5 +1,5 @@
-// Практика 2. Создать регион один раз и гонять его туда-обратно, а не пересоздавать.
-// 200 раз отправляем воркеру 10 000 объектов, он меняет один и возвращает.
+// Practice 2. Create a region once and move it back and forth instead of rebuilding it.
+// 200 times we send 10,000 objects to a worker; it changes one and sends them back.
 const N = 10_000;
 const ROUNDS = 200;
 const worker = new Worker(
@@ -11,7 +11,7 @@ const worker = new Worker(
 );
 const local = Array.from({ length: N }, (_, i) => ({ x: i, y: -i }));
 
-// Плохо: каждый раз новый регион. run копирует все 10 000 объектов, O(n).
+// Bad: a new region every time. run copies all 10,000 objects, O(n).
 const rebuild = () => {
   for (let r = 0; r < ROUNDS; r++) {
     const region = new Region();
@@ -21,7 +21,7 @@ const rebuild = () => {
   }
 };
 
-// Хорошо: регион создан один раз, дальше только переезды, O(1).
+// Good: the region is created once, after that only moves, O(1).
 const region = new Region();
 let items = region.run(() => local);
 const move = () => {
@@ -40,7 +40,7 @@ const best = (fn) => {
   }
   return (min / ROUNDS) * 1000;
 };
-print(`пересоздавать регион: ${best(rebuild).toFixed(1)} µs за круг`);
-print(`переезд туда-обратно: ${best(move).toFixed(1)} µs за круг`);
-print('items[0].x после всех кругов:', items[0].x);
+print(`rebuild the region:  ${best(rebuild).toFixed(1)} µs per round trip`);
+print(`move back and forth: ${best(move).toFixed(1)} µs per round trip`);
+print('items[0].x after all round trips:', items[0].x);
 worker.terminate();

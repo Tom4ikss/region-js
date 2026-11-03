@@ -1,88 +1,88 @@
-<!-- title: Каналы -->
-<!-- description: Channel: очередь между потоками, как в Go. send и recv, буфер, close, for await, select, блокирующие версии для воркеров, переезд регионов через канал и сколько это стоит. -->
-<p class="eyebrow">Глава 5</p>
-<h1>Каналы: потоки, которые разговаривают</h1>
-<p class="lead"><code>spawn</code> хорош, когда задача получила данные, посчитала и вернула результат. Но часто потоки должны обмениваться данными по ходу работы: один производит, другие обрабатывают, третий собирает. Для этого есть каналы. Идея взята из Go: канал — это очередь, в которую один поток кладёт значения, а другой их забирает.</p>
+<!-- title: Channels -->
+<!-- description: Channel: a queue between threads, as in Go. send and recv, the buffer, close, for await, select, blocking versions for workers, moving regions through a channel, and what it costs. -->
+<p class="eyebrow">Chapter 5</p>
+<h1>Channels: threads that talk</h1>
+<p class="lead"><code>spawn</code> works well when a task gets its data, computes, and returns a result. But threads often need to exchange data while they work: one produces, others process, a third collects. Channels are for this. The idea comes from Go: a channel is a queue where one thread puts values and another takes them.</p>
 
-<h2 id="basics">Отправить и получить</h2>
-<p><code>new Channel(capacity)</code> создаёт канал. <code>await ch.send(value)</code> кладёт значение, <code>await ch.recv()</code> забирает самое старое и возвращает <code>{ value, done }</code>, как итератор. Канал закрывают через <code>ch.close()</code>: новые <code>send</code> после этого бросают ошибку, а то, что уже отправлено, по-прежнему можно получить. Когда закрытый канал опустел, <code>recv</code> возвращает <code>done: true</code>. Удобнее всего читать канал через <code>for await</code>: цикл закончится сам, когда канал закроют и вычитают.</p>
+<h2 id="basics">Send and receive</h2>
+<p><code>new Channel(capacity)</code> creates a channel. <code>await ch.send(value)</code> puts a value in, and <code>await ch.recv()</code> takes the oldest one and returns <code>{ value, done }</code>, like an iterator. A channel is closed with <code>ch.close()</code>: after that, new <code>send</code> calls throw an error, but what was already sent can still be received. When a closed channel is empty, <code>recv</code> returns <code>done: true</code>. The most convenient way to read a channel is <code>for await</code>: the loop ends on its own once the channel is closed and drained.</p>
 
 <!--ex:28-channel-basics.js-->
 
-<h3 id="capacity">Буфер</h3>
-<p><code>capacity</code> — сколько значений канал держит, пока их никто не забрал. Пока в буфере есть место, <code>send</code> завершается сразу. Когда места нет, <code>send</code> ждёт, пока кто-нибудь прочитает. Так быстрый производитель не убежит далеко вперёд медленного потребителя и не съест всю память.</p>
-<p>Канал без буфера (<code>new Channel()</code>, ёмкость 0) — это встреча: <code>send</code> завершается, только когда значение забрал получатель. Отправитель точно знает, что его значение уже в чужих руках.</p>
+<h3 id="capacity">The buffer</h3>
+<p><code>capacity</code> is how many values the channel holds while nobody has taken them. While the buffer has room, <code>send</code> completes immediately. When there is no room, <code>send</code> waits until someone reads. This way a fast producer cannot run far ahead of a slow consumer and eat all the memory.</p>
+<p>A channel without a buffer (<code>new Channel()</code>, capacity 0) is a rendezvous: <code>send</code> completes only when the receiver has taken the value. The sender knows for certain that its value is already in someone else's hands.</p>
 
-<h2 id="move">Что происходит со значением</h2>
-<p>Канал подчиняется тем же правилам, что <code>postMessage</code> и <code>spawn</code>:</p>
+<h2 id="move">What happens to the value</h2>
+<p>A channel follows the same rules as <code>postMessage</code> and <code>spawn</code>:</p>
 <ul>
-  <li><strong>Объект региона переезжает.</strong> Его регион уходит в канал целиком, без копии, и у отправителя доступа больше нет. Переносить регион в transfer list не нужно: канал делает это сам для регионов, на которые значение ссылается напрямую (само значение или его поля первого уровня).</li>
-  <li><strong>Замороженный регион становится общим.</strong> Получатель читает тот же объект под билетом <code>borrow()</code>, отправитель тоже (если он сам заморозил регион, билет ему не нужен).</li>
-  <li><strong>Обычные данные копируются</strong>, как при <code>postMessage</code>.</li>
+  <li><strong>A region object moves.</strong> Its whole region goes into the channel, without a copy, and the sender loses access. You do not need to put the region in a transfer list: the channel does it for the regions the value refers to directly (the value itself or its top-level fields).</li>
+  <li><strong>A frozen region becomes shared.</strong> The receiver reads the same object under a <code>borrow()</code>, and so does the sender (if the sender froze the region itself, it does not need a borrow).</li>
+  <li><strong>Ordinary data is copied</strong>, as with <code>postMessage</code>.</li>
 </ul>
 
 <!--ex:29-channel-move.js-->
 
-<p>Канал можно захватить в <code>spawn</code>, передать через <code>postMessage</code> и даже отправить через другой канал: на всех концах это будет один и тот же канал. Класть канал внутрь региона нельзя, регион хранит только данные.</p>
+<p>A channel can be captured in <code>spawn</code>, passed with <code>postMessage</code>, and even sent through another channel: at every end it is the same channel. A channel cannot be put inside a region; a region holds only data.</p>
 
-<h2 id="pipeline">Конвейер</h2>
-<p>Самый частый узор: одна задача производит работу, несколько задач её разбирают, а результаты стекаются в общий канал. Задачи-обработчики читают один и тот же канал <code>orders</code>, поэтому каждый заказ достаётся ровно одной из них. Когда производитель закрывает канал, их циклы <code>for await</code> заканчиваются сами.</p>
+<h2 id="pipeline">A pipeline</h2>
+<p>The most common pattern: one task produces work, several tasks take it apart, and the results flow into a shared channel. The worker tasks read the same <code>orders</code> channel, so each order goes to exactly one of them. When the producer closes the channel, their <code>for await</code> loops end on their own.</p>
 
 <!--ex:30-channel-pipeline.js-->
 
-<p>Сколько заказов достанется каждой задаче, заранее неизвестно: кто первым освободился, тот и взял. Если нужен порядок, несите его в данных, как здесь <code>id</code>.</p>
+<p>How many orders each task gets is not known in advance: whoever is free first takes the next one. If you need an order, carry it in the data, as <code>id</code> does here.</p>
 
-<h2 id="select">Ждать несколько каналов: <code>select</code></h2>
-<p><code>await Channel.select([a, b, c])</code> ждёт первый канал, в котором появилось значение, и возвращает <code>{ channel, value, done }</code>. Закрытый канал тоже считается готовым: для него придёт <code>done: true</code>. Если готовы сразу несколько, выбирается любой из них, чтобы ни один канал не голодал.</p>
+<h2 id="select">Waiting on several channels: <code>select</code></h2>
+<p><code>await Channel.select([a, b, c])</code> waits for the first channel that has a value and returns <code>{ channel, value, done }</code>. A closed channel also counts as ready: it yields <code>done: true</code>. If several are ready at once, any one of them is chosen, so that no channel starves.</p>
 
 <!--ex:31-channel-select.js-->
 
-<h2 id="blocking">Блокирующие версии</h2>
-<p>У каждой операции есть версия, которая останавливает поток до результата: <code>sendSync</code>, <code>recvSync</code>, <code>Channel.selectSync</code>, а <code>for (const value of ch)</code> читает канал без <code>await</code>. В воркере это удобно: код получается прямым, как в Go, и не нужно делать <code>async</code> всю цепочку вызовов. В главном потоке блокировать не стоит по той же причине, что и <code>join()</code>: пока поток ждёт, он ничего больше не делает.</p>
+<h2 id="blocking">Blocking versions</h2>
+<p>Every operation has a version that stops the thread until the result is ready: <code>sendSync</code>, <code>recvSync</code>, <code>Channel.selectSync</code>, and <code>for (const value of ch)</code> reads a channel without <code>await</code>. This is convenient in a worker: the code is straightforward, as in Go, and the whole call chain does not have to be <code>async</code>. Do not block on the main thread, for the same reason as with <code>join()</code>: while the thread waits, it does nothing else.</p>
 
 <!--ex:32-channel-blocking.js-->
 
-<p>Поток, который ждёт на канале, не мешает сборке мусора остальных потоков. Если воркер завершают через <code>terminate()</code>, пока он ждёт, ожидание прерывается, а значение, которое ему уже отдали, но он не успел прочитать, возвращается в канал следующему получателю.</p>
+<p>A thread waiting on a channel does not hold up garbage collection in other threads. If a worker is terminated with <code>terminate()</code> while it waits, the wait is interrupted, and a value that was already handed to it but not yet read goes back to the channel for the next receiver.</p>
 
-<h2 id="rwlock">Общие данные: <code>RwLock</code></h2>
-<p>Канал передаёт данные из рук в руки. Иногда удобнее, чтобы данные лежали на месте, а потоки приходили к ним по очереди: общий счётчик, кэш, состояние игры. Для этого есть <code>RwLock</code>, как <code>tokio::sync::RwLock</code> в Rust или <code>sync.RWMutex</code> в Go. Лок держит один регион. Писатель на время получает его в собственность, и тогда никто другой его не видит. Читателей может быть сколько угодно, и пока они читают, регион заморожен.</p>
+<h2 id="rwlock">Shared data: <code>RwLock</code></h2>
+<p>A channel passes data from hand to hand. Sometimes it is more convenient for the data to stay in place and for threads to come to it in turn: a shared counter, a cache, game state. For this there is <code>RwLock</code>, like <code>tokio::sync::RwLock</code> in Rust or <code>sync.RWMutex</code> in Go. The lock holds one region. A writer temporarily gets ownership of it, and then nobody else sees it. There can be any number of readers, and while they read, the region is frozen.</p>
 
 <!--ex:38-rwlock.js-->
 
-<p>Данные охраняет то же владение, что и всё остальное. Пока лок никто не держит, его регион не принадлежит никому. Поэтому ссылка, сохранённая из guard после отпуска, не работает: обращение к ней — ошибка, а не гонка данных, которую в Go ищет race detector. По той же причине регион лока нельзя освободить, заморозить, отправить в канал или через <code>postMessage</code> и взять на него <code>borrow()</code>: всё это обходило бы лок.</p>
-<p>Ждущие получают лок в порядке прихода. Читатель, пришедший после ждущего писателя, ждёт его, так что писатели не голодают. Поэтому взять <code>write()</code>, держа <code>read()</code> того же лока, нельзя: писатель ждёт, пока отпустят всех читателей, в том числе этот же поток.</p>
-<p><code>read()</code> и <code>write()</code> ждут через промис, <code>readSync()</code> и <code>writeSync()</code> блокируют поток (это для воркеров), <code>tryRead()</code> и <code>tryWrite()</code> сразу возвращают <code>null</code>, если лок занят. Guard отпускается через <code>using</code> или <code>release()</code>. Guard, который задача <code>spawn</code> забыла отпустить, отпускается, когда она заканчивается, а если завершается поток, то вместе с ним.</p>
-<p>Писатель, который не закончил работу, отравляет лок, как паника отравляет <code>Mutex</code> в Rust: данные могли остаться изменёнными наполовину. Так бывает, если write-guard отпускает отменённая задача, если задача упала, не отпустив его, или если завершился поток, который его держал. Читатели лок не отравляют. У отравленного лока <code>lock.poisoned</code> равно <code>true</code>, а <code>read()</code>, <code>write()</code> и остальные способы взять его падают с <code>PoisonError</code>. Текст ошибки говорит, где отпустили guard. Когда данные проверены или исправлены, <code>lock.clearPoison()</code> снимает отметку. Пример — <a href="spawn.html#abort">в разделе об отмене</a>.</p>
-<p>Взять лок на запись и отпустить его стоит около 0,2 мкс, у <code>RwLock</code> в tokio — около 0,01 мкс: здесь каждый захват ещё и меняет владельца региона. Передача лока другому потоку стоит как пробуждение этого потока (<a href="numbers.html#tokio">замеры</a>).</p>
-<p>Между потоками лок ходит как канал: его можно захватить в <code>spawn</code>, отправить в канал и через <code>postMessage</code>. <code>new RwLock(data)</code> копирует обычные данные в новый регион, а объект региона, которым владеет поток, забирает без копии.</p>
+<p>The data is guarded by the same ownership as everything else. While nobody holds the lock, its region belongs to nobody. That is why a reference saved from a guard after release does not work: accessing it is an error, not a data race of the kind Go's race detector looks for. For the same reason, the lock's region cannot be freed, frozen, sent to a channel or with <code>postMessage</code>, and you cannot take a <code>borrow()</code> on it: all of that would bypass the lock.</p>
+<p>Waiters get the lock in the order they arrive. A reader that arrives after a waiting writer waits for that writer, so writers do not starve. This is why you cannot take <code>write()</code> while holding <code>read()</code> on the same lock: the writer waits until all readers release, including this same thread.</p>
+<p><code>read()</code> and <code>write()</code> wait through a promise, <code>readSync()</code> and <code>writeSync()</code> block the thread (this is for workers), and <code>tryRead()</code> and <code>tryWrite()</code> return <code>null</code> immediately if the lock is taken. A guard is released with <code>using</code> or <code>release()</code>. A guard that a <code>spawn</code> task forgot to release is released when the task ends, and if the thread terminates, together with the thread.</p>
+<p>A writer that did not finish its work poisons the lock, the way a panic poisons a <code>Mutex</code> in Rust: the data may have been left half-changed. This happens if a write guard is released by a cancelled task, if a task failed without releasing it, or if the thread that held it terminated. Readers do not poison the lock. For a poisoned lock, <code>lock.poisoned</code> is <code>true</code>, and <code>read()</code>, <code>write()</code> and the other ways to take it fail with <code>PoisonError</code>. The error message says where the guard was released. Once the data has been checked or fixed, <code>lock.clearPoison()</code> removes the mark. There is an example <a href="spawn.html#abort">in the section on cancellation</a>.</p>
+<p>Taking the lock for writing and releasing it costs about 0.2 µs; for <code>RwLock</code> in tokio it is about 0.01 µs: here every acquisition also changes the region's owner. Handing the lock to another thread costs as much as waking that thread (<a href="numbers.html#tokio">measurements</a>).</p>
+<p>Between threads, a lock travels like a channel: it can be captured in <code>spawn</code>, sent to a channel, and passed with <code>postMessage</code>. <code>new RwLock(data)</code> copies ordinary data into a new region, and takes a region object owned by the thread without a copy.</p>
 
-<h2 id="vs-go">Чем это отличается от Go</h2>
+<h2 id="vs-go">How this differs from Go</h2>
 <div class="table-wrap">
 <table>
-<thead><tr><th></th><th>Go</th><th>Здесь</th></tr></thead>
+<thead><tr><th></th><th>Go</th><th>Here</th></tr></thead>
 <tbody>
-<tr><td>Что можно отправить</td><td>что угодно, общая память</td><td>данные: регионы переезжают, остальное копируется</td></tr>
-<tr><td>Гонки данных</td><td>возможны, ловит race detector</td><td>нет: у региона всегда один хозяин</td></tr>
-<tr><td>Ждать без блокировки</td><td>не нужно, горутины дешёвые</td><td><code>await</code>; блокировать можно в воркерах</td></tr>
-<tr><td>send в закрытый канал</td><td>panic</td><td><code>TypeError</code></td></tr>
-<tr><td>Отправители, ждущие при close</td><td>panic</td><td>их значения остаются в канале</td></tr>
-<tr><td>Конец программы</td><td>когда закончилась <code>main</code></td><td>d8 ждёт задачи и операции на каналах</td></tr>
+<tr><td>What can be sent</td><td>anything, shared memory</td><td>data: regions move, everything else is copied</td></tr>
+<tr><td>Data races</td><td>possible, caught by the race detector</td><td>none: a region always has one owner</td></tr>
+<tr><td>Waiting without blocking</td><td>not needed, goroutines are cheap</td><td><code>await</code>; blocking is allowed in workers</td></tr>
+<tr><td>send to a closed channel</td><td>panic</td><td><code>TypeError</code></td></tr>
+<tr><td>Senders waiting at close</td><td>panic</td><td>their values stay in the channel</td></tr>
+<tr><td>End of the program</td><td>when <code>main</code> returns</td><td>d8 waits for tasks and channel operations</td></tr>
 </tbody>
 </table>
 </div>
-<p>Последняя строка значит, что получатель держит программу, пока его может разбудить другой поток.</p>
+<p>The last row means that a receiver keeps the program alive as long as another thread can wake it.</p>
 
-<h2 id="deadlock">Дедлоки</h2>
-<p>Если ждут все потоки и разбудить друг друга им некому, это дедлок. Go в такой ситуации завершает программу с ошибкой «all goroutines are asleep». Здесь все ожидания каналов и локов заканчиваются ошибкой <code>DeadlockError</code>, и программа может её поймать:</p>
+<h2 id="deadlock">Deadlocks</h2>
+<p>If all threads are waiting and none of them can wake the others, that is a deadlock. In this situation Go terminates the program with the error "all goroutines are asleep". Here every wait on channels and locks ends with a <code>DeadlockError</code>, and the program can catch it:</p>
 
 <!--ex:40-deadlock.js-->
 
-<p>Поток спит, когда ему нечего делать в цикле событий или когда он стоит в блокирующем ожидании: <code>recvSync</code>, <code>writeSync</code>, <code>join()</code>. Поток, который считает, может ещё что-то отправить, поэтому пока он работает, дедлока нет. То же с таймером <code>timeout()</code>: пока он не сработал, он может отменить задачу. Ошибка приходит, если все потоки проспали так 50 мс подряд.</p>
-<p>Проверка смотрит только на каналы и локи. Задача, которая ждёт обычный промис, который никто не выполнит, держит d8 вечно, как и раньше.</p>
+<p>A thread is asleep when it has nothing to do in its event loop or when it is in a blocking wait: <code>recvSync</code>, <code>writeSync</code>, <code>join()</code>. A thread that is computing may still send something, so while it works there is no deadlock. The same goes for a <code>timeout()</code> timer: until it fires, it can cancel a task. The error comes if all threads have been asleep like this for 50 ms in a row.</p>
+<p>The check looks only at channels and locks. A task waiting on an ordinary promise that nobody will ever resolve keeps d8 running forever, as before.</p>
 
-<h2 id="cost">Сколько это стоит</h2>
-<p>Числа, строки, объекты регионов и сами каналы идут через канал напрямую, без сериализатора. Обычные объекты копирует тот же сериализатор, что у <code>postMessage</code>. Ожидающий поток будится напрямую, а значение, которое он дождался, забирает без общего мьютекса каналов. Круг «туда и обратно» через два канала без буфера стоит почти как обмен сообщениями с воркером, хотя каждый круг — это две встречи отправителя с получателем, и на каждую получатель собирает результат <code>{ value, done }</code>.</p>
+<h2 id="cost">What it costs</h2>
+<p>Numbers, strings, region objects and channels themselves go through a channel directly, without the serializer. Ordinary objects are copied by the same serializer that <code>postMessage</code> uses. A waiting thread is woken directly, and it takes the value it waited for without the shared channel mutex. A round trip through two unbuffered channels costs almost as much as exchanging messages with a worker, even though each round trip is two rendezvous between sender and receiver, and for each one the receiver builds a <code>{ value, done }</code> result.</p>
 
 <!--ex:33-channel-overhead.js timing-->
 
-<p>Это единицы микросекунд, а у горутин в Go — доли микросекунды. Если гонять через канал по одному числу, больше 200 000 значений в секунду не выйдет, и в горячем цикле пересылка легко займёт больше времени, чем сама работа. Каналы подходят, чтобы передавать порции работы: заказ, кусок файла, пачку строк. Объединяйте мелкие значения в пачки, как и для <code>spawn</code> (<a href="practices.html#batch">подробнее</a>).</p>
+<p>That is a few microseconds, while goroutines in Go take a fraction of a microsecond. If you pass one number at a time through a channel, you will not get more than 200,000 values per second, and in a hot loop the transfer can easily take longer than the work itself. Channels are good for passing chunks of work: an order, a piece of a file, a batch of lines. Group small values into batches, just as with <code>spawn</code> (<a href="practices.html#batch">more</a>).</p>

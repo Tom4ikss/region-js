@@ -1,10 +1,10 @@
-// Стрелочная функция видит this и arguments внешней функции. spawn их тоже захватывает.
+// An arrow function sees this and arguments of the outer function. spawn captures them too.
 function report(prefix) {
-  return spawn(() => `${prefix}${this.title}: ${this.rows.length} строки, аргументов ${arguments.length}`).join();
+  return spawn(() => `${prefix}${this.title}: ${this.rows.length} rows, ${arguments.length} arguments`).join();
 }
-print(report.call({ title: 'неделя', rows: [3, 1, 2] }, '>> ', 'лишний'));
+print(report.call({ title: 'week', rows: [3, 1, 2] }, '>> ', 'extra'));
 
-// А если в this есть методы, отправить его нельзя.
+// But if this has methods, it cannot be sent.
 const store = {
   items: [1, 2, 3],
   count() {

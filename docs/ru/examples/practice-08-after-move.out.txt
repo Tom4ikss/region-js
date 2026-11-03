@@ -1,0 +1,5 @@
+сразу после spawn: OwnershipError: region 0 was sent to another thread and has not been received yet (sent at practice-08-after-move.js:6:14)
+результат задачи: 250
+после await: 250
+запись после postMessage: OwnershipError: region 0 was sent to another thread and has not been received yet (sent at practice-08-after-move.js:30:10)
+вернулся тот же объект: true | total = 230

@@ -1,6 +1,6 @@
-главный поток: frozenHere = true
-воркер без права: frozenHere = false, thaw: OwnershipError: Region is not frozen by this isolate (frozen at 22-freeze-handover.js:4:8)
-главный поток: frozenHere = false
-главный поток, thaw: OwnershipError: Region is not frozen by this isolate (frozen at 22-freeze-handover.js:4:8)
-воркер с правом: frozenHere = true, разморозил, theme = light
-главный поток читает: OwnershipError: region 0 belongs to another thread (isolate 1, this is isolate 0) (thawed by isolate 1)
+main thread: frozenHere = true
+worker without the right: frozenHere = false, thaw: OwnershipError: Region is not frozen by this isolate (frozen at 22-freeze-handover.js:4:8)
+main thread: frozenHere = false
+main thread, thaw: OwnershipError: Region is not frozen by this isolate (frozen at 22-freeze-handover.js:4:8)
+worker with the right: frozenHere = true, thawed, theme = light
+main thread reads: OwnershipError: region 0 belongs to another thread (isolate 1, this is isolate 0) (thawed by isolate 1)

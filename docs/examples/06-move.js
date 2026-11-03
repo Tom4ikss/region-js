@@ -1,37 +1,37 @@
-// Переезд региона в воркер: отправитель теряет доступ, получатель становится владельцем.
-// В d8 worker.getMessage() блокирует поток до ответа. В браузере здесь был бы onmessage.
+// A region moves to a worker: the sender loses access, the receiver becomes the owner.
+// In d8 worker.getMessage() blocks the thread until the reply. In a browser this would be onmessage.
 const region = new Region();
 const order = region.run(() => ({ id: 17, status: 'new', lines: [120, 80] }));
 
 const worker = new Worker(
   `
   onmessage = ({ data: { order } }) => {
-    order.status = 'paid';                       // воркер теперь владелец и может писать
+    order.status = 'paid';                       // the worker is now the owner and can write
     const total = order.lines[0] + order.lines[1];
-    postMessage('воркер: ' + order.status + ', сумма ' + total);
+    postMessage('worker: ' + order.status + ', total ' + total);
   };
   `,
   { type: 'string' },
 );
 
-worker.postMessage({ order }, [region]); // регион в transfer list = переезд
+worker.postMessage({ order }, [region]); // region in the transfer list = move
 
 try {
   print(order.status);
 } catch (e) {
-  print('главный поток:', String(e));
+  print('main thread:', String(e));
 }
 print(worker.getMessage());
 
 try {
   order.status = 'cancelled';
 } catch (e) {
-  print('главный поток пишет:', String(e));
+  print('main thread writes:', String(e));
 }
 try {
-  Object.keys(order); // перечисление ключей и JSON.stringify проверяют владельца так же
+  Object.keys(order); // key enumeration and JSON.stringify check the owner the same way
 } catch (e) {
-  print('главный поток, Object.keys:', String(e));
+  print('main thread, Object.keys:', String(e));
 }
-print('владелец региона теперь isolate', region.owner);
+print('the region owner is now isolate', region.owner);
 worker.terminate();

@@ -1,18 +1,18 @@
-// Первый регион: создать, прочитать, изменить.
+// First region: create, read, change.
 const region = new Region();
 
 const user = region.run(() => ({
-  name: 'Аня',
+  name: 'Anya',
   tags: ['admin', 'beta'],
   settings: { theme: 'dark' },
 }));
 
-print('имя:', user.name);
-print('тема:', user.settings.theme);
-print('тегов:', user.tags.length);
+print('name:', user.name);
+print('theme:', user.settings.theme);
+print('tags:', user.tags.length);
 
-user.name = 'Анна';            // владелец может писать
+user.name = 'Anna';            // the owner can write
 user.settings.theme = 'light';
-print('после записи:', user.name, user.settings.theme);
+print('after the write:', user.name, user.settings.theme);
 
-print('id региона:', region.id, '| владелец (isolate):', region.owner);
+print('region id:', region.id, '| owner (isolate):', region.owner);

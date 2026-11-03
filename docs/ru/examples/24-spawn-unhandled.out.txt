@@ -1,0 +1,10 @@
+главный поток закончил
+undefined:345: RangeError: индекс за пределами
+      task.outcome = Promise.reject(task.error);
+                             ^
+RangeError: индекс за пределами
+    at 24-spawn-unhandled.js:5:9
+    at spawn()
+    at 24-spawn-unhandled.js:4:1
+
+1 pending unhandled Promise rejection(s) detected.

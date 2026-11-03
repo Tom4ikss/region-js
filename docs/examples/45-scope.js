@@ -1,5 +1,5 @@
 // d8-flags: --module
-// Конвейер в spawn.scope: производитель, три считающие задачи, сборщик.
+// A pipeline in spawn.scope: a producer, three pricing tasks, a collector.
 const run = (bad) => spawn.scope(async (s) => {
   const raw = s.channel(2);
   const priced = s.channel(2);
@@ -15,17 +15,17 @@ const run = (bad) => spawn.scope(async (s) => {
       await priced.send(order.qty * order.price);
     }
   }, raw, priced));
-  s.closeAfter(priced, pricers);   // выход закроет последняя считающая задача
+  s.closeAfter(priced, pricers);   // the last pricing task closes the output
   let sum = 0;
   for await (const total of priced) sum += total;
   return sum;
 });
 
-print('все пачки:', await run(-1));
+print('all batches:', await run(-1));
 try {
   await run(5);
 } catch (e) {
-  // Ошибка стадии, а не DeadlockError: блок отменил остальные задачи
-  // и закрыл свои каналы.
+  // The stage's error, not DeadlockError: the scope cancelled the other tasks
+  // and closed its channels.
   print(e.name + ':', e.message);
 }

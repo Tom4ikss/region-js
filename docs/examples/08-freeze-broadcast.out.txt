@@ -1,8 +1,8 @@
 frozen: true
-владелец пишет: OwnershipError: region 0 is frozen; thaw it before writing (frozen at 08-freeze-broadcast.js:5:8)
-воркер 0: https://example.test, флаг a, запись запрещена
-  без билета: OwnershipError: region 0 is frozen; borrow it to read it (frozen at 08-freeze-broadcast.js:5:8)
-воркер 1: https://example.test, флаг b, запись запрещена
-воркер 2: https://example.test, флаг c, запись запрещена
-главный поток тоже читает: 3
-после thaw владелец пишет: 5
+the owner writes: OwnershipError: region 0 is frozen; thaw it before writing (frozen at 08-freeze-broadcast.js:5:8)
+worker 0: https://example.test, flag a, write denied
+  without a borrow: OwnershipError: region 0 is frozen; borrow it to read it (frozen at 08-freeze-broadcast.js:5:8)
+worker 1: https://example.test, flag b, write denied
+worker 2: https://example.test, flag c, write denied
+the main thread reads too: 3
+after thaw the owner writes: 5

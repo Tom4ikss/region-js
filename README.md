@@ -33,7 +33,7 @@ print('payload items:', await worker); // 3
 
 Работает только в тестовой оболочке движка `d8`, в браузер и Node это не попадает.
 
-**Документация:** https://tom4ikss.github.io/region-js/ · **Релиз:** [v0.4.0-alpha](https://github.com/Tom4ikss/region-js/releases/tag/v0.4.0-alpha)
+**Документация:** https://tom4ikss.github.io/region-js/ru/ (английская версия: https://tom4ikss.github.io/region-js/) · **Релиз:** [v0.4.0-alpha](https://github.com/Tom4ikss/region-js/releases/tag/v0.4.0-alpha)
 
 ## Против воркеров и tokio
 
@@ -45,7 +45,7 @@ print('payload items:', await worker); // 3
 | 200 пачек по 1000 заказов: отдать, посчитать скидку, вернуть | 11 мс | 301 мс | 0,8 мс |
 | Каталог из 100 000 товаров, 4 потока по миллиону чтений | 19 мс | 57 мс | 1,6 мс |
 
-Против сегодняшних воркеров — в 3–27 раз быстрее, потому что ничего не копируется. До tokio пока в 2–14 раз: задача — сообщение другому изоляту V8, а обращения к объектам региона проверяют форму и владельца. Разбор — на странице [«Цифры»](https://tom4ikss.github.io/region-js/numbers.html#real).
+Против сегодняшних воркеров — в 3–27 раз быстрее, потому что ничего не копируется. До tokio пока в 2–14 раз: задача — сообщение другому изоляту V8, а обращения к объектам региона проверяют форму и владельца. Разбор — на странице [«Цифры»](https://tom4ikss.github.io/region-js/ru/numbers.html#real).
 
 ## Что умеет
 
@@ -69,7 +69,7 @@ scripts/setup.sh                     # depot_tools, V8 на нужном ком�
 v8-src/v8/out/release/d8 --harmony-regions --module tests/channels.js
 ```
 
-Документация — на [сайте](https://tom4ikss.github.io/region-js/) или в `docs/index.html`, её можно открыть прямо из файла. Пересобрать с выводом примеров: `python3 docs/_build/build.py`.
+Документация — на [сайте](https://tom4ikss.github.io/region-js/ru/) или в `docs/ru/index.html`, её можно открыть прямо из файла. Пересобрать с выводом примеров: `python3 docs/_build/build.py`.
 
 Песочница: откройте папку `playground/` в VSCode, выполните `npm install`, запуск открытого файла — Cmd+Shift+B. Подробнее в `playground/README.md`.
 
@@ -78,7 +78,7 @@ v8-src/v8/out/release/d8 --harmony-regions --module tests/channels.js
 | Папка | Что там |
 |---|---|
 | `v8/regions.patch` | Сам форк: патч поверх V8 `v8/BASE`, флаги сборки в `v8/args.gn` |
-| `docs/` | Сайт с документацией, его исходники в `docs/_build`, примеры в `docs/examples` |
+| `docs/` | Сайт с документацией: английский в корне, русский в `docs/ru`. Исходники в `docs/_build` (`pages` и `pages-ru`), примеры в `docs/examples` и `docs/ru/examples` |
 | `tests/` | Тесты и бенчмарки регионов, `spawn`, каналов и `free()`, фаззер |
 | `playground/` | Типы, Biome, ESLint-плагин и примеры для VSCode |
 | `prototype/js-ownership/` | Первая версия идеи на чистом JS поверх `SharedArrayBuffer` |
@@ -86,4 +86,4 @@ v8-src/v8/out/release/d8 --harmony-regions --module tests/channels.js
 
 ## Статус
 
-Alpha. Тесты V8 (mjsunit, 9 255) проходят, свои тесты и фаззер — тоже, но это исследовательский прототип: проверки безопасности уровня настоящего V8 не было, чужой код в нём не запускайте. Что не сделано и почему — на странице `docs/limits.html`.
+Alpha. Тесты V8 (mjsunit, 9 255) проходят, свои тесты и фаззер — тоже, но это исследовательский прототип: проверки безопасности уровня настоящего V8 не было, чужой код в нём не запускайте. Что не сделано и почему — на странице `docs/ru/limits.html`.

@@ -1,4 +1,4 @@
-// borrow(): «билет читателя». Пока билеты не сданы, регион нельзя разморозить.
+// borrow(): a reader's "ticket". Until the borrows are released, the region cannot be thawed.
 const region = new Region();
 const prices = region.run(() => ({ apple: 50, pear: 70 }));
 region.freeze();
@@ -9,24 +9,24 @@ print('readers:', region.readers);
 try {
   region.thaw();
 } catch (e) {
-  print('thaw с читателем:', String(e));
+  print('thaw with a reader:', String(e));
 }
 
 ticket.release();
-print('после release, readers:', region.readers);
+print('after release, readers:', region.readers);
 
 {
-  using scoped = region.borrow(); // сдаётся сам при выходе из блока
-  print('внутри блока, readers:', region.readers, '| apple =', prices.apple);
+  using scoped = region.borrow(); // released automatically when the block exits
+  print('inside the block, readers:', region.readers, '| apple =', prices.apple);
 }
-print('после блока, readers:', region.readers);
+print('after the block, readers:', region.readers);
 
 region.thaw();
 prices.apple = 55;
-print('разморожено, apple =', prices.apple);
+print('thawed, apple =', prices.apple);
 
 try {
   new Region().borrow();
 } catch (e) {
-  print('borrow незамороженного:', String(e));
+  print('borrow of an unfrozen region:', String(e));
 }

@@ -1,2 +1,2 @@
-без Atomics:   1771515 из 2000000
-с Atomics.add: 2000000 из 2000000
+without Atomics:  1441756 of 2000000
+with Atomics.add: 2000000 of 2000000

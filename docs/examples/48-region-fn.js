@@ -1,5 +1,5 @@
 // d8-flags: --module
-// Функции в регионе: Region.fn.
+// Functions in a region: Region.fn.
 const area = Region.fn(function () {
   return this.w * this.h;
 });
@@ -9,16 +9,16 @@ const shapes = region.run(() => [
   { w: 2, h: 3, area },
   { w: 4, h: 5, area },
 ]);
-print('площади:', shapes.map((s) => s.area()).join(', '));
-print('та же функция:', shapes[0].area === area);
+print('areas:', shapes.map((s) => s.area()).join(', '));
+print('same function:', shapes[0].area === area);
 
-// Задача получает регион вместе с функциями. Её поток компилирует функцию
-// из исходного текста один раз и дальше берёт готовую.
+// The task gets the region together with its functions. The task's thread compiles
+// the function from source text once and reuses it after that.
 const total = await spawn(() => shapes.reduce((sum, s) => sum + s.area(), 0));
-print('в задаче:', total);
+print('in a task:', total);
 
-// Замыкание с функцией не переезжает: она видит только свои аргументы,
-// this, встроенные глобальные объекты и своё имя.
+// The closure does not move with the function: it sees only its arguments,
+// this, built-in globals and its own name.
 const rate = 1.2;
 try {
   Region.fn((x) => x * rate);
@@ -26,7 +26,7 @@ try {
   print(e.name + ': ' + e.message);
 }
 
-// Обычную функцию регион не возьмёт.
+// A region will not take an ordinary function.
 try {
   region.run(() => ({ f: (x) => x * 2 }));
 } catch (e) {

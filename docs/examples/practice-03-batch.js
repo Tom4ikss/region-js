@@ -1,5 +1,5 @@
-// Практика 3. Несколько крупных задач вместо тысяч мелких.
-// Считаем простые числа до 2 000 000 четырьмя способами.
+// Practice 3. A few large tasks instead of thousands of small ones.
+// Count the primes below 2,000,000 in four ways.
 const LIMIT = 2_000_000;
 const isPrime = (n) => {
   if (n < 2) return false;
@@ -22,14 +22,14 @@ const measure = async (label, run) => {
     result = await run();
     best = Math.min(best, performance.now() - t);
   }
-  print(`${label}: ${best.toFixed(0)} ms (простых: ${result})`);
+  print(`${label}: ${best.toFixed(0)} ms (primes: ${result})`);
 };
 const sum = (list) => list.reduce((a, b) => a + b, 0);
 
 (async () => {
-  print('воркеров в пуле:', spawn.poolSize);
-  await measure('в главном потоке     ', async () => countPrimes(0, LIMIT));
-  await measure('10 000 мелких задач  ', async () => sum(await Promise.all(split(10_000))));
-  await measure('100 средних задач    ', async () => sum(await Promise.all(split(100))));
-  await measure(`${spawn.poolSize} крупные задачи     `, async () => sum(await Promise.all(split(spawn.poolSize))));
+  print('workers in the pool:', spawn.poolSize);
+  await measure('on the main thread   ', async () => countPrimes(0, LIMIT));
+  await measure('10,000 small tasks   ', async () => sum(await Promise.all(split(10_000))));
+  await measure('100 medium tasks     ', async () => sum(await Promise.all(split(100))));
+  await measure(`${spawn.poolSize} large tasks        `, async () => sum(await Promise.all(split(spawn.poolSize))));
 })();

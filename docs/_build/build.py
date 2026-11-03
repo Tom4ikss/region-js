@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-"""Собирает docs/*.html из docs/_build/pages/*.html.
+"""Собирает английский сайт docs/*.html из docs/_build/pages/*.html и русский
+docs/ru/*.html из docs/_build/pages-ru/*.html.
 
-Каждый пример из docs/examples/*.js запускается настоящим d8, и на страницу
-попадает его фактический вывод (он же сохраняется в examples/*.out.txt).
+Каждый пример из docs/examples/*.js (и docs/ru/examples/*.js) запускается
+настоящим d8, и на страницу попадает его фактический вывод (он же сохраняется
+рядом в *.out.txt).
 
     python3 docs/_build/build.py            # запустить примеры и собрать сайт
-    python3 docs/_build/build.py --no-run   # взять вывод из сохранённых .out.txt
+    python3 docs/_build/build.py --no-run   # взять вывод из сохранённых .out.txt;
+                                            # запускаются только примеры без него
 
 Первые строки примера могут задать запуск: `// d8-flags: --module` добавляет флаги d8,
 `// d8-exit: 1` говорит, что пример должен завершиться с этим кодом.
@@ -20,26 +23,69 @@ import subprocess
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PAGES_DIR = os.path.join(ROOT, '_build', 'pages')
-EXAMPLES = os.path.join(ROOT, 'examples')
 # d8 that runs the examples: REGIONS_D8, or the one scripts/setup.sh builds.
 D8 = os.environ.get('REGIONS_D8', os.path.join(os.path.dirname(ROOT), 'v8-src', 'v8', 'out', 'release', 'd8'))
 D8_FLAGS = ['--harmony-regions', '--max-serializer-memory=4000']
 WARNING = 'V8 is running with experimental features enabled. Stability and security will suffer.'
 
 PAGES = [
-    ('index', 'Что это такое'),
-    ('problem', 'Зачем это нужно'),
-    ('ideas', 'Идея владения'),
-    ('spawn', 'spawn: задачи в потоках'),
-    ('guide', 'Данные в регионах'),
-    ('channels', 'Каналы'),
-    ('practices', 'Как делать и как не делать'),
-    ('tooling', 'Редактор и линтеры'),
-    ('inside', 'Как это устроено'),
-    ('numbers', 'Цифры'),
-    ('limits', 'Ограничения и планы'),
+    ('index', 'Что это такое', 'What this is'),
+    ('problem', 'Зачем это нужно', 'Why it is needed'),
+    ('ideas', 'Идея владения', 'The ownership idea'),
+    ('spawn', 'spawn: задачи в потоках', 'spawn: tasks on threads'),
+    ('guide', 'Данные в регионах', 'Data in regions'),
+    ('channels', 'Каналы', 'Channels'),
+    ('practices', 'Как делать и как не делать', 'Practices'),
+    ('tooling', 'Редактор и линтеры', 'Editor and linters'),
+    ('inside', 'Как это устроено', 'How it works'),
+    ('numbers', 'Цифры', 'Numbers'),
+    ('limits', 'Ограничения и планы', 'Limits and plans'),
 ]
+
+# Тексты интерфейса сайта на каждом языке. dir — куда кладутся страницы
+# относительно docs/, pages — исходники страниц, base — путь от страницы к docs/.
+LANGS = {
+    'en': {
+        'dir': '', 'pages': 'pages', 'base': '',
+        'real': 'real d8%s output',
+        'timing': '; your timings will differ',
+        'varies': '; numbers change from run to run',
+        'exit': '; exit code %d',
+        'copy': 'Copy', 'copied': 'Copied', 'output': 'Output',
+        'collapsed': 'Benchmark code and the output of one run',
+        'bad': 'Bad', 'good': 'Good', 'table': 'Show as a table',
+        'prev': '← Back', 'next': 'Next →', 'toc': 'On this page',
+        'groups': ['Introduction', 'Guide', 'Details'],
+        'site': 'Ownership regions in V8', 'brand': 'Ownership regions',
+        'badge': 'experiment · V8 fork', 'meta': 'runs only in d8',
+        'github': 'Code on GitHub', 'theme': 'Switch theme',
+        'sections': 'Sections', 'pager': 'Adjacent pages',
+        'switch': 'Русская версия', 'switch_label': 'RU',
+        'side_note': 'A research prototype. Every example on this site ran in a built d8; the output is real.',
+        'footer': ('Ownership regions in V8 is a research prototype, not a product. The numbers come from a build '
+                   'with checks enabled (dcheck) on Apple Silicon unless the page says otherwise.'),
+    },
+    'ru': {
+        'dir': 'ru', 'pages': 'pages-ru', 'base': '../',
+        'real': 'настоящий вывод d8%s',
+        'timing': '; время у вас будет другим',
+        'varies': '; числа меняются от запуска к запуску',
+        'exit': '; код выхода %d',
+        'copy': 'Копировать', 'copied': 'Скопировано', 'output': 'Вывод',
+        'collapsed': 'Код замера и вывод одного запуска',
+        'bad': 'Плохо', 'good': 'Хорошо', 'table': 'Показать таблицей',
+        'prev': '← Назад', 'next': 'Дальше →', 'toc': 'На этой странице',
+        'groups': ['Введение', 'Руководство', 'Подробности'],
+        'site': 'Регионы владения в V8', 'brand': 'Регионы владения',
+        'badge': 'эксперимент · форк V8', 'meta': 'работает только в d8',
+        'github': 'Код на GitHub', 'theme': 'Сменить тему',
+        'sections': 'Разделы', 'pager': 'Соседние страницы',
+        'switch': 'English version', 'switch_label': 'EN',
+        'side_note': 'Исследовательский прототип. Все примеры на сайте запущены в собранном d8, вывод настоящий.',
+        'footer': ('Регионы владения в V8 — исследовательский прототип, не продукт. Цифры получены на сборке '
+                   'с включёнными проверками (dcheck), Apple Silicon, если на странице не сказано иное.'),
+    },
+}
 
 # ---------------------------------------------------------------- примеры
 
@@ -63,19 +109,19 @@ def example_options(path):
     return flags, exit_code
 
 
-def run_examples(run):
+def run_examples(examples, run):
     outputs = {}
-    for name in sorted(os.listdir(EXAMPLES)):
+    for name in sorted(os.listdir(examples)):
         if not name.endswith('.js'):
             continue
-        path = os.path.join(EXAMPLES, name)
+        path = os.path.join(examples, name)
         out_path = path[:-3] + '.out.txt'
-        if run:
+        if run or not os.path.exists(out_path):
             flags, expected_exit = example_options(path)
             proc = subprocess.run([D8] + D8_FLAGS + flags + [path], capture_output=True,
                                   text=True, timeout=60)
             # Stack traces name the file by its absolute path.
-            text = (proc.stdout + proc.stderr).replace(EXAMPLES + os.sep, '')
+            text = (proc.stdout + proc.stderr).replace(examples + os.sep, '')
             lines = [l for l in text.splitlines() if l.strip() != WARNING]
             text = '\n'.join(lines).rstrip() + '\n'
             if proc.returncode != expected_exit:
@@ -83,7 +129,7 @@ def run_examples(run):
                          % (name, proc.returncode, expected_exit, text))
             with open(out_path, 'w', encoding='utf-8') as f:
                 f.write(text)
-            print('ran %-28s ok' % name)
+            print('ran %-31s ok' % os.path.relpath(path, os.path.join(ROOT, '..')))
         with open(out_path, encoding='utf-8') as f:
             outputs[name] = f.read()
     return outputs
@@ -195,44 +241,42 @@ def render_output(text):
     return '\n'.join(lines)
 
 
-def example_block(name, flags, outputs):
-    path = os.path.join(EXAMPLES, name)
+def example_block(name, flags, examples, outputs, t):
+    path = os.path.join(examples, name)
     with open(path, encoding='utf-8') as f:
         src = f.read().rstrip('\n')
     code, _ = highlight(src)
-    if 'timing' in flags:
-        hint = 'настоящий вывод d8; время у вас будет другим'
-    elif 'varies' in flags:
-        hint = 'настоящий вывод d8; числа меняются от запуска к запуску'
-    else:
-        hint = 'настоящий вывод d8'
     extra_flags, exit_code = example_options(path)
-    if extra_flags:
-        hint = hint.replace('вывод d8', 'вывод d8 ' + ' '.join(extra_flags), 1)
+    hint = t['real'] % ''.join(' ' + f for f in extra_flags)
+    if 'timing' in flags:
+        hint += t['timing']
+    elif 'varies' in flags:
+        hint += t['varies']
     if exit_code:
-        hint += '; код выхода %d' % exit_code
+        hint += t['exit'] % exit_code
     block = (
         '<figure class="example">'
         '<div class="ex-head"><span class="file"><a href="examples/{n}">examples/{n}</a></span>'
-        '<button class="copy" type="button">Копировать</button></div>'
+        '<button class="copy" type="button" data-done="{copied}">{copy}</button></div>'
         '<pre class="code"><code>{code}</code></pre>'
-        '<div class="out-head"><span>Вывод</span><span class="hint">{hint}</span></div>'
+        '<div class="out-head"><span>{output}</span><span class="hint">{hint}</span></div>'
         '<pre class="out">{out}</pre>'
         '</figure>'
-    ).format(n=name, code=code, hint=hint, out=render_output(outputs[name]))
+    ).format(n=name, code=code, hint=hint, out=render_output(outputs[name]),
+             copy=t['copy'], copied=t['copied'], output=t['output'])
     if 'collapsed' in flags:
-        return ('<details class="ex-details"><summary>Код замера и вывод одного запуска '
-                '<span class="file">examples/%s</span></summary>%s</details>' % (name, block))
+        return ('<details class="ex-details"><summary>%s '
+                '<span class="file">examples/%s</span></summary>%s</details>' % (t['collapsed'], name, block))
     return block
 
 
 SNIPPET = re.compile(r'<js-(bad|good)>\n?(.*?)\n?</js-\1>', re.S)
 
 
-def snippet_block(m):
+def snippet_block(m, t):
     kind, src = m.group(1), m.group(2)
     code, _ = highlight(src)
-    title = 'Плохо' if kind == 'bad' else 'Хорошо'
+    title = t[kind]
     return ('<figure class="snippet %s"><div class="snippet-head"><span class="mark" aria-hidden="true"></span>%s</div>'
             '<pre class="code"><code>%s</code></pre></figure>' % (kind, title, code))
 
@@ -240,15 +284,14 @@ def snippet_block(m):
 # ---------------------------------------------------------------- графики
 
 
-def ru(value, digits=None):
-    """Число по-русски: десятичная запятая, тонкий пробел в тысячах."""
-    if digits is None:
-        digits = 0 if value >= 100 or value == int(value) and value >= 10 else (2 if value < 1 else 1)
+def number(value, digits, lang):
+    """Подпись оси: по-русски десятичная запятая и тонкий пробел в тысячах,
+    по-английски точка и запятая."""
     s = '%.*f' % (digits, value)
     whole, _, frac = s.partition('.')
     if len(whole) > 4:
-        whole = '{:,}'.format(int(whole)).replace(',', '\u2009')
-    return whole + (',' + frac if frac else '')
+        whole = '{:,}'.format(int(whole)).replace(',', '\u2009' if lang == 'ru' else ',')
+    return whole + (('.' if lang == 'en' else ',') + frac if frac else '')
 
 
 def nice_step(span_, ticks=5):
@@ -268,7 +311,7 @@ def bar_path(x0, y, w, h, r=4):
             % (x0, y, w - r, r, r, r, r, h - 2 * r, r, r, r, r, w - r))
 
 
-def hbar_chart(spec):
+def hbar_chart(spec, lang, t):
     W, L, R = 700, 200, 96
     P = W - L - R
     bar_h, pitch, top = 22, 50, 8
@@ -289,7 +332,7 @@ def hbar_chart(spec):
         xx = x(v)
         parts.append('<line class="c-grid" x1="%.1f" x2="%.1f" y1="0" y2="%d"/>' % (xx, xx, plot_h))
         parts.append('<text class="c-tick" x="%.1f" y="%d" text-anchor="middle">%s</text>'
-                     % (xx, plot_h + 16, ru(v, spec.get('tick_digits', 0))))
+                     % (xx, plot_h + 16, number(v, spec.get('tick_digits', 0), lang)))
         v += step
     parts.append('<line class="c-base" x1="%d" x2="%d" y1="0" y2="%d"/>' % (L, L, plot_h))
     parts.append('<text class="c-axis" x="%.1f" y="%d" text-anchor="middle">%s</text>'
@@ -331,9 +374,9 @@ def hbar_chart(spec):
     body = ''.join('<tr>%s</tr>' % ''.join('<td%s>%s</td>' % (' class="num"' if i else '', html.escape(c))
                                            for i, c in enumerate(row))
                    for row in spec['table'])
-    table = ('<details class="table-view"><summary>Показать таблицей</summary>'
+    table = ('<details class="table-view"><summary>%s</summary>'
              '<div class="table-wrap"><table><thead><tr>%s</tr></thead><tbody>%s</tbody></table></div></details>'
-             % (head, body))
+             % (t['table'], head, body))
     return ('<figure class="chart"><h4>%s</h4><p class="sub">%s</p>%s%s%s%s</figure>'
             % (html.escape(spec['title']), spec['sub'], legend, ''.join(parts), table,
                '<figcaption>%s</figcaption>' % spec['caption'] if spec.get('caption') else ''))
@@ -688,10 +731,11 @@ LOGO = ('<svg width="26" height="26" viewBox="0 0 26 26" aria-hidden="true">'
         '<rect x="6" y="6" width="14" height="14" rx="4" fill="none" stroke="#fff" stroke-width="2"/>'
         '<circle cx="13" cy="13" r="2.6" fill="#fff"/></svg>')
 
+# Названия групп — LANGS[lang]['groups'] в том же порядке.
 GROUPS = [
-    ('Введение', ['index', 'problem', 'ideas']),
-    ('Руководство', ['spawn', 'guide', 'channels', 'practices', 'tooling']),
-    ('Подробности', ['inside', 'numbers', 'limits']),
+    ['index', 'problem', 'ideas'],
+    ['spawn', 'guide', 'channels', 'practices', 'tooling'],
+    ['inside', 'numbers', 'limits'],
 ]
 
 REPO = 'https://github.com/Tom4ikss/region-js'
@@ -716,41 +760,44 @@ THEME_SCRIPT = ("<script>try{var t=localStorage.getItem('theme');"
                 "if(t)document.documentElement.classList.add(t)}catch(e){}</script>")
 
 LAYOUT = '''<!doctype html>
-<html lang="ru">
+<html lang="{lang}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
 <meta name="description" content="{description}">
-<title>{title} · Регионы владения в V8</title>
+<title>{title} · {site}</title>
 {theme_script}
-<link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="assets/style.css?v={css_v}">
+<link rel="alternate" hreflang="{lang}" href="{slug}.html">
+<link rel="alternate" hreflang="{other_lang}" href="{other_href}">
+<link rel="icon" href="{base}assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="{base}assets/style.css?v={css_v}">
 </head>
 <body>
 <header class="topbar">
-  <a class="brand" href="index.html">{logo}<span>Регионы владения</span></a>
-  <span class="badge">эксперимент · форк V8</span>
+  <a class="brand" href="index.html">{logo}<span>{brand}</span></a>
+  <span class="badge">{badge}</span>
   <span class="spacer"></span>
-  <span class="meta">работает только в d8</span>
-  <a class="icon-btn" href="{repo}" aria-label="Код на GitHub">{github}<span class="label">GitHub</span></a>
-  <button class="icon-btn theme-toggle" type="button" aria-label="Сменить тему">{theme_icons}</button>
+  <span class="meta">{meta}</span>
+  <a class="icon-btn lang-switch" href="{other_href}" hreflang="{other_lang}" lang="{other_lang}" aria-label="{switch}">{switch_label}</a>
+  <a class="icon-btn" href="{repo}" aria-label="{github_label}">{github}<span class="label">GitHub</span></a>
+  <button class="icon-btn theme-toggle" type="button" aria-label="{theme}">{theme_icons}</button>
 </header>
 <div class="layout">
-<nav class="sidebar" aria-label="Разделы">
+<nav class="sidebar" aria-label="{sections}">
 {nav}
-<p class="side-note">Исследовательский прототип. Все примеры на сайте запущены в собранном d8, вывод настоящий.</p>
+<p class="side-note">{side_note}</p>
 </nav>
 <main>
 <article class="content">
 {body}
-<nav class="pager" aria-label="Соседние страницы">{pager}</nav>
-<p class="footer">Регионы владения в V8 — исследовательский прототип, не продукт. Цифры получены на сборке с включёнными проверками (dcheck), Apple Silicon, если на странице не сказано иное.</p>
+<nav class="pager" aria-label="{pager_label}">{pager}</nav>
+<p class="footer">{footer}</p>
 </article>
 </main>
 {toc}
 </div>
-<script src="assets/site.js?v={js_v}"></script>
+<script src="{base}assets/site.js?v={js_v}"></script>
 </body>
 </html>
 '''
@@ -770,8 +817,9 @@ def slugify(text):
 HEADING = re.compile(r'<(h[23])((?:\s+[\w-]+="[^"]*")*)>(.*?)</\1>', re.S)
 
 
-def headings(body):
-    """Даёт каждому h2 и h3 id и якорь и возвращает список для оглавления."""
+def headings(body, ids=None):
+    """Даёт каждому h2 и h3 id и якорь и возвращает список для оглавления.
+    ids — id тех же заголовков в другом языке, по порядку: так якоря совпадают."""
     toc, seen = [], set(re.findall(r'\bid="([^"]+)"', body))
 
     def fix(m):
@@ -780,6 +828,9 @@ def headings(body):
         mid = re.search(r'\bid="([^"]+)"', attrs)
         if mid:
             hid = mid.group(1)
+        elif ids:
+            hid = ids[len(toc)]
+            attrs += ' id="%s"' % hid
         else:
             base = hid = slugify(text)
             n = 2
@@ -795,13 +846,13 @@ def headings(body):
     return HEADING.sub(fix, body), toc
 
 
-def toc_block(toc):
+def toc_block(toc, t):
     if len(toc) < 2:
         return '<aside class="toc" aria-hidden="true"></aside>'
     items = '\n'.join('<li class="%s"><a href="#%s">%s</a></li>' % (tag, hid, html.escape(text))
                       for tag, hid, text in toc)
-    return ('<aside class="toc" aria-label="На этой странице"><p class="toc-title">На этой странице</p>'
-            '<ol>\n%s\n</ol></aside>' % items)
+    return ('<aside class="toc" aria-label="%s"><p class="toc-title">%s</p>'
+            '<ol>\n%s\n</ol></aside>' % (t['toc'], t['toc'], items))
 
 
 # Тексты не трогаются внутри этих тегов.
@@ -847,11 +898,28 @@ def asset_version(name):
         return hashlib.sha1(f.read()).hexdigest()[:10]
 
 
-def build(run=True):
-    outputs = run_examples(run)
+def charts(lang):
+    if lang == 'ru':
+        return CHARTS
+    from charts_en import CHARTS_EN
+    return CHARTS_EN
+
+
+def build_lang(lang, run, heading_ids):
+    t = LANGS[lang]
+    other = 'en' if lang == 'ru' else 'ru'
+    out_dir = os.path.join(ROOT, t['dir'])
+    examples = os.path.join(out_dir, 'examples')
+    pages_dir = os.path.join(ROOT, '_build', t['pages'])
+    outputs = run_examples(examples, run)
+    chart_specs = charts(lang)
     used = set()
-    for i, (slug, nav_title) in enumerate(PAGES):
-        with open(os.path.join(PAGES_DIR, slug + '.html'), encoding='utf-8') as f:
+    titles = {s: (ru_title if lang == 'ru' else en_title) for s, ru_title, en_title in PAGES}
+    slugs_in_order = [s for s, _, _ in PAGES]
+    number_of = {s: n + 1 for n, s in enumerate(slugs_in_order)}
+    to_other = os.path.relpath(os.path.join(ROOT, LANGS[other]['dir']), out_dir)
+    for i, slug in enumerate(slugs_in_order):
+        with open(os.path.join(pages_dir, slug + '.html'), encoding='utf-8') as f:
             src = f.read()
         meta = dict(re.findall(r'<!--\s*(title|description):\s*(.*?)\s*-->', src))
         body = re.sub(r'<!--\s*(title|description):.*?-->\n?', '', src)
@@ -859,43 +927,63 @@ def build(run=True):
         def ex(m):
             name, flags = m.group(1), (m.group(2) or '').split()
             used.add(name)
-            return example_block(name, flags, outputs)
+            return example_block(name, flags, examples, outputs, t)
 
         body = re.sub(r'<!--\s*ex:([\w.-]+\.js)((?:\s+\w+)*)\s*-->', ex, body)
-        body = re.sub(r'<!--\s*chart:([\w-]+)\s*-->', lambda m: hbar_chart(CHARTS[m.group(1)]), body)
-        body = SNIPPET.sub(snippet_block, body)
-        body, toc = headings(body)
-        body = typograph(body)
+        body = re.sub(r'<!--\s*chart:([\w-]+)\s*-->',
+                      lambda m: hbar_chart(chart_specs[m.group(1)], lang, t), body)
+        body = SNIPPET.sub(lambda m: snippet_block(m, t), body)
+        count = len(HEADING.findall(body))
+        ids = heading_ids.get(slug)
+        if ids is not None and len(ids) != count:
+            print('%s/%s.html: %d headings, %d in the other language; anchors will differ'
+                  % (lang, slug, count, len(ids)))
+            ids = None
+        body, toc = headings(body, ids)
+        heading_ids.setdefault(slug, [hid for _, hid, _ in toc])
+        if lang == 'ru':
+            body = typograph(body)
         body = glue_flags(body)
 
-        titles = dict(PAGES)
-        number = {s: n + 1 for n, (s, _) in enumerate(PAGES)}
         nav = '\n'.join(
             '<div class="group"><p class="group-title">%s</p><ol>\n%s\n</ol></div>' % (
                 group, '\n'.join('<li><a href="%s.html"%s><span class="n">%d</span>%s</a></li>'
-                                 % (s, ' aria-current="page"' if s == slug else '', number[s],
+                                 % (s, ' aria-current="page"' if s == slug else '', number_of[s],
                                     html.escape(titles[s]))
                                  for s in slugs))
-            for group, slugs in GROUPS)
+            for group, slugs in zip(t['groups'], GROUPS))
         pager = ''
         if i > 0:
-            ps, pt = PAGES[i - 1]
-            pager += '<a class="prev" href="%s.html"><span>← Назад</span>%s</a>' % (ps, html.escape(pt))
-        if i + 1 < len(PAGES):
-            ns, nt = PAGES[i + 1]
-            pager += '<a class="next" href="%s.html"><span>Дальше →</span>%s</a>' % (ns, html.escape(nt))
-        page = LAYOUT.format(title=html.escape(meta.get('title', nav_title)),
+            ps = slugs_in_order[i - 1]
+            pager += '<a class="prev" href="%s.html"><span>%s</span>%s</a>' % (ps, t['prev'], html.escape(titles[ps]))
+        if i + 1 < len(slugs_in_order):
+            ns = slugs_in_order[i + 1]
+            pager += '<a class="next" href="%s.html"><span>%s</span>%s</a>' % (ns, t['next'], html.escape(titles[ns]))
+        other_href = (slug + '.html') if to_other == '.' else '%s/%s.html' % (to_other, slug)
+        page = LAYOUT.format(title=html.escape(meta.get('title', titles[slug])),
                              description=html.escape(meta.get('description', '')),
                              logo=LOGO, nav=nav, body=body.strip(), pager=pager,
-                             toc=toc_block(toc), repo=REPO, github=GITHUB_ICON,
+                             toc=toc_block(toc, t), repo=REPO, github=GITHUB_ICON,
                              theme_icons=THEME_ICONS, theme_script=THEME_SCRIPT,
-                             css_v=asset_version('style.css'), js_v=asset_version('site.js'))
-        with open(os.path.join(ROOT, slug + '.html'), 'w', encoding='utf-8') as f:
+                             css_v=asset_version('style.css'), js_v=asset_version('site.js'),
+                             lang=lang, other_lang=other, other_href=other_href, slug=slug,
+                             base=t['base'], site=t['site'], brand=t['brand'], badge=t['badge'],
+                             meta=t['meta'], switch=t['switch'], switch_label=t['switch_label'],
+                             github_label=t['github'], theme=t['theme'], sections=t['sections'],
+                             side_note=t['side_note'], pager_label=t['pager'], footer=t['footer'])
+        with open(os.path.join(out_dir, slug + '.html'), 'w', encoding='utf-8') as f:
             f.write(page)
-        print('built %s.html' % slug)
+        print('built %s' % os.path.relpath(os.path.join(out_dir, slug + '.html'), ROOT))
     unused = sorted(set(outputs) - used)
     if unused:
-        print('examples not shown on any page:', ', '.join(unused))
+        print('%s examples not shown on any page: %s' % (lang, ', '.join(unused)))
+
+
+def build(run=True):
+    # Английский собирается первым, русские заголовки берут его якоря.
+    heading_ids = {}
+    for lang in LANGS:
+        build_lang(lang, run, heading_ids)
 
 
 if __name__ == '__main__':

@@ -1,5 +1,5 @@
-в буфере: 2 из 2
-recv: первое false
-send после close: send on a closed channel
-for await: {"text":"второе"}
-после конца: {"done":true}
+in the buffer: 2 of 2
+recv: first false
+send after close: send on a closed channel
+for await: {"text":"second"}
+after the end: {"done":true}

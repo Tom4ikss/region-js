@@ -1,3 +1,3 @@
-воркеров в пуле: 4
-100000 задач по очереди (join): 401 ms, 4 µs на задачу
-20000 задач сразу (await): 102 ms, последний результат 20000
+workers in the pool: 4
+100000 tasks one after another (join): 414 ms, 4 µs per task
+20000 tasks at once (await): 103 ms, last result 20000

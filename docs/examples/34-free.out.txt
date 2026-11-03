@@ -1,6 +1,6 @@
-байт в регионе: 8868772
-освобождён: true | байт после: 0
-view после free: 0
-обращение после free: OwnershipError: region 0 was freed (freed at 34-free.js:12:8)
-после блока using: OwnershipError: region 1 was freed (freed at 34-free.js:25:10)
-живых регионов: 0 | освобождённых: 2
+bytes in the region: 8868764
+freed: true | bytes after: 0
+view after free: 0
+access after free: OwnershipError: region 0 was freed (freed at 34-free.js:12:8)
+after the using block: OwnershipError: region 1 was freed (freed at 34-free.js:25:10)
+live regions: 0 | freed: 2

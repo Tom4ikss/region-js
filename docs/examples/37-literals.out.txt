@@ -1,10 +1,10 @@
-в регионе: true | сумма: 60
-{"id":1,"price":10,"tags":["новый"]}
-из run: true
-без текущего региона: TypeError: #{} and #[] need a current region: use region.enter() or region.run()
-#{} внутри #{}: работает
-обычный объект внутри: TypeError: #{} and #[] hold primitives and objects of their region; write nested objects as #{} and arrays as #[]
-после задачи: 4 | последний заказ: {"id":4,"price":40,"tags":[]}
+in the region: true | total: 60
+{"id":1,"price":10,"tags":["new"]}
+from run: true
+no current region: TypeError: #{} and #[] need a current region: use region.enter() or region.run()
+#{} inside #{}: works
+plain object inside: TypeError: #{} and #[] hold primitives and objects of their region; write nested objects as #{} and arrays as #[]
+after the task: 4 | last order: {"id":4,"price":40,"tags":[]}
 #{ ...x }: SyntaxError: Unexpected token '...'
 #{ [key]: 1 }: SyntaxError: Unexpected token '['
 #{ total() {} }: SyntaxError: Unexpected token '('

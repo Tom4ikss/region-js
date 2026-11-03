@@ -1,6 +1,6 @@
 // d8-flags: --module
-// Задача берёт билет на замороженный регион в момент spawn(), а не при старте.
-// region.thawWhenFree() ждёт, пока билеты сдадут, и размораживает.
+// A task takes its borrow on a frozen region at the spawn() call, not when it starts.
+// region.thawWhenFree() waits until the borrows are returned, then thaws.
 const config = new Region().run(() => ({ limit: 10 }));
 const region = Region.of(config);
 region.freeze();
@@ -10,16 +10,16 @@ const busy = spawn(() => {
   const end = performance.now() + 50;
   while (performance.now() < end);
 });
-const queued = spawn((config) => config.limit, config);  // ждёт в очереди
+const queued = spawn((config) => config.limit, config);  // waits in the queue
 
-print('readers сразу после spawn:', region.readers);
+print('readers right after spawn:', region.readers);
 try {
   region.thaw();
 } catch (e) {
   print(e.name + ':', e.message);
 }
 
-await region.thawWhenFree();         // задачи закончились, билеты сданы
+await region.thawWhenFree();         // the tasks finished, the borrows are returned
 config.limit = 99;
-print('задача прочитала', await queued, '| теперь limit =', config.limit);
+print('the task read', await queued, '| now limit =', config.limit);
 await busy;

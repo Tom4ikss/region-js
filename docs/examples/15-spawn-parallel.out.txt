@@ -1,5 +1,5 @@
-результаты совпадают: true
-по очереди: 504 ms
-все сразу:  139 ms (x3.6)
-6 задач, пул из 4: 256 ms
-6 задач, пул из 6: 141 ms
+results match: true
+one after another: 489 ms
+all at once:       140 ms (x3.5)
+6 tasks, pool of 4: 250 ms
+6 tasks, pool of 6: 140 ms

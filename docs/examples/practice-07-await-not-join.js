@@ -1,8 +1,8 @@
-// Практика 7. В главном потоке ждать задачу через await, а не join().
-// Пока задача считается (~0,2 с), главный поток гоняет цепочку setTimeout — как будто
-// обрабатывает клики и кадры. Считаем, сколько раз он успел отреагировать и
-// какой была самая длинная пауза. В d8 setTimeout не ждёт указанную задержку,
-// поэтому цепочка крутится так быстро, как позволяет поток.
+// Practice 7. On the main thread, wait for a task with await, not join().
+// While the task computes (~0.2 s), the main thread runs a setTimeout chain, as if it
+// were handling clicks and frames. We count how many times it managed to respond and
+// how long the longest pause was. In d8, setTimeout does not wait for the given delay,
+// so the chain spins as fast as the thread allows.
 const heavy = (n) => {
   let t = 0;
   for (let i = 0; i < n; i++) t = (t + i * i) % 1000003;
@@ -25,19 +25,19 @@ const watchMainThread = (label, wait) => new Promise((resolve) => {
     running = false;
     const total = performance.now() - start;
     setTimeout(() => {
-      print(`${label}: задача ${total.toFixed(0)} ms, главный поток ответил ${ticks} раз, ` +
-        `самая длинная пауза ${longest.toFixed(1)} ms`);
+      print(`${label}: task ${total.toFixed(0)} ms, the main thread responded ${ticks} times, ` +
+        `longest pause ${longest.toFixed(1)} ms`);
       resolve();
     }, 0);
   });
 });
 
 (async () => {
-  // Плохо: join() останавливает главный поток до конца задачи.
+  // Bad: join() stops the main thread until the task ends.
   await watchMainThread('join ', async () => {
     spawn(heavy, N).join();
   });
-  // Хорошо: await отпускает поток, пока задача считается в воркере.
+  // Good: await releases the thread while the task computes in a worker.
   await watchMainThread('await', async () => {
     await spawn(heavy, N);
   });

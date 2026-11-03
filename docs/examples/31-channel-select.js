@@ -1,5 +1,5 @@
 // d8-flags: --module
-// select ждёт тот канал, в котором значение появится первым.
+// select waits for the channel in which a value appears first.
 const results = new Channel(1);
 const errors = new Channel(1);
 
@@ -12,10 +12,10 @@ const task = spawn(async () => {
 });
 
 const first = await Channel.select([results, errors]);
-print(first.channel === results ? 'результат:' : 'ошибка:', JSON.stringify(first.value));
+print(first.channel === results ? 'result:' : 'error:', JSON.stringify(first.value));
 await task;
 
-// Закрытый канал тоже «готов»: select вернёт его с done: true.
+// A closed channel is "ready" too: select returns it with done: true.
 errors.close();
 const closed = await Channel.select([results, errors]);
-print('закрытый:', closed.channel === errors, closed.done);
+print('closed:', closed.channel === errors, closed.done);

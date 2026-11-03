@@ -1,4 +1,4 @@
-обычные объекты      : создание 25 ms, проход 0.2 ms (сумма 9900000)
-один region.run      : создание 155 ms, проход 0.7 ms (сумма 9900000)
-run по одному и push : создание 384 ms, проход 1.2 ms (сумма 9900000)
-литерал #{} и push   : создание 75 ms, проход 0.7 ms (сумма 9900000)
+plain objects        : build 35 ms, pass 0.2 ms (sum 9900000)
+one region.run       : build 165 ms, pass 0.6 ms (sum 9900000)
+run per item and push: build 364 ms, pass 0.6 ms (sum 9900000)
+#{} literal and push : build 73 ms, pass 0.6 ms (sum 9900000)

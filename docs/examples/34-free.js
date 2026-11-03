@@ -1,24 +1,24 @@
 // d8-flags: --module --expose-gc
-// free(): регион больше никто не тронет, память отдаётся сразу.
+// free(): nobody will touch the region again, and its memory is released at once.
 const region = new Region();
 const tree = region.run(() => ({
-  name: 'дерево',
+  name: 'tree',
   samples: new Float64Array(1 << 20),
   nodes: Array.from({ length: 10000 }, (_, i) => ({ i })),
 }));
-print('байт в регионе:', region.byteSize);
+print('bytes in the region:', region.byteSize);
 const samples = tree.samples;
 
 region.free();
-print('освобождён:', region.freed, '| байт после:', region.byteSize);
-print('view после free:', samples.length);
+print('freed:', region.freed, '| bytes after:', region.byteSize);
+print('view after free:', samples.length);
 try {
   print(tree.name);
 } catch (e) {
-  print('обращение после free:', String(e));
+  print('access after free:', String(e));
 }
 
-// using освобождает регион в конце блока.
+// using frees the region at the end of the block.
 let leaked;
 {
   using temp = new Region();
@@ -27,6 +27,6 @@ let leaked;
 try {
   leaked.draft;
 } catch (e) {
-  print('после блока using:', String(e));
+  print('after the using block:', String(e));
 }
-print('живых регионов:', Region.stats().regions, '| освобождённых:', Region.stats().freed);
+print('live regions:', Region.stats().regions, '| freed:', Region.stats().freed);

@@ -1,4 +1,4 @@
-задача a: DeadlockError: deadlock: every thread is waiting, and none of them can wake the others
-задача b: DeadlockError: deadlock: every thread is waiting, and none of them can wake the others
-главный поток: DeadlockError
-теперь есть что получить
+task a: DeadlockError: deadlock: every thread is waiting, and none of them can wake the others
+task b: DeadlockError: deadlock: every thread is waiting, and none of them can wake the others
+main thread: DeadlockError
+now there is something to receive

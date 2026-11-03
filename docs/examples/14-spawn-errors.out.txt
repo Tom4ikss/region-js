@@ -1,12 +1,12 @@
-встроенная функция: TypeError: captured function log is native, bound or a method and cannot be sent
+built-in function: TypeError: captured function log is native, bound or a method and cannot be sent
 eval: TypeError: spawn() callback cannot use eval or with
-класс: TypeError: spawn() callback declares or is a class; classes are not supported
-захваченный класс: TypeError: captured function Point declares or is a class; classes are not supported
-метод объекта: TypeError: spawn() needs an arrow function or a function expression
-не функция: TypeError: spawn() expects a function
-до инициализации: TypeError: later is captured before its initialization
-одно имя, разные значения: TypeError: k refers to different values in different places
-Map в аргументе: TypeError: spawn() cannot send an argument: it contains a function, a class instance or another value that cannot be moved into a region
-throw в потоке: RangeError: too far
-результат нельзя переместить: TypeError: #<Map> cannot be moved into a region
-второй join: без ошибки
+class: TypeError: spawn() callback declares or is a class; classes are not supported
+captured class: TypeError: captured function Point declares or is a class; classes are not supported
+object method: TypeError: spawn() needs an arrow function or a function expression
+not a function: TypeError: spawn() expects a function
+before initialization: TypeError: later is captured before its initialization
+one name, different values: TypeError: k refers to different values in different places
+Map as an argument: TypeError: spawn() cannot send an argument: it contains a function, a class instance or another value that cannot be moved into a region
+throw in the thread: RangeError: too far
+the result cannot be moved: TypeError: #<Map> cannot be moved into a region
+second join: no error

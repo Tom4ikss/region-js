@@ -1,32 +1,32 @@
 // d8-flags: --module
-// Дедлок: все потоки ждут, и разбудить друг друга им некому.
+// A deadlock: all threads are waiting, and none of them can wake the others.
 const ping = new Channel();
 const pong = new Channel();
 
-// Обе задачи сначала ждут, а отправляют потом: такой обмен не начнётся никогда.
+// Both tasks wait first and send later: this exchange never starts.
 const a = spawn(async (ping, pong) => {
   await ping.recv();
-  await pong.send('от a');
+  await pong.send('from a');
 }, ping, pong);
 const b = spawn(async (ping, pong) => {
   await pong.recv();
-  await ping.send('от b');
+  await ping.send('from b');
 }, ping, pong);
 
 for (const [name, task] of [['a', a], ['b', b]]) {
   try {
     await task;
   } catch (e) {
-    print(`задача ${name}: ${e.name}: ${e.message}`);
+    print(`task ${name}: ${e.name}: ${e.message}`);
   }
 }
 
-// Ошибку можно поймать и продолжить.
+// The error can be caught, and the program can go on.
 const lonely = new Channel(1);
 try {
   await lonely.recv();
 } catch (e) {
-  print('главный поток:', e.name);
+  print('main thread:', e.name);
 }
-await lonely.send('теперь есть что получить');
+await lonely.send('now there is something to receive');
 print((await lonely.recv()).value);

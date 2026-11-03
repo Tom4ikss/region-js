@@ -1,34 +1,34 @@
-// Сколько стоит положить данные в регион: 200 000 товаров { id, name, tags, price }.
-// Четыре способа собрать один и тот же массив, и после каждого — проход по нему.
+// The cost of putting data into a region: 200,000 products { id, name, tags, price }.
+// Four ways to build the same array, and a pass over it after each one.
 const N = 200_000;
-const item = (i) => ({ id: i, name: 'товар ' + i, tags: ['новый', 'склад'], price: i % 100 });
+const item = (i) => ({ id: i, name: 'item ' + i, tags: ['new', 'in stock'], price: i % 100 });
 
-// 1. Обычные объекты, без регионов.
+// 1. Plain objects, no regions.
 const plain = () => Array.from({ length: N }, (_, i) => item(i));
 
-// 2. Собрать обычные объекты и скопировать в регион через run.
+// 2. Build plain objects and copy them into a region with run.
 const viaRun = (region) => region.run(plain);
 
-// 3. По одному: каждый объект копирует в регион свой run, массив региона растёт через push.
+// 3. One at a time: each object is copied into the region by its own run, the region array grows with push.
 const viaRunEach = (region) => {
   const list = region.run(() => []);
   for (let i = 0; i < N; i++) list.push(region.run(() => item(i)));
   return list;
 };
 
-// 4. Литерал #{} создаёт объект сразу в регионе, без копии; массив растёт через push.
+// 4. The #{} literal creates the object directly in the region, without a copy; the array grows with push.
 const viaLiteral = (region) => {
   using _ = region.enter();
   const list = #[];
   for (let i = 0; i < N; i++) {
-    list.push(#{ id: i, name: 'товар ' + i, tags: #['новый', 'склад'], price: i % 100 });
+    list.push(#{ id: i, name: 'item ' + i, tags: #['new', 'in stock'], price: i % 100 });
   }
   return list;
 };
 
-// Каждому способу своя копия функции прохода, чтобы подсказки inline cache не смешивались.
+// Each way gets its own copy of the pass function, so that inline cache feedback does not mix.
 let copies = 0;
-const makeSum = () => new Function('list', `// копия ${++copies}
+const makeSum = () => new Function('list', `// copy ${++copies}
   let total = 0;
   for (let i = 0; i < list.length; i++) total += list[i].price;
   return total;
@@ -46,10 +46,10 @@ const measure = (label, build) => {
     total = sumPrices(list);
     readMs = Math.min(readMs, performance.now() - t);
   }
-  print(`${label}: создание ${buildMs.toFixed(0)} ms, проход ${readMs.toFixed(1)} ms (сумма ${total})`);
+  print(`${label}: build ${buildMs.toFixed(0)} ms, pass ${readMs.toFixed(1)} ms (sum ${total})`);
 };
 
-measure('обычные объекты      ', () => plain());
-measure('один region.run      ', viaRun);
-measure('run по одному и push ', viaRunEach);
-measure('литерал #{} и push   ', viaLiteral);
+measure('plain objects        ', () => plain());
+measure('one region.run       ', viaRun);
+measure('run per item and push', viaRunEach);
+measure('#{} literal and push ', viaLiteral);

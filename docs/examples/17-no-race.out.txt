@@ -1,3 +1,3 @@
-воркер A (владелец): записей 1000000 | отказов 0
-воркер B (не владелец): записей 0 | отказов 1000000
-итог в главном потоке: 1000000
+worker A (owner): writes 1000000 | denied 0
+worker B (not owner): writes 0 | denied 1000000
+total in the main thread: 1000000

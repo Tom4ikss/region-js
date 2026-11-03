@@ -1,4 +1,4 @@
-// Кнопки «Копировать» у примеров, подсказки у столбцов графиков, переключатель темы и
+// Кнопки копирования у примеров, переключатель языка, подсказки у столбцов графиков, переключатель темы и
 // подсветка текущего раздела в оглавлении. Больше скриптов на сайте нет.
 (function () {
   'use strict';
@@ -70,14 +70,23 @@
   document.querySelectorAll('.example .copy').forEach(function (button) {
     button.addEventListener('click', function () {
       var code = button.closest('.example').querySelector('pre.code');
+      var label = button.dataset.label || button.textContent;
+      button.dataset.label = label;
       copyText(code.textContent).then(function () {
-        button.textContent = 'Скопировано';
+        button.textContent = button.dataset.done || label;
         button.classList.add('done');
         setTimeout(function () {
-          button.textContent = 'Копировать';
+          button.textContent = label;
           button.classList.remove('done');
         }, 1600);
       });
+    });
+  });
+
+  // Другой язык открывается на том же разделе: якоря заголовков на обоих языках одинаковые.
+  document.querySelectorAll('a.lang-switch').forEach(function (link) {
+    link.addEventListener('click', function () {
+      if (location.hash) link.href = link.href.split('#')[0] + location.hash;
     });
   });
 

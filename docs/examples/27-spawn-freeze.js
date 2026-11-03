@@ -1,18 +1,18 @@
 // d8-flags: --module
-// Задача заморозила регион: право разморозить возвращается вместе с результатом.
+// A task froze a region: the right to thaw comes back together with the result.
 const index = await spawn(() => {
   const region = new Region();
-  const built = region.run(() => ({ words: ['арбуз', 'банан', 'вишня'], built: true }));
-  region.freeze(); // готовый справочник: только для чтения
+  const built = region.run(() => ({ words: ['apple', 'banana', 'cherry'], built: true }));
+  region.freeze(); // a finished lookup table: read-only
   return built;
 });
 const region = Region.of(index);
 print('frozen:', region.frozen, '| frozenHere:', region.frozenHere);
 
-// Замороженный результат можно сразу отдать другим задачам без копии.
+// The frozen result can be handed to other tasks right away, without a copy.
 const lengths = await Promise.all([0, 1, 2].map((i) => spawn(() => index.words[i].length)));
-print('длины из трёх задач:', lengths.join(', '));
+print('lengths from three tasks:', lengths.join(', '));
 
-region.thaw(); // право у главного потока
+region.thaw(); // the main thread has the right
 index.built = false;
-print('после thaw главный поток пишет:', index.built);
+print('after thaw the main thread writes:', index.built);

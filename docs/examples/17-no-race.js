@@ -1,4 +1,4 @@
-// Та же попытка с регионом: у обоих воркеров есть ссылка на счётчик, но писать может только владелец.
+// The same attempt with a region: both workers have a reference to the counter, but only the owner can write.
 const region = new Region();
 const counter = region.run(() => ({ value: 0 }));
 
@@ -17,19 +17,19 @@ const source = `
 const a = new Worker(source, { type: 'string' });
 const b = new Worker(source, { type: 'string' });
 
-// Раздаём обоим ссылку на один и тот же объект (через заморозку, как рассылку).
+// Give both a reference to the same object (through freezing, like a broadcast).
 region.freeze();
 for (const w of [a, b]) w.postMessage({ keep: counter });
 for (const w of [a, b]) w.getMessage();
 region.thaw();
 
-// Владельцем делаем только воркер A и запускаем обоих одновременно.
+// Make only worker A the owner and start both at the same time.
 a.postMessage({ owner: true }, [region]);
 b.postMessage({ owner: false });
 const ra = a.getMessage();
 const rb = b.getMessage();
-print('воркер A (владелец): записей', ra.done, '| отказов', ra.denied);
-print('воркер B (не владелец): записей', rb.done, '| отказов', rb.denied);
-print('итог в главном потоке:', counter.value);
+print('worker A (owner): writes', ra.done, '| denied', ra.denied);
+print('worker B (not owner): writes', rb.done, '| denied', rb.denied);
+print('total in the main thread:', counter.value);
 a.terminate();
 b.terminate();

@@ -1,4 +1,4 @@
-// await handle не блокирует главный поток. Колбэк может быть async.
+// await handle does not block the main thread. The callback can be async.
 (async () => {
   const heavy = (n) => spawn((n) => {
     let t = 0;
@@ -7,22 +7,22 @@
   }, n);
 
   const pending = Promise.all([heavy(5_000_000), heavy(6_000_000), heavy(7_000_000)]);
-  print('задачи запущены, главный поток свободен');
+  print('tasks started, the main thread is free');
   const results = await pending;
-  print('результаты:', results.join(', '));
+  print('results:', results.join(', '));
 
   const page = await spawn(async (id) => {
     await new Promise((resolve) => setTimeout(resolve, 10));
     return { id, rows: [1, 2, 3] };
   }, 'page-7');
-  print('async-колбэк:', page.id, page.rows.length, 'строки');
+  print('async callback:', page.id, page.rows.length, 'rows');
 
   try {
     await spawn(async () => {
       await null;
-      throw new RangeError('слишком далеко');
+      throw new RangeError('too far');
     });
   } catch (e) {
-    print('ошибка из потока:', e.name + ':', e.message);
+    print('error from the thread:', e.name + ':', e.message);
   }
 })();

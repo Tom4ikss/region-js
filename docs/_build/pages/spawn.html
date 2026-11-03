@@ -1,190 +1,190 @@
-<!-- title: spawn: задачи в потоках -->
-<!-- description: spawn(callback, ...args): функция в отдельном потоке, join и await, захват переменных, this и arguments, вложенные задачи, ошибки, заморозка и билеты внутри задач. -->
-<p class="eyebrow">Глава 3</p>
-<h1>spawn: функция в отдельном потоке</h1>
-<p class="lead">Чтобы вынести работу в воркер, обычно нужен отдельный файл или строка с кодом, обработчик сообщений и протокол «что отправить, что получить». <code>spawn</code> сводит это к одному вызову: передаёте функцию и аргументы, получаете результат. Данные между потоками переезжают в регионах, без копии, а если задача создаёт результат с директивой <code>'use region'</code>, он с самого начала лежит в общей памяти и не копируется ни разу.</p>
+<!-- title: spawn: tasks on threads -->
+<!-- description: spawn(callback, ...args): a function on a separate thread, join and await, capturing variables, this and arguments, nested tasks, errors, freezing and borrows inside tasks. -->
+<p class="eyebrow">Chapter 3</p>
+<h1>spawn: a function on a separate thread</h1>
+<p class="lead">Moving work to a worker usually takes a separate file or a string of code, a message handler, and a protocol for what to send and what to receive. <code>spawn</code> reduces this to one call: you pass a function and arguments and get the result. Data moves between threads in regions, without a copy, and if the task creates its result with the <code>'use region'</code> directive, the result lives in shared memory from the start and is never copied at all.</p>
 
-<h2 id="basic">Запустить и дождаться</h2>
-<p><code>spawn(callback, ...args)</code> запускает <code>callback(...args)</code> в одном из воркеров пула и сразу возвращает ручку задачи. Главный поток в это время идёт дальше. <code>handle.join()</code> ждёт результат, останавливая поток.</p>
+<h2 id="basic">Start and wait</h2>
+<p><code>spawn(callback, ...args)</code> runs <code>callback(...args)</code> on one of the workers in the pool and immediately returns a task handle. The main thread keeps going in the meantime. <code>handle.join()</code> waits for the result and blocks the thread.</p>
 
 <!--ex:10-spawn-basic.js-->
 
-<p>Аргументы и результат идут через регионы. Обычные данные в аргументах копируются в регион и переезжают в воркер вместе с ним. Объект региона в аргументе не копируется: он едет так же, как захваченный (об этом <a href="#captures">ниже</a>). Результат воркер кладёт в свой регион и отдаёт обратно. Когда <code>join()</code> вернул значение, его владелец — главный поток: результат можно читать и менять, но, как у любого объекта региона, нельзя добавлять новые поля.</p>
-<p>Обычный объект, который вернула задача, копируется в регион один раз, в воркере. Без этой копии можно обойтись: если задача войдёт в свой регион и создаст результат литералами <code>#{}</code> или в коде с <code>'use region'</code>, объекты сразу лежат в регионе, и обратно уезжает сам регион. Так собираются заказы в <a href="index.html">примере на главной</a>, подробнее о литералах — в разделе <a href="guide.html#literals">«Литералы»</a>.</p>
+<p>Arguments and the result travel through regions. Plain data in the arguments is copied into a region and moves to the worker together with it. A region object passed as an argument is not copied: it travels the same way as a captured one (more on that <a href="#captures">below</a>). The worker puts the result into its own region and sends it back. Once <code>join()</code> has returned a value, its owner is the main thread: the result can be read and changed, but, as with any region object, new fields cannot be added.</p>
+<p>A plain object returned by a task is copied into a region once, in the worker. This copy can be avoided: if the task enters its own region and creates the result with <code>#{}</code> literals or in code with <code>'use region'</code>, the objects live in the region from the start, and the region itself travels back. This is how the orders are built in the <a href="index.html">example on the home page</a>; for more on literals, see <a href="guide.html#literals">Literals</a>.</p>
 
-<h2 id="await">Ждать без блокировки: <code>await</code></h2>
-<p><code>join()</code> останавливает поток, и в браузере в главном потоке так делать не стоит (Biome в <a href="tooling.html#biome">песочнице</a> предупреждает об этом). Ручку задачи можно ждать через <code>await</code>: она ведёт себя как промис, и поток в это время свободен. Работает и <code>Promise.all</code>. Сама функция-задача тоже может быть <code>async</code>: воркер дождётся её промиса и только потом ответит.</p>
+<h2 id="await">Waiting without blocking: <code>await</code></h2>
+<p><code>join()</code> blocks the thread, and in a browser you should not do that on the main thread (Biome in the <a href="tooling.html#biome">sandbox</a> warns about it). A task handle can be awaited with <code>await</code>: it behaves like a promise, and the thread stays free in the meantime. <code>Promise.all</code> works too. The task function itself can also be <code>async</code>: the worker waits for its promise and only then answers.</p>
 
 <!--ex:11-spawn-await.js-->
 
-<p>Ошибка, выброшенная в потоке, приходит обратно с тем же типом (<code>RangeError</code> остаётся <code>RangeError</code>) и тем же текстом. Ручку можно ждать сколько угодно раз и как угодно: <code>join()</code>, <code>await</code>, снова <code>join()</code>. Задача заканчивается один раз, и каждый раз приходит тот же результат (тот же объект) или та же ошибка.</p>
-<p>В примере есть <code>setTimeout(resolve, 10)</code>. В d8 <code>setTimeout</code> не ждёт указанную задержку: колбэки выполняются по очереди, как только поток свободен. В примерах таймер нужен только для того, чтобы работа стала асинхронной.</p>
+<p>An error thrown on the thread comes back with the same type (a <code>RangeError</code> stays a <code>RangeError</code>) and the same message. A handle can be waited on any number of times and in any way: <code>join()</code>, <code>await</code>, <code>join()</code> again. The task finishes once, and every time you get the same result (the same object) or the same error.</p>
+<p>The example uses <code>setTimeout(resolve, 10)</code>. In d8, <code>setTimeout</code> does not wait for the given delay: callbacks run in turn as soon as the thread is free. In the examples the timer is there only to make the work asynchronous.</p>
 
-<h3 id="module">Модули: <code>await</code> на верхнем уровне</h3>
-<p>Обычный скрипт d8 не разрешает <code>await</code> вне функции, поэтому примеры выше оборачивают код в <code>(async () =&gt; { ... })()</code>. С флагом <code>--module</code> файл выполняется как модуль, и <code>await spawn(...)</code> можно писать прямо на верхнем уровне. Перед выходом d8 дожидается задач, которые ещё идут, даже тех, которые никто не ждёт.</p>
+<h3 id="module">Modules: top-level <code>await</code></h3>
+<p>A plain d8 script does not allow <code>await</code> outside a function, so the examples above wrap the code in <code>(async () =&gt; { ... })()</code>. With the <code>--module</code> flag the file runs as a module, and <code>await spawn(...)</code> can be written directly at the top level. Before exiting, d8 waits for tasks that are still running, even those nobody waits for.</p>
 
 <!--ex:26-module-await.js-->
 
-<h2 id="captures">Захват переменных</h2>
-<p>Функция в воркере не видит переменных главного потока: у воркера свой мир. <code>spawn</code> сам смотрит, какими внешними именами пользуется ваша функция, и отправляет их вместе с ней. Аргументы подчиняются тем же правилам, что и захваченные переменные.</p>
+<h2 id="captures">Capturing variables</h2>
+<p>A function in a worker does not see the main thread's variables: the worker has its own world. <code>spawn</code> itself looks at which outer names your function uses and sends them along with it. Arguments follow the same rules as captured variables.</p>
 
 <!--ex:12-spawn-captures.js-->
 
-<p>Что происходит с захваченным значением, зависит от его вида:</p>
+<p>What happens to a captured value depends on its kind:</p>
 <div class="table-wrap">
 <table>
-<thead><tr><th>Что захвачено или передано аргументом</th><th>Что с ним происходит</th></tr></thead>
+<thead><tr><th>What is captured or passed as an argument</th><th>What happens to it</th></tr></thead>
 <tbody>
-<tr><td>Обычные данные: числа, строки, простые объекты, массивы, типизированные массивы</td><td>Копируются, и в каждую задачу заново. Изменения в потоке назад не возвращаются.</td></tr>
-<tr><td>Объект из региона</td><td>Регион переезжает в задачу и возвращается к вам после неё, даже если задача упала с ошибкой. Типизированные массивы в нём едут вместе с регионом, без копии; ваши старые view на время задачи <a href="guide.html#typed-detach">отсоединяются</a>.</td></tr>
-<tr><td>Объект из замороженного региона</td><td>Остаётся общим: его читают и задача, и главный поток одновременно.</td></tr>
-<tr><td>Ваша функция, стрелочная или обычная (только захватом)</td><td>Передаётся исходным текстом и разбирается так же, вместе с её собственными захватами.</td></tr>
-<tr><td>Встроенные <code>Math</code>, <code>JSON</code>, <code>Array</code> и т. п.</td><td>Не передаются: в воркере есть свои.</td></tr>
+<tr><td>Plain data: numbers, strings, simple objects, arrays, typed arrays</td><td>Copied, again for every task. Changes made on the thread do not come back.</td></tr>
+<tr><td>An object from a region</td><td>The region moves into the task and comes back to you after it, even if the task failed with an error. Typed arrays in it travel with the region, without a copy; your old views are <a href="guide.html#typed-detach">detached</a> for the duration of the task.</td></tr>
+<tr><td>An object from a frozen region</td><td>Stays shared: the task and the main thread read it at the same time.</td></tr>
+<tr><td>Your function, arrow or regular (captures only)</td><td>Sent as source text and analyzed the same way, together with its own captures.</td></tr>
+<tr><td>Built-ins <code>Math</code>, <code>JSON</code>, <code>Array</code>, etc.</td><td>Not sent: the worker has its own.</td></tr>
 </tbody>
 </table>
 </div>
 
 <div class="callout analogy">
-<span class="callout-title">Аналогия</span>
-<p>Вы отправляете помощника в командировку и собираете ему чемодан. <code>spawn</code> смотрит в инструкцию (код функции) и кладёт в чемодан всё, что там упомянуто. Справочные данные — ксерокопией. Рабочие папки (регионы) — оригиналами, с возвратом по окончании. Общую библиотеку (замороженный регион) — просто адресом, туда можно ходить всем. Ручку и бумагу (<code>Math</code>, <code>JSON</code>) брать не нужно: на месте есть свои.</p>
+<span class="callout-title">Analogy</span>
+<p>You send an assistant on a business trip and pack a suitcase for them. <code>spawn</code> reads the instructions (the function's code) and packs everything mentioned there. Reference data goes as photocopies. Working folders (regions) go as originals, to be returned when the trip is over. The shared library (a frozen region) goes as just an address that everyone can visit. Pen and paper (<code>Math</code>, <code>JSON</code>) need not be packed: there are some on site.</p>
 </div>
 
-<h3>Возврат регионов похож на заём</h3>
-<p>Регион, захваченный задачей или переданный ей аргументом, ведёт себя так, будто вы одолжили его на время задачи. Пока задача идёт, главный поток к нему не притронется: он в воркере. Как только задача закончилась (ответом или ошибкой), регион вернулся, и можно снова писать.</p>
+<h3>Returning regions is like a loan</h3>
+<p>A region captured by a task or passed to it as an argument behaves as if you lent it out for the duration of the task. While the task is running, the main thread will not touch it: it is in the worker. As soon as the task has finished (with an answer or an error), the region is back, and you can write to it again.</p>
 
 <div class="callout aside">
-<span class="callout-title">Если вы знаете Rust</span>
-<p>Это похоже на <code>std::thread::scope</code>: заимствованное возвращается, когда поток завершён. Сходство полное и для вложенных задач, об этом <a href="#nested">ниже</a>.</p>
+<span class="callout-title">If you know Rust</span>
+<p>This is similar to <code>std::thread::scope</code>: what was borrowed comes back when the thread has finished. The similarity holds for nested tasks too; more on that <a href="#nested">below</a>.</p>
 </div>
 
-<h2 id="this">this и arguments</h2>
-<p>У стрелочной функции нет своих <code>this</code> и <code>arguments</code>: она берёт их у внешней функции. <code>spawn</code> захватывает и их. Если <code>this</code> на верхнем уровне скрипта — это глобальный объект, в воркере будет свой глобальный объект.</p>
+<h2 id="this">this and arguments</h2>
+<p>An arrow function has no <code>this</code> or <code>arguments</code> of its own: it takes them from the outer function. <code>spawn</code> captures them as well. If <code>this</code> at the top level of a script is the global object, the worker gets its own global object.</p>
 
 <!--ex:13-spawn-this.js-->
 
-<p>Во втором случае <code>this</code> — объект <code>store</code> с методом <code>count</code>. Функции в регион не попадают, поэтому отправить такой <code>this</code> нельзя. Решение — вынести нужное в переменную: <code>const items = this.items</code>, а в задаче использовать <code>items</code>.</p>
+<p>In the second case, <code>this</code> is the <code>store</code> object with the <code>count</code> method. Functions do not go into a region, so such a <code>this</code> cannot be sent. The fix is to move what you need into a variable: <code>const items = this.items</code>, and use <code>items</code> in the task.</p>
 
-<h2 id="gotchas">Три вещи, о которых легко забыть</h2>
+<h2 id="gotchas">Three things that are easy to forget</h2>
 
 <!--ex:18-spawn-gotchas.js-->
 
 <ol>
-  <li><strong>Обычные данные — копия</strong>, и захваченные, и переданные аргументом. Изменения в потоке назад не приходят.</li>
-  <li><strong>Чтобы изменения вернулись, данные должны лежать в регионе.</strong> Регион уезжает в задачу и возвращается после неё, как бы вы его ни передали: захватом или аргументом. Другой путь — вернуть новые данные результатом.</li>
-  <li><strong>Результат лежит в регионе.</strong> Форма у него фиксирована, новое поле не добавить, а массивы в нём растут и укорачиваются как обычно. Нужен изменяемый объект — сделайте копию через spread: <code>{ ...result }</code>. Копия поверхностная: вложенные объекты и массивы остаются в регионе.</li>
+  <li><strong>Plain data is a copy</strong>, both captured and passed as an argument. Changes made on the thread do not come back.</li>
+  <li><strong>For changes to come back, the data must live in a region.</strong> The region goes into the task and comes back after it, however you passed it: by capture or as an argument. The other way is to return the new data as the result.</li>
+  <li><strong>The result lives in a region.</strong> Its shape is fixed and a new field cannot be added, while arrays in it grow and shrink as usual. If you need a mutable object, make a copy with spread: <code>{ ...result }</code>. The copy is shallow: nested objects and arrays stay in the region.</li>
 </ol>
 
-<h2 id="errors">Что spawn отклоняет сразу</h2>
-<p>Если функцию нельзя отправить, <code>spawn</code> бросает ошибку в месте вызова, до запуска воркера. Ошибки задачи, наоборот, приходят при <code>join()</code> или <code>await</code> (а если задачу никто не ждёт, смотрите <a href="#unhandled">следующий раздел</a>).</p>
+<h2 id="errors">What spawn rejects right away</h2>
+<p>If a function cannot be sent, <code>spawn</code> throws an error at the call site, before the worker starts. Errors from the task, on the other hand, arrive at <code>join()</code> or <code>await</code> (and if nobody waits for the task, see the <a href="#unhandled">next section</a>).</p>
 
 <!--ex:14-spawn-errors.js-->
 
 <div class="table-wrap">
 <table>
-<thead><tr><th>Что</th><th>Почему нельзя</th></tr></thead>
+<thead><tr><th>What</th><th>Why it is not allowed</th></tr></thead>
 <tbody>
-<tr><td><code>eval</code> и <code>with</code></td><td>С ними нельзя заранее понять, какие имена использует функция.</td></tr>
-<tr><td>Классы (объявленные внутри или захваченные)</td><td>Пока не поддерживаются. Экземпляр класса к тому же нельзя положить в регион (см. <a href="guide.html#not-allowed">что нельзя положить в регион</a>), а значит, и вернуть результатом.</td></tr>
-<tr><td>Встроенные, привязанные (<code>bind</code>) функции и методы объектов</td><td>Их исходный текст нельзя выполнить как отдельную функцию. Колбэком должна быть стрелочная функция или function expression.</td></tr>
-<tr><td>Переменная, объявленная позже вызова</td><td>На момент вызова у неё ещё нет значения (temporal dead zone).</td></tr>
-<tr><td>Одно имя с разными значениями</td><td>Две захваченные функции видят под одним именем разные значения, а в воркере у каждого имени одно значение.</td></tr>
-<tr><td><code>this</code> или аргумент с функциями, <code>Map</code>, экземплярами классов и т. п.</td><td>В регион такое не кладётся.</td></tr>
+<tr><td><code>eval</code> and <code>with</code></td><td>With them, there is no way to tell in advance which names the function uses.</td></tr>
+<tr><td>Classes (declared inside or captured)</td><td>Not supported yet. Besides, a class instance cannot be put into a region (see <a href="guide.html#not-allowed">what cannot go into a region</a>), and so it cannot be returned as a result either.</td></tr>
+<tr><td>Built-in functions, bound (<code>bind</code>) functions and object methods</td><td>Their source text cannot be run as a standalone function. The callback must be an arrow function or a function expression.</td></tr>
+<tr><td>A variable declared after the call</td><td>At the time of the call it has no value yet (temporal dead zone).</td></tr>
+<tr><td>One name with different values</td><td>Two captured functions see different values under the same name, while in the worker each name has one value.</td></tr>
+<tr><td><code>this</code> or an argument with functions, a <code>Map</code>, class instances, etc.</td><td>These do not go into a region.</td></tr>
 </tbody>
 </table>
 </div>
-<p>В самих колбэках нельзя использовать <code>super</code>, <code>new.target</code> и <code>import</code>: функция выполняется в воркере как отдельный кусок кода, без своего класса и модуля.</p>
+<p>The callbacks themselves cannot use <code>super</code>, <code>new.target</code> or <code>import</code>: the function runs in the worker as a standalone piece of code, without its class or module.</p>
 
-<h2 id="unhandled">Ошибки не теряются</h2>
-<p>Ручка задачи похожа на промис, и с ошибками она ведёт себя так же. Если задача упала, а её ручку никто не ждёт через <code>join()</code> или <code>await</code>, ошибка не пропадает молча: d8 сообщает о ней как о необработанном отклонении промиса (unhandled rejection) и завершается с кодом 1.</p>
+<h2 id="unhandled">Errors are not lost</h2>
+<p>A task handle is like a promise, and it behaves the same way with errors. If a task failed and nobody waits for its handle with <code>join()</code> or <code>await</code>, the error does not disappear silently: d8 reports it as an unhandled promise rejection and exits with code 1.</p>
 
 <!--ex:24-spawn-unhandled.js-->
 
-<p>Стек ошибки начинается со стека задачи: код задачи сохраняет строки своего файла, поэтому видно, где именно она упала. За ним после строки <code>at spawn()</code> идут кадры, которые эту задачу запустили, как у async-стеков в V8: функция, вызвавшая <code>spawn</code>, и её вызывающие. У вложенных задач таких строк несколько, по одной на каждый <code>spawn</code>. Место запуска стоит около 150 нс на <code>spawn</code>: на пустых задачах это 1,15 мкс вместо 1,3 на <code>spawn</code> и <code>await</code>. Флаг d8 <code>--no-spawn-stack</code> его выключает, тогда <code>spawn</code> вообще не смотрит на вызывающего. Чтобы ошибка не была необработанной, дождитесь задачи и поймайте её: <code>try { await task } catch (e) { ... }</code>. Задачи, которые никто не ждёт, ловит и линтер, правило <a href="tooling.html#no-floating-spawn"><code>no-floating-spawn</code></a>. Проще всего запускать задачи в <a href="#scope">блоке <code>spawn.scope</code></a>: он ждёт их сам.</p>
+<p>The error's stack starts with the task's stack: the task code keeps the lines of its file, so you can see exactly where it failed. After it, following the <code>at spawn()</code> line, come the frames that started the task, as with async stacks in V8: the function that called <code>spawn</code> and its callers. Nested tasks have several such lines, one per <code>spawn</code>. Recording the call site costs about 150 ns per <code>spawn</code>: on empty tasks it is 1.15 µs instead of 1.3 per <code>spawn</code> and <code>await</code>. The d8 flag <code>--no-spawn-stack</code> turns it off; then <code>spawn</code> does not look at the caller at all. To keep the error from being unhandled, wait for the task and catch it: <code>try { await task } catch (e) { ... }</code>. Tasks nobody waits for are also caught by the linter, with the <a href="tooling.html#no-floating-spawn"><code>no-floating-spawn</code></a> rule. The simplest way is to start tasks in a <a href="#scope"><code>spawn.scope</code> block</a>: it waits for them itself.</p>
 
-<h2 id="parallel">Несколько задач сразу</h2>
-<p>Задачи выполняются в пуле воркеров, по умолчанию их четыре. Если сначала запустить все задачи, а потом ждать, до четырёх из них работают параллельно, остальные ждут в очереди свободного воркера.</p>
+<h2 id="parallel">Several tasks at once</h2>
+<p>Tasks run in a worker pool, which has four workers by default. If you first start all the tasks and then wait, up to four of them run in parallel, and the rest wait in the queue for a free worker.</p>
 
 <!--ex:15-spawn-parallel.js timing-->
 
-<p>Четыре задачи сразу идут примерно в 3,5 раза быстрее, чем по очереди. Ровно в 4 раза не выходит, и дело не в запуске: он стоит несколько микросекунд, а задача считается больше ста миллисекунд. Причину мы отдельно не разбирали.</p>
-<p>Все воркеры пула берут задачи из одной очереди, как рабочие потоки tokio: задача ждёт, только пока заняты все воркеры, и никогда не стоит за долгой задачей, если рядом есть свободный воркер. Воркер, который ждёт в <code>await</code>, тоже свободен: пока одна его задача ждёт канал или таймер, он выполняет другие. Если задач больше, чем воркеров, лишние ждут очереди: шесть задач с пулом из четырёх идут почти вдвое дольше одной. Пул можно увеличить, например под 6 быстрых ядер этой машины: <code>spawn.poolSize = 6</code>. Больше, чем ядер, ставить нет смысла: потоки начнут делить одни и те же ядра. Значения меньше 1 и не числа <code>spawn</code> считает за 1.</p>
-<p>Если задачи запускаются в <code>map</code>, колбэк должен вернуть ручку: <code>tasks.map((t) =&gt; spawn(work, t))</code>. Тогда <code>Promise.all</code> ждёт сами задачи. Если колбэк вызывает <code>spawn</code> и возвращает что-то другое, <code>Promise.all</code> получит это значение сразу и задач ждать не будет. Подробнее в <a href="practices.html#map">практике 10</a>.</p>
+<p>Four tasks at once run about 3.5 times faster than one after another. It does not come out to exactly 4 times, and startup is not the reason: it costs a few microseconds, while a task computes for more than a hundred milliseconds. We have not looked into the cause separately.</p>
+<p>All workers in the pool take tasks from a single queue, like tokio's worker threads: a task waits only while all workers are busy, and never sits behind a long task if there is a free worker nearby. A worker waiting in <code>await</code> is free too: while one of its tasks waits on a channel or a timer, it runs others. If there are more tasks than workers, the extra ones wait their turn: six tasks with a pool of four take almost twice as long as one. The pool can be made larger, for example for the 6 fast cores of this machine: <code>spawn.poolSize = 6</code>. There is no point in setting it higher than the number of cores: the threads would start sharing the same cores. <code>spawn</code> treats values below 1 and non-numbers as 1.</p>
+<p>If tasks are started in <code>map</code>, the callback must return the handle: <code>tasks.map((t) =&gt; spawn(work, t))</code>. Then <code>Promise.all</code> waits for the tasks themselves. If the callback calls <code>spawn</code> and returns something else, <code>Promise.all</code> gets that value right away and does not wait for the tasks. See <a href="practices.html#map">practice 10</a> for more.</p>
 
-<h2 id="nested">Задачи внутри задач</h2>
-<p>Задача сама может вызывать <code>spawn</code>. Такие задачи вложены в неё, как в <code>std::thread::scope</code> из Rust: задача отвечает только после того, как закончились все задачи, которые она запустила, даже те, которые она не ждала. Поэтому, когда вы дождались внешней задачи, внутри неё уже ничего не идёт.</p>
-<p><code>spawn.idle()</code> возвращает промис, который выполнится, когда закончатся все задачи, запущенные текущим потоком. Это удобно для задач, результат которых не нужен. У каждого потока свой пул: <code>spawn.poolSize</code> главного потока на задачи внутри воркеров не влияет.</p>
+<h2 id="nested">Tasks inside tasks</h2>
+<p>A task can call <code>spawn</code> itself. Such tasks are nested in it, as in Rust's <code>std::thread::scope</code>: a task answers only after all the tasks it started have finished, even those it did not wait for. So once you have waited for the outer task, nothing is running inside it anymore.</p>
+<p><code>spawn.idle()</code> returns a promise that resolves when all tasks started by the current thread have finished. This is convenient for tasks whose result is not needed. Each thread has its own pool: the main thread's <code>spawn.poolSize</code> does not affect tasks inside workers.</p>
 
 <!--ex:23-spawn-nested.js-->
 
-<h2 id="abort">Отмена: <code>abort</code>, <code>timeout</code>, <code>JoinSet</code></h2>
-<p><code>handle.abort()</code> отменяет задачу, и её <code>await</code> и <code>join()</code> заканчиваются ошибкой <code>AbortError</code>. Задача, которую ещё не взял воркер, просто не запустится, а регионы, которые она захватила, вернутся тому, кто её запустил. В запущенной задаче эту ошибку бросает каждый <code>await</code>: ожидание канала и лока, в том числе блокирующие <code>recvSync</code> и <code>writeSync</code>, и ожидание обычного промиса, даже такого, который никогда не выполнится. Если промис отказал своей ошибкой, она приходит как есть. Так в tokio и asyncio задача отменяется на ближайшем <code>await</code>. Её <code>catch</code> и <code>finally</code> выполняются до того, как закончится ручка, и регионы задачи в них ещё доступны, но следующий <code>await</code> снова бросает ошибку. Код, который ничего не ждёт, например долгий цикл, остановить снаружи нельзя: JS не прерывает функцию посреди работы. Такой цикл проверяет <code>spawn.aborted()</code> сам.</p>
-<p><code>handle.timeout(ms)</code> отменяет задачу с ошибкой <code>TimeoutError</code>, если она не закончилась за <code>ms</code> миллисекунд. Таймер работает в отдельном потоке, поэтому срабатывает, даже если главный поток стоит в <code>join()</code>. <code>JoinSet</code>, как одноимённый тип в tokio, отдаёт результаты задач в порядке завершения: <code>await set.next()</code> или <code>for await</code> дают объекты вида <code>Promise.allSettled</code>, а выход из блока <code>using</code> отменяет задачи, которые ещё работают.</p>
+<h2 id="abort">Cancellation: <code>abort</code>, <code>timeout</code>, <code>JoinSet</code></h2>
+<p><code>handle.abort()</code> cancels a task, and its <code>await</code> and <code>join()</code> end with an <code>AbortError</code>. A task that no worker has picked up yet simply does not start, and the regions it captured go back to whoever started it. In a running task, every <code>await</code> throws this error: waiting on a channel or a lock, including the blocking <code>recvSync</code> and <code>writeSync</code>, and waiting on a plain promise, even one that will never settle. If the promise rejected with its own error, that error arrives as is. This is how tokio and asyncio cancel a task at the next <code>await</code>. Its <code>catch</code> and <code>finally</code> run before the handle finishes, and the task's regions are still available in them, but the next <code>await</code> throws again. Code that waits for nothing, such as a long loop, cannot be stopped from outside: JS does not interrupt a function in the middle of its work. Such a loop checks <code>spawn.aborted()</code> itself.</p>
+<p><code>handle.timeout(ms)</code> cancels a task with a <code>TimeoutError</code> if it has not finished within <code>ms</code> milliseconds. The timer runs on a separate thread, so it fires even if the main thread is blocked in <code>join()</code>. <code>JoinSet</code>, like the type of the same name in tokio, yields task results in order of completion: <code>await set.next()</code> or <code>for await</code> give objects in the <code>Promise.allSettled</code> format, and leaving a <code>using</code> block cancels the tasks that are still running.</p>
 
 <!--ex:39-spawn-abort.js-->
 
-<p>Промис, которого ждёт код задачи, держится, пока он не выполнится или пока задача не закончится. Поэтому даже промис, на который больше никто не ссылается, сборщик мусора не уносит вместе с функциями, которые его ждут: при отмене их <code>catch</code> и <code>finally</code> выполнятся. Функции, которые задача бросила ждать и закончилась, держать перестают.</p>
-<p>Отмена посреди работы может оставить данные изменёнными наполовину. С регионами задачи это видно сразу: тот, кто её отменил, получает <code>AbortError</code> или <code>TimeoutError</code>. Хуже с <code>RwLock</code>, который делят несколько задач: остальные об отмене не знают. Поэтому писатель, отменённый с guard в руках, отравляет лок, и следующий, кто его берёт, получает <code>PoisonError</code> (см. <a href="channels.html#rwlock">RwLock</a>):</p>
+<p>A promise that the task code is waiting for is kept alive until it settles or the task finishes. So even a promise that nothing else references is not collected by the garbage collector together with the functions waiting on it: on cancellation their <code>catch</code> and <code>finally</code> will run. Functions that the task stopped waiting for before it finished are no longer kept.</p>
+<p>Cancellation in the middle of work can leave data half-changed. With the task's regions this is visible right away: whoever cancelled it gets an <code>AbortError</code> or a <code>TimeoutError</code>. It is worse with an <code>RwLock</code> shared by several tasks: the others do not know about the cancellation. So a writer cancelled while holding a guard poisons the lock, and the next one to take it gets a <code>PoisonError</code> (see <a href="channels.html#rwlock">RwLock</a>):</p>
 
-<p>Уборке после отмены часто нужно подождать: взять лок, чтобы вернуть счётчик, отправить «до свидания» в канал. В отменённой задаче такой <code>await</code> сразу бросает. Для этого есть <code>spawn.shield(fn)</code>, как shielded cancel scope в Trio: внутри <code>fn</code> задача ведёт себя как неотменённая. Её <code>await</code>, ожидания каналов и локов не падают, <code>spawn.aborted()</code> даёт <code>false</code>, задачи, которые она запускает, вместе с задачей не отменяются. Ручка задачи закончится только после всех её <code>shield</code>, даже если их не ждали. Сам <code>await spawn.shield(...)</code> в отменённой задаче после конца <code>fn</code> снова бросает ошибку отмены, а если <code>fn</code> упала, то её ошибку. Вне задачи и в задаче, которую не отменяли, <code>shield</code> просто вызывает <code>fn</code>.</p>
-<p>Уборка, которая висит, держит и задачу. Поэтому <code>spawn.shield(fn, { timeout: 100 })</code> ставит ей дедлайн в миллисекундах: если <code>fn</code> к этому времени не закончилась, её саму отменяют ошибкой <code>TimeoutError</code>, как задачу. Её <code>await</code>, ожидания каналов и локов бросают, задачи, которые она запустила, отменяются, лок, который она держит на запись, отравляется, <code>spawn.aborted()</code> в ней даёт <code>true</code>. С этого момента бросает каждый её <code>await</code>, поэтому <code>await spawn.shield(...)</code> бросает <code>TimeoutError</code>, даже если <code>fn</code> ошибку поймала. Дедлайн действует и в задаче, которую не отменяли, и не трогает другие <code>shield</code> той же задачи.</p>
+<p>Cleanup after cancellation often needs to wait: take a lock to restore a counter, send a “goodbye” to a channel. In a cancelled task such an <code>await</code> throws immediately. That is what <code>spawn.shield(fn)</code> is for, like a shielded cancel scope in Trio: inside <code>fn</code> the task behaves as if it was not cancelled. Its <code>await</code>s and waits on channels and locks do not fail, <code>spawn.aborted()</code> returns <code>false</code>, and tasks it starts are not cancelled together with the task. The task handle finishes only after all its <code>shield</code>s, even if nobody waited for them. In a cancelled task, <code>await spawn.shield(...)</code> itself throws the cancellation error again after <code>fn</code> ends, or <code>fn</code>'s own error if <code>fn</code> failed. Outside a task, and in a task that was not cancelled, <code>shield</code> simply calls <code>fn</code>.</p>
+<p>Cleanup that hangs holds up the task as well. So <code>spawn.shield(fn, { timeout: 100 })</code> gives it a deadline in milliseconds: if <code>fn</code> has not finished by then, it is itself cancelled with a <code>TimeoutError</code>, like a task. Its <code>await</code>s and waits on channels and locks throw, the tasks it started are cancelled, a lock it holds for writing is poisoned, and <code>spawn.aborted()</code> returns <code>true</code> inside it. From that moment every <code>await</code> in it throws, so <code>await spawn.shield(...)</code> throws a <code>TimeoutError</code> even if <code>fn</code> caught the error. The deadline also applies in a task that was not cancelled, and does not affect other <code>shield</code>s of the same task.</p>
 
 <!--ex:46-cancel.js-->
 
-<p>Задача, которая поймала <code>AbortError</code> и вернула значение, всё равно закончится отменой. Guard'ы <code>RwLock</code>, взятые через <code>using</code>, при этом отпускаются как обычно. Вместе с задачей отменяются задачи, которые она запустила, и их задачи тоже, а новые она запустить уже не может: они отменяются сразу. Отменённая задача, как и раньше, заканчивается только после своих вложенных.</p>
+<p>A task that caught an <code>AbortError</code> and returned a value still ends as cancelled. <code>RwLock</code> guards taken with <code>using</code> are released as usual in this case. Together with the task, the tasks it started are cancelled, and their tasks too, and it can no longer start new ones: they are cancelled immediately. A cancelled task, as before, finishes only after its nested tasks.</p>
 
-<h2 id="scope">Блок задач: <code>spawn.scope</code></h2>
-<p>Когда задач несколько и они связаны каналами, ошибка одной из них легко теряется. Стадия конвейера падает, остальные ждут её значений, и через 50 мс всё заканчивается <code>DeadlockError</code>, хотя настоящая причина — исключение в другом потоке. Регионы, которые увезли упавшие задачи, ещё и возвращаются не сразу.</p>
-<p><code>spawn.scope(async (s) =&gt; ...)</code> собирает задачи в блок, как <code>std::thread::scope</code> в Rust или nursery в Trio:</p>
+<h2 id="scope">A block of tasks: <code>spawn.scope</code></h2>
+<p>When there are several tasks connected by channels, an error in one of them is easily lost. A pipeline stage fails, the others wait for its values, and after 50 ms everything ends with a <code>DeadlockError</code>, even though the real cause is an exception on another thread. The regions that the failed tasks took away also come back with a delay.</p>
+<p><code>spawn.scope(async (s) =&gt; ...)</code> gathers tasks into a block, like <code>std::thread::scope</code> in Rust or a nursery in Trio:</p>
 <ul>
-  <li>задачи блока запускаются через <code>s.spawn(...)</code>, как обычный <code>spawn</code>;</li>
-  <li>блок заканчивается, только когда закончились его функция и все его задачи, поэтому после <code>await spawn.scope(...)</code> все регионы, которые задачи увезли, снова у вас;</li>
-  <li>первая ошибка, функции или задачи, отменяет остальные задачи блока и закрывает его каналы <code>s.channel(n)</code>, чтобы никто не ждал значений от упавших; блок отказывает именно с этой ошибкой;</li>
-  <li>ручки задач блок ловит сам, необработанных отказов не бывает. Если блок не упал, он возвращает то, что вернула функция.</li>
+  <li>the block's tasks are started with <code>s.spawn(...)</code>, like a plain <code>spawn</code>;</li>
+  <li>the block ends only when its function and all its tasks have finished, so after <code>await spawn.scope(...)</code> all the regions the tasks took away are back with you;</li>
+  <li>the first error, from the function or a task, cancels the block's other tasks and closes its <code>s.channel(n)</code> channels so that nobody waits for values from the failed ones; the block rejects with exactly that error;</li>
+  <li>the block catches the task handles itself, so there are no unhandled rejections. If the block did not fail, it returns what the function returned.</li>
 </ul>
-<p><code>s.closeAfter(channel, handles)</code> закрывает канал, когда закончились перечисленные задачи: так выход общий для нескольких отправителей закрывает последний из них, а не первый. Если блок уже закрыл канал из-за ошибки, <code>closeAfter</code> ничего не делает.</p>
+<p><code>s.closeAfter(channel, handles)</code> closes a channel when the listed tasks have finished: this way an output shared by several senders is closed by the last of them, not the first. If the block has already closed the channel because of an error, <code>closeAfter</code> does nothing.</p>
 
 <!--ex:45-scope.js-->
 
-<p>Задача, отменённая через свою ручку (<code>handle.abort()</code>), блок не роняет: <code>AbortError</code> считается намеренной отменой. <code>TimeoutError</code> из <code>handle.timeout(ms)</code> роняет. <code>s.fail(error)</code> роняет блок вручную. Блоки вкладываются: <code>spawn.scope</code> внутри задачи отменяет свои задачи вместе с ней. Сам <code>s</code> передать в задачу нельзя, задачи запускает только функция блока.</p>
-<p>Долгий цикл без <code>await</code> отмена не прерывает, и блок честно ждёт его конца. Такой код проверяет <code>spawn.aborted()</code>.</p>
+<p>A task cancelled through its handle (<code>handle.abort()</code>) does not bring the block down: an <code>AbortError</code> counts as intentional cancellation. A <code>TimeoutError</code> from <code>handle.timeout(ms)</code> does bring it down. <code>s.fail(error)</code> brings the block down manually. Blocks nest: a <code>spawn.scope</code> inside a task cancels its tasks together with that task. <code>s</code> itself cannot be passed into a task; only the block's function starts tasks.</p>
+<p>Cancellation does not interrupt a long loop without <code>await</code>, and the block faithfully waits for it to end. Such code checks <code>spawn.aborted()</code>.</p>
 
-<h2 id="how">Как это работает и сколько стоит</h2>
-<p>При первом вызове движок разбирает исходный текст функции, находит её внешние имена и ищет их значения в замыкании. Захваченные функции разбираются так же, по цепочке. Из всего этого собирается код задачи: объявления захваченных переменных, тексты функций и сама функция. Разбор запоминается для этого места в коде, и в следующий раз остаётся только прочитать текущие значения переменных. Данные упаковываются в регион и через очередь задач уходят в свободный воркер пула, без <code>postMessage</code>. Код задачи воркер получает один раз, а потом ему хватает её номера.</p>
-<p>Воркеры пула живут долго: они создаются при первых вызовах <code>spawn</code> и потом не завершаются, так что следующие задачи идут в уже готовые потоки. Когда задач нет, пул не мешает d8 завершиться. Размер пула — <code>spawn.poolSize</code>, по умолчанию 4. Поэтому запуск задачи стоит несколько микросекунд, а не миллисекунды, как было, когда каждый <code>spawn</code> создавал новый воркер:</p>
+<h2 id="how">How it works and what it costs</h2>
+<p>On the first call, the engine parses the function's source text, finds its outer names and looks up their values in the closure. Captured functions are analyzed the same way, down the chain. From all this the task code is assembled: declarations of the captured variables, the texts of the functions, and the function itself. The analysis is cached for that place in the code, and next time all that is left is to read the current values of the variables. The data is packed into a region and goes through the task queue to a free worker in the pool, without <code>postMessage</code>. The worker receives the task code once, and after that its number is enough.</p>
+<p>Pool workers are long-lived: they are created on the first <code>spawn</code> calls and do not exit afterward, so subsequent tasks go to threads that are already running. When there are no tasks, the pool does not keep d8 from exiting. The pool size is <code>spawn.poolSize</code>, 4 by default. This is why starting a task costs a few microseconds rather than milliseconds, as it did when every <code>spawn</code> created a new worker:</p>
 
 <!--ex:19-spawn-overhead.js timing-->
 
-<p>Задачи, запущенные все сразу, стоят примерно столько же, около 4 мкс на штуку. Почему запуск вообще стал таким дешёвым, рассказано на странице <a href="inside.html#fast-spawn">«Как это устроено»</a>.</p>
-<p>Для задач от миллисекунды и дольше эти накладные расходы почти не видны. Для мелких задач они могут оказаться больше самой работы. Как с этим быть, показано на странице <a href="practices.html#batch">«Как делать и как не делать»</a>.</p>
+<p>Tasks started all at once cost about the same, around 4 µs each. Why starting became this cheap in the first place is explained on the <a href="inside.html#fast-spawn">How it works</a> page.</p>
+<p>For tasks of a millisecond or longer this overhead is barely noticeable. For small tasks it can be larger than the work itself. How to deal with that is shown on the <a href="practices.html#batch">Practices</a> page.</p>
 
-<h2 id="frozen">Заморозка в задачах</h2>
-<p>Замороженный регион задача получает общим, без переезда. Право разморозить при этом остаётся у вызывающего потока (<a href="guide.html#thaw-right">подробнее о праве</a>), и задача разморозить такой регион не может. Зато задача держит на него билет, как <code>borrow()</code>, поэтому может его читать, включая типизированные массивы (<a href="guide.html#borrow">без билета замороженный регион не читают</a>). Билет выдаётся на регионы, которые задача захватила или получила аргументом. Замороженный объект, который пришёл в задачу иначе, например через <code>recv()</code> из канала, читают под своим билетом: <code>using b = Region.of(x).borrow()</code>. Если задача спрячет view типизированного массива, например в <code>globalThis</code>, после её конца он окажется пустым. Запечатанный регион (<a href="guide.html#share"><code>Region.share</code></a>) билетов не требует: его читают как угодно и откуда угодно, а его view не пустеют.</p>
-<p id="frozen-ticket">Билет берётся в момент вызова <code>spawn()</code>, а не когда задача стартует, и сдаётся, когда приходит её ответ. Пока задача ждёт свободного воркера, регион уже нельзя разморозить: она прочитает ровно то, что было при вызове, а не то, что успели записать до её старта. <code>region.readers</code> считает такую задачу одним читателем и в очереди, и во время работы. Чтобы перестроить данные после задач, дождитесь их или вызовите <code>await region.thawWhenFree()</code>.</p>
+<h2 id="frozen">Freezing in tasks</h2>
+<p>A task gets a frozen region as shared, without a move. The right to thaw stays with the calling thread (<a href="guide.html#thaw-right">more about the right</a>), and the task cannot thaw such a region. In return, the task holds a borrow on it, like <code>borrow()</code>, so it can read it, including typed arrays (<a href="guide.html#borrow">a frozen region is not read without a borrow</a>). The borrow is issued for regions the task captured or received as an argument. A frozen object that reached the task another way, for example through <code>recv()</code> from a channel, is read under its own borrow: <code>using b = Region.of(x).borrow()</code>. If the task stashes a typed array view somewhere, for example in <code>globalThis</code>, it will be empty after the task ends. A sealed region (<a href="guide.html#share"><code>Region.share</code></a>) needs no borrows: it is read however and from wherever you like, and its views do not go empty.</p>
+<p id="frozen-ticket">The borrow is taken at the moment <code>spawn()</code> is called, not when the task starts, and is returned when its answer arrives. While the task waits for a free worker, the region already cannot be thawed: the task will read exactly what was there at the call, not what someone managed to write before it started. <code>region.readers</code> counts such a task as one reader both in the queue and while it runs. To rebuild the data after the tasks, wait for them or call <code>await region.thawWhenFree()</code>.</p>
 
 <!--ex:47-thaw-wait.js-->
 
-<p>Если задача сама заморозила регион, право разморозить вернётся к вызывающему вместе с результатом. Так удобно строить справочник в задаче: построить, заморозить, вернуть, а потом раздать другим задачам без копий.</p>
+<p>If the task froze a region itself, the right to thaw comes back to the caller together with the result. This makes it convenient to build a lookup table in a task: build it, freeze it, return it, and then hand it out to other tasks without copies.</p>
 
 <!--ex:27-spawn-freeze.js-->
 
-<h3 id="borrow">Билеты в задачах: <code>borrowWhile</code></h3>
-<p>Обычный билет <code>region.borrow()</code>, взятый в задаче, не должен её пережить. Когда задача закончилась, оставшиеся билеты сдаются сами, а в воркере печатается предупреждение <code>console.warn</code>. Иначе вызывающий поток не смог бы разморозить регион: билет остался бы в воркере навсегда.</p>
-<p>Проблема в асинхронной работе. Если задача взяла билет и отложила чтение (<code>setTimeout</code>, <code>await</code> без возврата промиса), задача уже закончилась, билет сдан, и отложенное чтение получит <code>OwnershipError</code>: без билета замороженный регион читать нельзя, а его к тому же могли разморозить. Для такой работы есть <code>region.borrowWhile(fn)</code>: он держит билет, пока не выполнится промис, который вернула <code>fn</code>, и возвращает этот промис. Верните его из задачи или дождитесь через <code>await</code>, тогда задача закончится только после работы.</p>
+<h3 id="borrow">Borrows in tasks: <code>borrowWhile</code></h3>
+<p>A plain <code>region.borrow()</code> taken in a task must not outlive it. When the task has finished, the remaining borrows are returned automatically, and the worker prints a <code>console.warn</code> warning. Otherwise the calling thread could not thaw the region: the borrow would stay in the worker forever.</p>
+<p>The problem is asynchronous work. If a task took a borrow and put off the read (<code>setTimeout</code>, <code>await</code> without returning the promise), the task has already finished, the borrow has been returned, and the deferred read gets an <code>OwnershipError</code>: a frozen region cannot be read without a borrow, and it may have been thawed as well. For such work there is <code>region.borrowWhile(fn)</code>: it holds the borrow until the promise returned by <code>fn</code> settles, and returns that promise. Return it from the task or wait for it with <code>await</code>; then the task finishes only after the work.</p>
 
 <!--ex:25-spawn-borrow.js-->
 
-<p>В первой задаче билет сдан вместе с концом задачи, <code>readers</code> равен 0, и главный поток спокойно размораживает регион. Отложенное чтение в воркере после этого падает. Во второй задаче билет держится до конца асинхронной работы: внутри видно <code>readers: 2</code>, один билет держит сама задача, второй <code>borrowWhile</code>. Если вызвать <code>borrowWhile</code> с асинхронной функцией и не вернуть промис, получится та же ошибка, что с голым билетом. Это ловит правило ESLint <a href="tooling.html#no-floating-borrow-while"><code>no-floating-borrow-while</code></a>. Билет, объявленный через <code>using</code>, сдаётся в конце блока и предупреждения не вызывает.</p>
+<p>In the first task, the borrow is returned when the task ends, <code>readers</code> is 0, and the main thread thaws the region without trouble. The deferred read in the worker then fails. In the second task, the borrow is held until the asynchronous work ends: inside you can see <code>readers: 2</code>; one borrow is held by the task itself, the other by <code>borrowWhile</code>. If you call <code>borrowWhile</code> with an async function and do not return the promise, you get the same error as with a bare borrow. The ESLint rule <a href="tooling.html#no-floating-borrow-while"><code>no-floating-borrow-while</code></a> catches this. A borrow declared with <code>using</code> is returned at the end of the block and causes no warning.</p>
 
 <div class="callout limit">
-<span class="callout-title">Ограничения spawn</span>
+<span class="callout-title">spawn limitations</span>
 <ul>
-  <li>Классы не поддерживаются, <code>super</code>, <code>new.target</code> и <code>import</code> в колбэке не работают.</li>
-  <li>Если воркер пула умер посреди задачи, её <code>join()</code> и <code>await</code> заканчиваются ошибкой <code>spawn() worker exited without a result</code>. Это касается только задач, которые он успел взять: остальные выполнят другие воркеры, а если умерли все, следующий <code>spawn</code> заводит новый пул. Тайм-аута у задач нет: задача, которая работает бесконечно, ждётся бесконечно.</li>
-  <li>Как и всё остальное, <code>spawn</code> есть только в d8 с флагом <code>--harmony-regions</code>.</li>
+  <li>Classes are not supported; <code>super</code>, <code>new.target</code> and <code>import</code> do not work in the callback.</li>
+  <li>If a pool worker dies in the middle of a task, that task's <code>join()</code> and <code>await</code> end with the error <code>spawn() worker exited without a result</code>. This applies only to the tasks it had already picked up: the rest are run by other workers, and if all of them died, the next <code>spawn</code> sets up a new pool. Tasks have no timeout: a task that runs forever is waited for forever.</li>
+  <li>Like everything else, <code>spawn</code> exists only in d8 with the <code>--harmony-regions</code> flag.</li>
 </ul>
 </div>
 
 <div class="callout aside">
-<span class="callout-title">Если вы знаете Go</span>
-<p><code>spawn</code> похож на <code>go f()</code> с каналом для результата. Только запуск горутины стоит доли микросекунды, а запуск задачи <code>spawn</code> — около 3 микросекунд: аргументы и результат копируются в буфер и переходят в другой поток, а воркер выполняет задачу через JS-обёртку. Сравнение с tokio на тысяче задач — на странице <a href="numbers.html#tokio">«Цифры»</a>.</p>
+<span class="callout-title">If you know Go</span>
+<p><code>spawn</code> is similar to <code>go f()</code> with a channel for the result. Except that starting a goroutine costs a fraction of a microsecond, while starting a <code>spawn</code> task costs about 3 microseconds: the arguments and the result are copied into a buffer and passed to another thread, and the worker runs the task through a JS wrapper. A comparison with tokio on a thousand tasks is on the <a href="numbers.html#tokio">Numbers</a> page.</p>
 </div>

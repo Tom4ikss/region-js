@@ -1,15 +1,15 @@
-// Практика 9. Много чисел — в типизированный массив, а не в обычный массив региона.
-// Сумма и запись 1 000 000 чисел: массив чисел в регионе, Float64Array в регионе
-// и обычный Float64Array, который регионов не касается.
+// Practice 9. Many numbers go into a typed array, not into a plain region array.
+// The sum and writes of 1,000,000 numbers: an array of numbers in a region, a Float64Array
+// in a region, and a plain Float64Array that has nothing to do with regions.
 const N = 1_000_000;
 const region = new Region();
 const data = region.run(() => ({
-  list: Array.from({ length: N }, (_, i) => i % 1000),        // массив чисел
-  samples: Float64Array.from({ length: N }, (_, i) => i % 1000), // типизированный массив
+  list: Array.from({ length: N }, (_, i) => i % 1000),        // array of numbers
+  samples: Float64Array.from({ length: N }, (_, i) => i % 1000), // typed array
 }));
 const plain = Float64Array.from({ length: N }, (_, i) => i % 1000);
 
-// Функции продублированы, чтобы подсказки движка не смешивались в одном месте кода.
+// The functions are duplicated so that the engine's feedback does not mix in one place in the code.
 const sumRegionArray = () => {
   const list = data.list;
   let total = 0;
@@ -17,7 +17,7 @@ const sumRegionArray = () => {
   return total;
 };
 const sumRegionTyped = () => {
-  const samples = data.samples; // локальный view над памятью региона
+  const samples = data.samples; // a local view over the region's memory
   let total = 0;
   for (let i = 0; i < samples.length; i++) total += samples[i];
   return total;
@@ -49,10 +49,10 @@ const best = (fn) => {
   }
   return min.toFixed(2).padStart(5);
 };
-print(`сумма, массив чисел в регионе:   ${best(sumRegionArray)} ms`);
-print(`сумма, Float64Array в регионе:   ${best(sumRegionTyped)} ms`);
-print(`сумма, обычный Float64Array:     ${best(sumPlainTyped)} ms`);
-print(`запись, массив чисел в регионе:  ${best(writeRegionArray)} ms`);
-print(`запись, Float64Array в регионе:  ${best(writeRegionTyped)} ms`);
-print(`запись, обычный Float64Array:    ${best(writePlainTyped)} ms`);
-print('результаты совпадают:', sumRegionArray() === sumRegionTyped() && sumRegionTyped() === sumPlainTyped());
+print(`sum, array of numbers in a region:    ${best(sumRegionArray)} ms`);
+print(`sum, Float64Array in a region:        ${best(sumRegionTyped)} ms`);
+print(`sum, plain Float64Array:              ${best(sumPlainTyped)} ms`);
+print(`writes, array of numbers in a region: ${best(writeRegionArray)} ms`);
+print(`writes, Float64Array in a region:     ${best(writeRegionTyped)} ms`);
+print(`writes, plain Float64Array:           ${best(writePlainTyped)} ms`);
+print('results match:', sumRegionArray() === sumRegionTyped() && sumRegionTyped() === sumPlainTyped());

@@ -1,8 +1,8 @@
-// Разморозить регион может только тот поток, который его заморозил.
+// Only the thread that froze a region can thaw it.
 const region = new Region();
 const config = region.run(() => ({ theme: 'dark' }));
 region.freeze();
-print('главный поток: frozenHere =', region.frozenHere);
+print('main thread: frozenHere =', region.frozenHere);
 
 const worker = new Worker(
   `onmessage = ({ data: { config } }) => {
@@ -12,7 +12,7 @@ const worker = new Worker(
      try {
        region.thaw();
        config.theme = 'light';
-       thaw = 'разморозил, theme = ' + config.theme;
+       thaw = 'thawed, theme = ' + config.theme;
      } catch (e) {
        thaw = 'thaw: ' + String(e);
      }
@@ -21,23 +21,23 @@ const worker = new Worker(
   { type: 'string' },
 );
 
-// Без transfer list воркер может читать (под билетом), но разморозить не может.
+// Without a transfer list the worker can read (under a borrow) but cannot thaw.
 worker.postMessage({ config });
-print('воркер без права:', worker.getMessage());
+print('worker without the right:', worker.getMessage());
 
-// Замороженный регион в transfer list: данные остаются общими,
-// а воркеру переходит право разморозить.
+// A frozen region in the transfer list: the data stays shared,
+// and the right to thaw passes to the worker.
 worker.postMessage({ config }, [region]);
-print('главный поток: frozenHere =', region.frozenHere);
+print('main thread: frozenHere =', region.frozenHere);
 try {
   region.thaw();
 } catch (e) {
-  print('главный поток, thaw:', String(e));
+  print('main thread, thaw:', String(e));
 }
-print('воркер с правом:', worker.getMessage());
+print('worker with the right:', worker.getMessage());
 try {
   print(config.theme);
 } catch (e) {
-  print('главный поток читает:', String(e));
+  print('main thread reads:', String(e));
 }
 worker.terminate();

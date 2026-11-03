@@ -1,2 +1,2 @@
-результат: {"ok":true}
-закрытый: true true
+result: {"ok":true}
+closed: true true

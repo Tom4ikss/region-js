@@ -1,5 +1,5 @@
 // d8-flags: --module
-// Сколько стоит один круг «туда и обратно» через два канала без буфера.
+// The cost of one round trip through two unbuffered channels.
 const N = 5000;
 const ping = new Channel();
 const pong = new Channel();
@@ -24,5 +24,5 @@ for (let i = 0; i < N; i++) {
 }
 const perMessage = (performance.now() - t) * 1000 / N;
 worker.terminate();
-print('канал, круг:', perTrip.toFixed(1), 'µs');
-print('postMessage + getMessage, круг:', perMessage.toFixed(1), 'µs');
+print('channel, round trip:', perTrip.toFixed(1), 'µs');
+print('postMessage + getMessage, round trip:', perMessage.toFixed(1), 'µs');

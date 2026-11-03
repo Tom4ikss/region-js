@@ -1,0 +1,3 @@
+frozen: true | frozenHere: true
+длины из трёх задач: 5, 5, 5
+после thaw главный поток пишет: false

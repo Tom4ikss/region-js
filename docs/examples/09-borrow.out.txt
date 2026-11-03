@@ -1,7 +1,7 @@
 readers: 1
-thaw с читателем: OwnershipError: Region is still borrowed by 1 reader(s); region.thawWhenFree() waits for them
-после release, readers: 0
-внутри блока, readers: 1 | apple = 50
-после блока, readers: 0
-разморожено, apple = 55
-borrow незамороженного: OwnershipError: Region must be frozen to borrow it
+thaw with a reader: OwnershipError: Region is still borrowed by 1 reader(s); region.thawWhenFree() waits for them
+after release, readers: 0
+inside the block, readers: 1 | apple = 50
+after the block, readers: 0
+thawed, apple = 55
+borrow of an unfrozen region: OwnershipError: Region must be frozen to borrow it

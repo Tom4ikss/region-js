@@ -1,21 +1,21 @@
 // d8-flags: --module
-// Задача отвечает только после всех задач, которые запустила сама.
+// A task answers only after all the tasks it started itself.
 const answer = await spawn(() => {
   spawn(() => {
     let x = 0;
-    for (let i = 0; i < 30_000_000; i++) x += i; // долгая вложенная задача
-    print('вложенная задача закончилась');
-  }); // её никто не ждёт
-  print('внешняя задача вернула значение');
-  return 'готово';
+    for (let i = 0; i < 30_000_000; i++) x += i; // a long nested task
+    print('the nested task finished');
+  }); // nobody waits for it
+  print('the outer task returned a value');
+  return 'done';
 });
-print('главный поток получил:', answer);
+print('the main thread got:', answer);
 
-// spawn.idle(): дождаться всех задач, которые запустил этот поток.
-spawn(() => print('задача без await'));
+// spawn.idle(): wait for all tasks this thread started.
+spawn(() => print('a task without await'));
 await spawn.idle();
-print('spawn.idle() выполнен');
+print('spawn.idle() resolved');
 
-// У каждого потока свой пул.
+// Each thread has its own pool.
 spawn.poolSize = 6;
-print('poolSize здесь:', spawn.poolSize, '| в задаче:', await spawn(() => spawn.poolSize));
+print('poolSize here:', spawn.poolSize, '| in a task:', await spawn(() => spawn.poolSize));

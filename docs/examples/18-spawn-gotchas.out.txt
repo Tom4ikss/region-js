@@ -1,6 +1,6 @@
-в потоке: 1
-в главном: 0, dark
-регион после двух задач: 2
-запись в результат: 11
-новое поле: TypeError: Cannot add property extra, region objects have a fixed shape
-обычная копия: {"total":11,"items":[1,2],"extra":1}
+in the thread: 1
+in the main thread: 0, dark
+region after two tasks: 2
+write to the result: 11
+new field: TypeError: Cannot add property extra, region objects have a fixed shape
+plain copy: {"total":11,"items":[1,2],"extra":1}

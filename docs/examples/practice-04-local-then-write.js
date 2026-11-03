@@ -1,17 +1,17 @@
-// Практика 4. Горячие циклы: считать в локальных переменных, а в регион писать один раз.
+// Practice 4. Hot loops: compute in local variables and write to the region once.
 const region = new Region();
 const stats = region.run(() => ({ count: 0, sum: 0 }));
 const prices = region.run(() => Array.from({ length: 100_000 }, (_, i) => i % 100));
 const values = Array.from({ length: 1_000_000 }, (_, i) => i % 7);
 
-// а) запись. Плохо: пишем в объект региона на каждом шаге.
+// a) Writes. Bad: write to the region object on every step.
 const writeEachStep = () => {
   for (let i = 0; i < values.length; i++) {
     stats.count += 1;
     stats.sum += values[i];
   }
 };
-// Хорошо: считаем локально, в регион пишем результат.
+// Good: compute locally, write the result to the region.
 const writeOnce = () => {
   let count = stats.count, sum = stats.sum;
   for (let i = 0; i < values.length; i++) {
@@ -22,7 +22,7 @@ const writeOnce = () => {
   stats.sum = sum;
 };
 
-// б) чтение по индексу много раз. Плохо: 50 проходов прямо по массиву региона.
+// b) Many reads by index. Bad: 50 passes directly over the region array.
 const PASSES = 50;
 const readRegion = () => {
   let total = 0;
@@ -30,7 +30,7 @@ const readRegion = () => {
     for (let i = 0; i < prices.length; i++) total += prices[i];
   return total;
 };
-// Хорошо: один раз скопировать в обычный массив простым циклом (копия входит в замер).
+// Good: copy it once into a plain array with a simple loop (the copy is part of the measurement).
 const sumLocal = (local) => {
   let total = 0;
   for (let p = 0; p < PASSES; p++)
@@ -42,7 +42,7 @@ const readLoopCopy = () => {
   for (let i = 0; i < prices.length; i++) local[i] = prices[i];
   return sumLocal(local);
 };
-// Так же быстро копирует Array.from (и spread): для массива региона это один проход по значениям.
+// Array.from (and spread) copy just as fast: for a region array it is one pass over the values.
 const sumFromCopy = (local) => {
   let total = 0;
   for (let p = 0; p < PASSES; p++)
@@ -60,7 +60,7 @@ const best = (fn) => {
   }
   return min.toFixed(2);
 };
-print(`запись: в регион на каждом шаге ${best(writeEachStep)} ms, локально и один раз ${best(writeOnce)} ms`);
-print(`чтение: по массиву региона ${best(readRegion)} ms, копия циклом + обычный массив ${best(readLoopCopy)} ms, ` +
-  `копия Array.from + обычный массив ${best(readArrayFrom)} ms`);
-print('результаты совпадают:', readRegion() === readLoopCopy() && readLoopCopy() === readArrayFrom());
+print(`writes: to the region on every step ${best(writeEachStep)} ms, locally and once ${best(writeOnce)} ms`);
+print(`reads: over the region array ${best(readRegion)} ms, loop copy + plain array ${best(readLoopCopy)} ms, ` +
+  `Array.from copy + plain array ${best(readArrayFrom)} ms`);
+print('results match:', readRegion() === readLoopCopy() && readLoopCopy() === readArrayFrom());

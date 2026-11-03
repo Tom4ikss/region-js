@@ -3,17 +3,17 @@ spread: 5
 map/filter: 30,40,50
 slice: 1,4
 includes: true
-запись по индексу: 9
+write by index: 9
 push: 7
-pop: 6, длина 6
+pop: 6, length 6
 splice: 1,4 → 9,1,5,2
 length = 2: 9,1
-новое поле у объекта: TypeError: Cannot add property age, region objects have a fixed shape
+new field on an object: TypeError: Cannot add property age, region objects have a fixed shape
 Array.isArray: true
 Object.keys: ["x","y"]
 Object.entries: [["x",1],["y",2]]
 for...in: x,y
 JSON.stringify: {"point":{"x":1,"y":2},"scores":[9,1]}
 flat: 1,2,3
-spread объекта: {"x":1,"y":2,"z":3}
-деструктуризация: 3
+object spread: {"x":1,"y":2,"z":3}
+destructuring: 3

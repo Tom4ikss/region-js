@@ -1,5 +1,5 @@
-площади: 6, 20
-та же функция: true
-в задаче: 26
+areas: 6, 20
+same function: true
+in a task: 26
 TypeError: a Region.fn() function cannot use rate of its closure: every thread compiles the function again without it. Pass rate as an argument, or keep it in the object the function is called on
 TypeError: a region object can hold only functions made by Region.fn()

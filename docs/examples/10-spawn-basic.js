@@ -1,4 +1,4 @@
-// spawn(callback, ...args): запустить функцию в отдельном потоке и дождаться результата.
+// spawn(callback, ...args): run a function on a separate thread and wait for the result.
 const task = spawn((from, to) => {
   let primes = 0;
   for (let n = from; n < to; n++) {
@@ -9,13 +9,13 @@ const task = spawn((from, to) => {
   return { from, to, primes };
 }, 0, 200000);
 
-print('главный поток не ждёт, пока задача считается');
-const result = task.join(); // join() блокирует, пока не придёт ответ
-print('простых чисел до', result.to + ':', result.primes);
+print('the main thread does not wait while the task computes');
+const result = task.join(); // join() blocks until the answer arrives
+print('primes below', result.to + ':', result.primes);
 
-// Результат принадлежит главному потоку: его можно менять.
+// The result is owned by the main thread: it can be changed.
 result.primes += 1;
-print('после записи:', result.primes);
+print('after the write:', result.primes);
 
-// Примитивный результат тоже можно.
+// A primitive result works too.
 print('6 * 7 =', spawn((a, b) => a * b, 6, 7).join());

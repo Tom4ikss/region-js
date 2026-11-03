@@ -1,9 +1,9 @@
 // d8-flags: --module
-// OwnershipError: класс, поля region и reason, место события в тексте.
+// OwnershipError: the class, the region and reason fields, the event location in the text.
 const orders = new Channel(1);
 const region = new Region();
 const order = region.run(() => ({ id: 7, total: 120 }));
-await orders.send(order);           // регион уехал в канал
+await orders.send(order);           // the region went into the channel
 
 try {
   print(order.total);
@@ -12,7 +12,7 @@ try {
   print(e.message);
 }
 
-// Ошибка из задачи приходит со стеком задачи, а не очереди ответов.
+// An error from a task comes with the task's stack, not the reply queue's.
 function check(order) {
   if (order.total > 100) throw new RangeError('order ' + order.id + ' is too big');
 }

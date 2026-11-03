@@ -1,6 +1,6 @@
 // d8-flags: --module
-// Четыре задачи spawn собирают 100 000 заказов. Объекты создаются сразу в общей
-// памяти ('use region'), и главный поток получает их без копии.
+// Four spawn tasks build 100,000 orders. The objects are created directly in shared
+// memory ('use region'), and the main thread receives them without a copy.
 const ORDERS = 100_000;
 const TASKS = 4;
 
@@ -15,7 +15,7 @@ const build = (from, to) => {
       items: [{ sku: 'sku ' + (i % 500), qty: 1 + (i % 3) }],
     });
   }
-  return orders; // уезжает к вызывающему вместе с регионом
+  return orders; // moves to the caller together with the region
 };
 
 let start = performance.now();
@@ -24,10 +24,10 @@ const parts = await Promise.all(Array.from({ length: TASKS }, (_, t) =>
 const viaSpawn = performance.now() - start;
 let qty = 0;
 for (const part of parts) for (const order of part) qty += order.items[0].qty;
-print(`spawn: ${parts.reduce((n, p) => n + p.length, 0)} заказов, qty ${qty}, ${viaSpawn.toFixed(0)} мс`);
-print('лежат в регионе:', Region.isRegionObject(parts[0][0]), '| владелец теперь главный поток:', Region.of(parts[0]).owner);
+print(`spawn: ${parts.reduce((n, p) => n + p.length, 0)} orders, qty ${qty}, ${viaSpawn.toFixed(0)} ms`);
+print('in a region:', Region.isRegionObject(parts[0][0]), '| owner is now the main thread:', Region.of(parts[0]).owner);
 
-// То же на обычных воркерах: postMessage копирует каждый заказ обратно.
+// The same with plain workers: postMessage copies every order back.
 const workers = Array.from({ length: TASKS }, () => new Worker(`onmessage = ({ data: [from, to] }) => {
   const orders = [];
   for (let i = from; i < to; i++) {
@@ -39,5 +39,5 @@ const workers = Array.from({ length: TASKS }, () => new Worker(`onmessage = ({ d
 start = performance.now();
 workers.forEach((w, t) => w.postMessage([t * ORDERS / TASKS, (t + 1) * ORDERS / TASKS]));
 const copies = workers.map((w) => w.getMessage());
-print(`postMessage: ${copies.reduce((n, p) => n + p.length, 0)} заказов, ${(performance.now() - start).toFixed(0)} мс`);
+print(`postMessage: ${copies.reduce((n, p) => n + p.length, 0)} orders, ${(performance.now() - start).toFixed(0)} ms`);
 for (const w of workers) w.terminate();

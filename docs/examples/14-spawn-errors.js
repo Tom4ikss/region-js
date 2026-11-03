@@ -1,22 +1,22 @@
-// Что spawn отклоняет сразу, в месте вызова, и какие ошибки приходят из потока.
+// What spawn rejects right away, at the call site, and which errors come from the thread.
 const tryIt = (label, fn) => {
   try {
     fn();
-    print(label + ': без ошибки');
+    print(label + ': no error');
   } catch (e) {
     print(label + ': ' + e.name + ': ' + e.message);
   }
 };
 
 const log = print;
-tryIt('встроенная функция', () => spawn(() => log('x')));
+tryIt('built-in function', () => spawn(() => log('x')));
 tryIt('eval', () => spawn(() => eval('1 + 1')));
-tryIt('класс', () => spawn(() => { class A {} return new A(); }));
+tryIt('class', () => spawn(() => { class A {} return new A(); }));
 class Point { constructor(x) { this.x = x; } }
-tryIt('захваченный класс', () => spawn(() => new Point(1)));
-tryIt('метод объекта', () => spawn({ m() { return 1; } }.m));
-tryIt('не функция', () => spawn(42));
-tryIt('до инициализации', () => {
+tryIt('captured class', () => spawn(() => new Point(1)));
+tryIt('object method', () => spawn({ m() { return 1; } }.m));
+tryIt('not a function', () => spawn(42));
+tryIt('before initialization', () => {
   const start = () => spawn(() => later + 1);
   start();
   let later = 1;
@@ -24,13 +24,13 @@ tryIt('до инициализации', () => {
 const make = (k) => () => k;
 const readA = make('a');
 const readB = make('b');
-tryIt('одно имя, разные значения', () => spawn(() => readA() + readB()));
-tryIt('Map в аргументе', () => spawn((m) => m.size, new Map()));
+tryIt('one name, different values', () => spawn(() => readA() + readB()));
+tryIt('Map as an argument', () => spawn((m) => m.size, new Map()));
 
-// Ошибки из потока сохраняют тип.
-tryIt('throw в потоке', () => spawn(() => { throw new RangeError('too far'); }).join());
-tryIt('результат нельзя переместить', () => spawn(() => new Map()).join());
-tryIt('второй join', () => {
+// Errors from the thread keep their type.
+tryIt('throw in the thread', () => spawn(() => { throw new RangeError('too far'); }).join());
+tryIt('the result cannot be moved', () => spawn(() => new Map()).join());
+tryIt('second join', () => {
   const task = spawn(() => ({ n: 1 }));
-  if (task.join() !== task.join()) throw new Error('разные результаты');
+  if (task.join() !== task.join()) throw new Error('different results');
 });

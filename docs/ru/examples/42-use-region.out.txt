@@ -1,0 +1,3 @@
+в регионе: true true
+{"order":{"id":7,"customer":{"name":"Ann"},"items":[{"sku":"apple","qty":3,"tags":["fruit"]},{"sku":"milk","qty":1,"tags":["dairy"]}]},"total":2,"name":"Ann"}
+SyntaxError: In 'use region' code {} and [] are #{} and #[], which allow no spread, holes, methods, accessors, __proto__, computed or numeric keys

@@ -1,0 +1,4 @@
+заказов: 3 | сумма: 60
+всё в одном регионе: true
+обычный объект: OwnershipError: a region object cannot reference objects outside its region; create them in it with region.run() or #{}
+после задачи: 5 | последний заказ: {"id":5,"price":50,"tags":["из run"]}

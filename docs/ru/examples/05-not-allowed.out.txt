@@ -1,0 +1,12 @@
+функция: TypeError: a region object can hold only functions made by Region.fn()
+Map: TypeError: #<Map> cannot be moved into a region
+Date: TypeError: [object Date] cannot be moved into a region
+BigInt: TypeError: 10 cannot be shared
+объект другого региона: OwnershipError: a region object cannot reference objects outside its region; create them in it with region.run() or #{}
+Uint8Array: ok
+ArrayBuffer: TypeError: #<ArrayBuffer> cannot be moved into a region
+DataView: TypeError: #<DataView> cannot be moved into a region
+Int32Array на SharedArrayBuffer: TypeError: [object Int32Array] cannot be moved into a region
+экземпляр класса: TypeError: #<Point> cannot be moved into a region
+наследник Array: TypeError: [object Array] cannot be moved into a region
+объект без прототипа: ok

@@ -1,32 +1,32 @@
 // d8-flags: --module
-// Билет borrow() в задаче живёт не дольше самой задачи.
+// A borrow() taken in a task lives no longer than the task itself.
 spawn.poolSize = 1;
 const region = new Region();
 const prices = region.run(() => ({ apple: 50 }));
 region.freeze();
 
-// Плохо: голый borrow, а чтение отложено на потом.
+// Bad: a bare borrow, with the read put off until later.
 await spawn(() => {
   const ticket = Region.of(prices).borrow();
   const later = () => {
-    // В d8 setTimeout не ждёт задержку, поэтому явно ждём, пока главный поток разморозит.
+    // In d8 setTimeout does not wait for the delay, so wait explicitly until the main thread thaws.
     if (Region.of(prices).frozen) return setTimeout(later, 0);
     try {
-      print('задача читает позже:', prices.apple);
+      print('the task reads later:', prices.apple);
     } catch (e) {
-      print('задача читает позже:', String(e));
+      print('the task reads later:', String(e));
     }
     ticket.release();
   };
   setTimeout(later, 0);
 });
-print('readers после задачи:', region.readers);
+print('readers after the task:', region.readers);
 region.thaw();
 prices.apple = 55;
-print('главный поток разморозил и записал:', prices.apple);
-await spawn(() => {}); // дать задаче из пула допечатать
+print('the main thread thawed and wrote:', prices.apple);
+await spawn(() => {}); // let the pool task finish printing
 
-// Хорошо: borrowWhile держит билет, пока не выполнится промис, и его ждёт задача.
+// Good: borrowWhile holds the borrow until the promise settles, and the task waits for it.
 region.freeze();
 const seen = await spawn(() =>
   Region.of(prices).borrowWhile(async () => {
@@ -34,5 +34,5 @@ const seen = await spawn(() =>
     return prices.apple + ' (readers: ' + Region.of(prices).readers + ')';
   }),
 );
-print('borrowWhile:', seen, '| readers после задачи:', region.readers);
+print('borrowWhile:', seen, '| readers after the task:', region.readers);
 region.thaw();

@@ -1,4 +1,4 @@
-// Отправить объект туда и обратно. Region.of(obj) находит регион объекта.
+// Send an object there and back. Region.of(obj) finds the object's region.
 const region = new Region();
 const state = region.run(() => ({ turns: 0, last: '' }));
 
@@ -6,8 +6,8 @@ const worker = new Worker(
   `
   onmessage = ({ data: { state } }) => {
     state.turns += 1;
-    state.last = 'воркер';
-    postMessage({ state }, [Region.of(state)]); // вернуть владение
+    state.last = 'worker';
+    postMessage({ state }, [Region.of(state)]); // give ownership back
   };
   `,
   { type: 'string' },
@@ -19,17 +19,17 @@ const start = performance.now();
 for (let i = 0; i < rounds; i++) {
   worker.postMessage({ state: current }, [Region.of(current)]);
   current = worker.getMessage().state;
-  current.turns += 1; // мы снова владельцы
+  current.turns += 1; // we are the owner again
 }
 const us = ((performance.now() - start) / rounds) * 1000;
 
-print('тот же самый объект:', current === state);
-print('ходов:', state.turns, '| последний писал:', state.last);
-print(`один круг туда-обратно: ${us.toFixed(1)} µs`);
+print('the very same object:', current === state);
+print('turns:', state.turns, '| last writer:', state.last);
+print(`one round trip: ${us.toFixed(1)} µs`);
 
 try {
   Region.of({ plain: true });
 } catch (e) {
-  print('Region.of для обычного объекта:', e.message);
+  print('Region.of for a plain object:', e.message);
 }
 worker.terminate();

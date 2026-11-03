@@ -1,56 +1,56 @@
-<!-- title: Как делать и как не делать -->
-<!-- description: Двенадцать практик работы с регионами и spawn: что делать, чего избегать, и замер «плохо» против «хорошо» там, где он имеет смысл. -->
-<p class="eyebrow">Глава 6</p>
-<h1>Как делать и как не делать</h1>
-<p class="lead">У регионов и <code>spawn</code> есть свои дорогие и дешёвые операции, и они не всегда совпадают с привычками из обычного JS. Здесь двенадцать практик. У каждой есть короткое объяснение, код «плохо» и «хорошо» и замер, где он имеет смысл.</p>
+<!-- title: Practices -->
+<!-- description: Twelve practices for working with regions and spawn: what to do, what to avoid, and a "bad" versus "good" measurement where it makes sense. -->
+<p class="eyebrow">Chapter 6</p>
+<h1>Practices</h1>
+<p class="lead">Regions and <code>spawn</code> have their own expensive and cheap operations, and they do not always match habits from ordinary JS. Here are twelve practices. Each has a short explanation, "bad" and "good" code, and a measurement where it makes sense.</p>
 
 <div class="callout limit">
-<span class="callout-title">Как читать цифры</span>
-<p>Все замеры сделаны на сборке <code>out/docs/d8</code> с включёнными внутренними проверками (<code>dcheck_always_on</code>), на Apple Silicon с 6 производительными и 6 энергоэффективными ядрами. В обычной сборке и на другой машине абсолютные значения будут другими, поэтому смотрите на соотношения. Каждый скрипт замера лежит в <code>docs/examples/</code> и запускался пять раз. Внутри запуска берётся лучшее из нескольких повторов, на графиках — медиана пяти запусков. Под каждым графиком можно раскрыть код замера и вывод одного запуска, сделанного при сборке сайта.</p>
-<p>Практики 4, 5, 6 и 9 перемерены после того, как Maglev и Turbofan научились встраивать доступ к объектам региона в машинный код (<a href="inside.html#jit">как</a>), на сборке <code>out/release/d8</code> с теми же настройками. Практики 4б и 5 перемерены ещё раз после того, как методы массивов стали читать массив региона напрямую (<a href="inside.html#methods">как</a>).</p>
+<span class="callout-title">How to read the numbers</span>
+<p>All measurements were taken on the <code>out/docs/d8</code> build with internal checks enabled (<code>dcheck_always_on</code>), on Apple Silicon with 6 performance and 6 efficiency cores. In a regular build and on another machine the absolute values will differ, so look at the ratios. Each measurement script is in <code>docs/examples/</code> and was run five times. Within a run, the best of several repetitions is taken; the charts show the median of five runs. Under each chart you can expand the measurement code and the output of one run made when the site was built.</p>
+<p>Practices 4, 5, 6 and 9 were remeasured after Maglev and Turbofan learned to inline access to region objects into machine code (<a href="inside.html#jit">how</a>), on the <code>out/release/d8</code> build with the same settings. Practices 4b and 5 were remeasured again after array methods started reading a region array directly (<a href="inside.html#methods">how</a>).</p>
 </div>
 
-<h2 id="cheatsheet">Шпаргалка</h2>
+<h2 id="cheatsheet">Cheat sheet</h2>
 <div class="table-wrap">
 <table>
-<thead><tr><th>Ситуация</th><th>Плохо</th><th>Хорошо</th><th class="num">Замер: плохо → хорошо</th></tr></thead>
+<thead><tr><th>Situation</th><th>Bad</th><th>Good</th><th class="num">Measurement: bad → good</th></tr></thead>
 <tbody>
-<tr><td><a href="#frozen">1. Большие данные для многих задач</a></td><td>захватить обычный массив</td><td>заморозить регион и захватить его</td><td class="num">1 065 мс → 0,7 мс</td></tr>
-<tr><td><a href="#move">2. Данные ходят туда-обратно</a></td><td>каждый раз <code>region.run</code></td><td>один регион, переезд через <code>Region.of</code></td><td class="num">3 585 → 8,8 мкс за круг</td></tr>
-<tr><td><a href="#batch">3. Много мелкой работы</a></td><td>тысячи маленьких <code>spawn</code></td><td>десятки задач по нескольку миллисекунд</td><td class="num">57 мс → 52 мс</td></tr>
-<tr><td><a href="#local">4а. Горячий цикл с записью</a></td><td>писать в объект региона на каждом шаге</td><td>считать в локальных переменных, записать один раз</td><td class="num">4,6 мс → 0,66 мс</td></tr>
-<tr><td><a href="#local-read">4б. Много проходов по массиву региона</a></td><td>читать <code>arr[i]</code> из региона каждый раз</td><td>один раз скопировать в обычный массив, <code>Array.from</code> или циклом</td><td class="num">13,1 мс → 3,1 мс</td></tr>
-<tr><td><a href="#methods">5. Методы массива региона</a></td><td>копировать массив ради <code>filter</code> / <code>map</code></td><td>вызывать методы прямо на массиве региона</td><td class="num">копия не нужна: 20,1 мс и 21,1 мс</td></tr>
-<tr><td><a href="#shapes">6. Много объектов одного вида</a></td><td>ключи в разном порядке</td><td>одни и те же ключи в одном порядке</td><td class="num">11,1 мс → 5,9 мс</td></tr>
-<tr><td><a href="#await">7. Ждать задачу в главном потоке</a></td><td><code>task.join()</code></td><td><code>await task</code></td><td class="num">пауза 192,5 мс → 0,3 мс</td></tr>
-<tr><td><a href="#after-move">8. Объект после переезда</a></td><td>читать сразу после отправки</td><td>дождаться, пока регион вернётся</td><td class="num">OwnershipError → работает</td></tr>
-<tr><td><a href="#typed">9. Много чисел</a></td><td>обычный массив чисел в регионе</td><td>типизированный массив в регионе</td><td class="num">2,4 мс → 0,68 мс</td></tr>
-<tr><td><a href="#map">10. Задачи в <code>map</code></a></td><td>колбэк запускает задачу и возвращает другое</td><td>колбэк возвращает ручку задачи</td><td class="num">задачи не дождались → дождались</td></tr>
-<tr><td><a href="#borrow-while">11. Билет в асинхронной задаче</a></td><td><code>borrow()</code> и отложенное чтение</td><td><code>return region.borrowWhile(async ...)</code></td><td class="num">OwnershipError → работает</td></tr>
-<tr><td><a href="#build">12. Большой набор данных в регион</a></td><td><code>run</code> на каждый объект</td><td>литералы <code>#{}</code> или один <code>run</code></td><td class="num">377 мс → 74 мс</td></tr>
+<tr><td><a href="#frozen">1. Large data for many tasks</a></td><td>capture a plain array</td><td>freeze a region and capture it</td><td class="num">1,065 ms → 0.7 ms</td></tr>
+<tr><td><a href="#move">2. Data goes back and forth</a></td><td><code>region.run</code> every time</td><td>one region, moved via <code>Region.of</code></td><td class="num">3,585 → 8.8 µs per round trip</td></tr>
+<tr><td><a href="#batch">3. Lots of small work</a></td><td>thousands of small <code>spawn</code> calls</td><td>dozens of tasks of a few milliseconds each</td><td class="num">57 ms → 52 ms</td></tr>
+<tr><td><a href="#local">4a. Hot loop with writes</a></td><td>write to a region object on every step</td><td>compute in local variables, write once</td><td class="num">4.6 ms → 0.66 ms</td></tr>
+<tr><td><a href="#local-read">4b. Many passes over a region array</a></td><td>read <code>arr[i]</code> from the region every time</td><td>copy once into a plain array, with <code>Array.from</code> or a loop</td><td class="num">13.1 ms → 3.1 ms</td></tr>
+<tr><td><a href="#methods">5. Methods of a region array</a></td><td>copy the array for <code>filter</code> / <code>map</code></td><td>call the methods directly on the region array</td><td class="num">no copy needed: 20.1 ms and 21.1 ms</td></tr>
+<tr><td><a href="#shapes">6. Many objects of one kind</a></td><td>keys in different orders</td><td>the same keys in the same order</td><td class="num">11.1 ms → 5.9 ms</td></tr>
+<tr><td><a href="#await">7. Waiting for a task on the main thread</a></td><td><code>task.join()</code></td><td><code>await task</code></td><td class="num">pause 192.5 ms → 0.3 ms</td></tr>
+<tr><td><a href="#after-move">8. An object after a move</a></td><td>read right after sending</td><td>wait until the region comes back</td><td class="num">OwnershipError → works</td></tr>
+<tr><td><a href="#typed">9. Many numbers</a></td><td>a plain array of numbers in a region</td><td>a typed array in a region</td><td class="num">2.4 ms → 0.68 ms</td></tr>
+<tr><td><a href="#map">10. Tasks in <code>map</code></a></td><td>the callback starts a task and returns something else</td><td>the callback returns the task handle</td><td class="num">tasks not awaited → awaited</td></tr>
+<tr><td><a href="#borrow-while">11. A borrow in an async task</a></td><td><code>borrow()</code> and a deferred read</td><td><code>return region.borrowWhile(async ...)</code></td><td class="num">OwnershipError → works</td></tr>
+<tr><td><a href="#build">12. A large data set into a region</a></td><td><code>run</code> per object</td><td><code>#{}</code> literals or one <code>run</code></td><td class="num">377 ms → 74 ms</td></tr>
 </tbody>
 </table>
 </div>
-<p>Несколько замеров разошлись с тем, что мы ожидали, и советы под них поправлены. «По одной задаче на ядро» оказалось не лучшим делением работы: десятки задач поменьше выровняли нагрузку и вышли быстрее (<a href="#batch">3</a>). А создавать много объектов в регион литералом <code>#{}</code> быстрее всего, <code>run</code> на каждый объект — медленнее всего (<a href="#build">12</a>).</p>
-<p>После того как компиляторы научились встраивать доступ к регионам, выигрыш в практиках <a href="#local">4</a> и <a href="#typed">9</a> уменьшился: «плохие» варианты, которые ходят в регион на каждом шаге, стали примерно втрое быстрее. Советы остались, но разница теперь в разы, а не на порядок. Форма объектов (<a href="#shapes">6</a>) теперь важна так же, как у обычных объектов.</p>
-<p>Потом методы массивов, <code>for...of</code>, <code>Array.from</code> и spread научились читать массив региона напрямую, а не через рантайм на каждый элемент. Методы на массиве региона стали примерно в 10 раз быстрее и стоят почти как на обычном массиве. Поэтому практика <a href="#methods">5</a> переписана: раньше она советовала заменять <code>filter</code>, <code>map</code> и <code>reduce</code> циклом (разница была в 67 раз), теперь говорит, что копия ради методов не нужна. В практике <a href="#local-read">4б</a> копия через <code>Array.from</code> раньше была самым медленным вариантом, теперь она стоит столько же, сколько копия циклом.</p>
+<p>Several measurements did not match what we expected, and the advice was adjusted to them. "One task per core" turned out not to be the best way to split work: dozens of smaller tasks balanced the load and finished faster (<a href="#batch">3</a>). And creating many objects in a region is fastest with the <code>#{}</code> literal, while <code>run</code> per object is slowest (<a href="#build">12</a>).</p>
+<p>After the compilers learned to inline region access, the gain in practices <a href="#local">4</a> and <a href="#typed">9</a> shrank: the "bad" variants, which go to the region on every step, became about three times faster. The advice stays, but the difference is now a few times rather than an order of magnitude. Object shape (<a href="#shapes">6</a>) now matters just as it does for ordinary objects.</p>
+<p>Later, array methods, <code>for...of</code>, <code>Array.from</code> and spread learned to read a region array directly instead of going through the runtime for each element. Methods on a region array became about 10 times faster and cost almost as much as on a plain array. So practice <a href="#methods">5</a> was rewritten: it used to advise replacing <code>filter</code>, <code>map</code> and <code>reduce</code> with a loop (the difference was 67 times); now it says a copy for the sake of methods is not needed. In practice <a href="#local-read">4b</a>, a copy with <code>Array.from</code> used to be the slowest option; now it costs the same as a copy with a loop.</p>
 
-<h2 id="frozen"><span class="practice-num">1</span>Большие данные только для чтения — в замороженный регион</h2>
-<p>Когда задача <code>spawn</code> захватывает обычный массив или объект, он копируется. Каждая задача получает свою копию, и копирует её главный поток в момент вызова. Тридцать две задачи над одним каталогом — это тридцать две копии каталога.</p>
-<p>Замороженный регион не копируется вообще. Все задачи и главный поток читают одни и те же объекты. Платите вы один раз, когда кладёте данные в регион.</p>
+<h2 id="frozen"><span class="practice-num">1</span>Large read-only data goes into a frozen region</h2>
+<p>When a <code>spawn</code> task captures a plain array or object, it is copied. Each task gets its own copy, and the main thread makes it at the moment of the call. Thirty-two tasks over one catalog means thirty-two copies of the catalog.</p>
+<p>A frozen region is not copied at all. All tasks and the main thread read the same objects. You pay once, when you put the data into the region.</p>
 <div class="versus">
 <js-bad>
-const catalog = await loadCatalog();      // обычный массив, 100 000 товаров
+const catalog = await loadCatalog();      // plain array, 100,000 products
 const sums = await Promise.all(parts.map((k) =>
-  spawn(() => sumPart(catalog, k))));     // catalog копируется в каждую задачу
+  spawn(() => sumPart(catalog, k))));     // catalog is copied into every task
 </js-bad>
 <js-good>
 const data = await loadCatalog();
 const region = new Region();
-const catalog = region.run(() => data);   // одна копия, в регион
-region.freeze();                          // читать могут все задачи сразу
+const catalog = region.run(() => data);   // one copy, into the region
+region.freeze();                          // all tasks can read it at once
 const sums = await Promise.all(parts.map((k) =>
-  spawn(() => sumPart(catalog, k))));     // копий нет
+  spawn(() => sumPart(catalog, k))));     // no copies
 </js-good>
 </div>
 
@@ -58,25 +58,25 @@ const sums = await Promise.all(parts.map((k) =>
 
 <!--ex:practice-01-frozen-shared.js timing collapsed-->
 
-<p>Разница примерно в 1 500 раз, и почти вся она — копирование: около 33 мс на копию каталога, тридцать две копии подряд. Сама работа в задачах тут крошечная. Если данные нужно и читать, и менять, замораживать нельзя. Тогда смотрите следующую практику.</p>
+<p>The difference is about 1,500 times, and almost all of it is copying: about 33 ms per copy of the catalog, thirty-two copies in a row. The work in the tasks themselves is tiny here. If the data needs to be both read and changed, it cannot be frozen. Then see the next practice.</p>
 
-<h2 id="move"><span class="practice-num">2</span>Создать регион один раз и гонять его, а не пересоздавать</h2>
-<p><code>region.run</code> копирует в регион весь граф, который вернула функция: это O(n). Переезд готового региона стоит O(1), сколько бы объектов в нём ни было. Если данные ходят между потоками много раз, создайте регион один раз и дальше только передавайте его. В воркере регион находится через <code>Region.of(obj)</code>. С <code>spawn</code> то же самое: захваченный регион сам уезжает в задачу и возвращается.</p>
+<h2 id="move"><span class="practice-num">2</span>Create a region once and move it around instead of rebuilding it</h2>
+<p><code>region.run</code> copies into the region the whole graph the function returned: that is O(n). Moving a ready region costs O(1), no matter how many objects it holds. If the data travels between threads many times, create the region once and after that only pass it along. In a worker, the region is found with <code>Region.of(obj)</code>. With <code>spawn</code> it is the same: a captured region moves into the task by itself and comes back.</p>
 <div class="versus">
 <js-bad>
 for (const step of steps) {
   const region = new Region();
-  const items = region.run(() => localItems);   // 10 000 объектов копируются заново
+  const items = region.run(() => localItems);   // 10,000 objects are copied again
   worker.postMessage({ items, step }, [region]);
   await nextMessage(worker);
 }
 </js-bad>
 <js-good>
 const region = new Region();
-let items = region.run(() => localItems);       // копия один раз
+let items = region.run(() => localItems);       // copied once
 for (const step of steps) {
   worker.postMessage({ items, step }, [Region.of(items)]);
-  items = (await nextMessage(worker)).items;    // тот же объект вернулся
+  items = (await nextMessage(worker)).items;    // the same object came back
 }
 </js-good>
 </div>
@@ -85,19 +85,19 @@ for (const step of steps) {
 
 <!--ex:practice-02-move-not-rebuild.js timing collapsed-->
 
-<p>8,8 микросекунды за круг — это два сообщения и два переезда региона, от размера данных время не зависит. 3,5 мс — почти всё копия 10 000 объектов в новый регион. Чем больше данных, тем больше разница.</p>
+<p>8.8 microseconds per round trip is two messages and two region moves; the time does not depend on the size of the data. The 3.5 ms is almost entirely the copy of 10,000 objects into a new region. The more data, the bigger the difference.</p>
 
-<h2 id="batch"><span class="practice-num">3</span>Несколько крупных задач вместо тысяч мелких</h2>
-<p>Задачи <code>spawn</code> идут в пул долгоживущих воркеров, по умолчанию их четыре (<code>spawn.poolSize</code>). Запуск одной задачи стоит около 3 микросекунд, а когда задачи запускаются тысячами сразу, около 4: упаковать аргументы, передать в воркер, получить и разобрать ответ. Если работа в задаче сопоставима с этим временем, накладные расходы её съедают. Пусть каждая задача работает хотя бы полмиллисекунды: тогда запуск займёт меньше процента её времени.</p>
-<p>Мы ожидали, что лучше всего будет по одной задаче на воркер. Замер показал другое: если части неравны по работе, несколько задач на воркер выходят быстрее. Освободившийся воркер берёт следующую задачу из очереди и не ждёт самую долгую.</p>
+<h2 id="batch"><span class="practice-num">3</span>A few large tasks instead of thousands of small ones</h2>
+<p><code>spawn</code> tasks go to a pool of long-lived workers, four by default (<code>spawn.poolSize</code>). Starting one task costs about 3 microseconds, and about 4 when tasks are started by the thousand at once: pack the arguments, hand them to a worker, receive and unpack the answer. If the work in a task is comparable to this time, the overhead eats it. Let each task work for at least half a millisecond: then the start takes less than a percent of its time.</p>
+<p>We expected one task per worker to be best. The measurement showed otherwise: if the parts are unequal in work, several tasks per worker finish faster. A worker that becomes free takes the next task from the queue and does not wait for the longest one.</p>
 <div class="versus">
 <js-bad>
-// 10 000 задач по 200 чисел, около 20 мкс работы в каждой
+// 10,000 tasks of 200 numbers, about 20 µs of work each
 const counts = await Promise.all(ranges.map(([from, to]) =>
   spawn(countPrimes, from, to)));
 </js-bad>
 <js-good>
-// 100 задач по 20 000 чисел, около 2 мс работы в каждой
+// 100 tasks of 20,000 numbers, about 2 ms of work each
 const parts = 100;
 const counts = await Promise.all(Array.from({ length: parts }, (_, i) =>
   spawn(countPrimes, Math.floor((LIMIT * i) / parts), Math.floor((LIMIT * (i + 1)) / parts))));
@@ -108,17 +108,17 @@ const counts = await Promise.all(Array.from({ length: parts }, (_, i) =>
 
 <!--ex:practice-03-batch.js timing collapsed-->
 
-<p>100 задач — в 3,7 раза быстрее главного потока, почти идеал для четырёх воркеров. 10 000 мелких задач заняли 57 мс: на 5 мс дольше, чем 100 задач, то есть около 0,5 мкс лишних на каждую из 10 000. Раньше, когда запуск стоил около 40 мкс, этот вариант шёл 377 мс и был вдвое медленнее той же работы в главном потоке без всякого <code>spawn</code>. Теперь разница с крупными задачами почти пропала, но совсем мелкие задачи всё равно немного проигрывают.</p>
-<p>Четыре крупные задачи дали только ×3: проверить большое число на простоту дольше, чем маленькое, поэтому последняя четверть считается дольше первой, и три воркера в конце простаивают. В отдельной проверке мы перебрали и другие числа частей: 8 частей — около 59 мс, 16 — около 55, от 32 до 1 000 — 52–53 мс, 10 000 — около 57.</p>
+<p>100 tasks are 3.7 times faster than the main thread, nearly ideal for four workers. 10,000 small tasks took 57 ms: 5 ms longer than 100 tasks, that is, about 0.5 µs extra for each of the 10,000. Earlier, when a start cost about 40 µs, this variant took 377 ms and was twice as slow as the same work on the main thread without any <code>spawn</code>. Now the difference from large tasks has almost disappeared, but very small tasks still lose a little.</p>
+<p>Four large tasks gave only ×3: checking a large number for primality takes longer than a small one, so the last quarter takes longer than the first, and three workers sit idle at the end. In a separate check we tried other part counts too: 8 parts, about 59 ms; 16, about 55; from 32 to 1,000, 52–53 ms; 10,000, about 57.</p>
 
-<h2 id="local"><span class="practice-num">4</span>Горячие циклы: считать локально, в регион писать один раз</h2>
-<p>Maglev и Turbofan встраивают доступ к объектам региона в машинный код (<a href="inside.html#jit">как</a>), а Turbofan в цикле без вызовов проверяет владельца один раз. Но проверки формы, индекса и, при записи, значения остаются на каждом обращении, а сами значения лежат в памяти. Обычная локальная переменная компилятору понятна: он держит её в регистре процессора, и проверять там нечего.</p>
+<h2 id="local"><span class="practice-num">4</span>Hot loops: compute locally, write to the region once</h2>
+<p>Maglev and Turbofan inline access to region objects into machine code (<a href="inside.html#jit">how</a>), and in a loop without calls Turbofan checks the owner once. But the shape and index checks, and on writes the value check, remain on every access, and the values themselves live in memory. An ordinary local variable is clear to the compiler: it keeps it in a CPU register, and there is nothing to check.</p>
 
-<h3 id="local-write">а) Запись</h3>
+<h3 id="local-write">a) Writes</h3>
 <div class="versus">
 <js-bad>
 for (let i = 0; i < values.length; i++) {
-  stats.count += 1;          // stats лежит в регионе
+  stats.count += 1;          // stats lives in a region
   stats.sum += values[i];
 }
 </js-bad>
@@ -128,24 +128,24 @@ for (let i = 0; i < values.length; i++) {
   count += 1;
   sum += values[i];
 }
-stats.count = count;         // в регион один раз
+stats.count = count;         // into the region once
 stats.sum = sum;
 </js-good>
 </div>
 
 <!--chart:p-write-->
 
-<p>Локальные переменные быстрее в 4,2 раза. До встраивания доступа в компиляторы запись на каждом шаге занимала 14,3 мс, и разница была в 19 раз, до проверки владельца один раз на цикл — 4,6 мс и в 7 раз. Это больше, чем отставание записи на странице <a href="numbers.html#access">«Цифры»</a> (×1,7): там обычные объекты тоже пишут в память, а здесь локальный вариант память не трогает, обе переменные живут в регистрах. Обычный объект в этом же цикле, по отдельной проверке, занимает около 1,7 мс. Так что совет полезен и в обычном JS, а с регионами он даёт больше: на каждом шаге ещё и проверки. Чем горячее цикл, тем больше выигрыш.</p>
+<p>Local variables are 4.2 times faster. Before access was inlined in the compilers, writing on every step took 14.3 ms and the difference was 19 times; before the owner was checked once per loop, 4.6 ms and 7 times. This is more than the write gap on the <a href="numbers.html#access">"Numbers"</a> page (×1.7): there, ordinary objects also write to memory, while here the local variant does not touch memory at all, both variables live in registers. An ordinary object in the same loop takes about 1.7 ms, by a separate check. So the advice is useful in ordinary JS too, and with regions it gives more: every step also has checks. The hotter the loop, the bigger the gain.</p>
 
-<h3 id="local-read">б) Много проходов по массиву региона</h3>
-<p>Если по массиву региона нужно пройти много раз по индексу, дешевле один раз скопировать его в обычный массив. Копирует и <code>Array.from(arr)</code>, и <code>[...arr]</code>, и простой цикл: для массива региона все три делают один проход по массиву значений и стоят примерно одинаково.</p>
+<h3 id="local-read">b) Many passes over a region array</h3>
+<p>If you need to go over a region array by index many times, it is cheaper to copy it once into a plain array. <code>Array.from(arr)</code>, <code>[...arr]</code> and a simple loop all copy it: for a region array, all three make one pass over the array of values and cost about the same.</p>
 <div class="versus">
 <js-bad>
 for (let pass = 0; pass < 50; pass++)
-  for (let i = 0; i < prices.length; i++) total += prices[i];   // prices в регионе
+  for (let i = 0; i < prices.length; i++) total += prices[i];   // prices is in a region
 </js-bad>
 <js-good>
-const local = Array.from(prices);   // копия один раз, обычный массив
+const local = Array.from(prices);   // copied once, a plain array
 for (let pass = 0; pass < 50; pass++)
   for (let i = 0; i < local.length; i++) total += local[i];
 </js-good>
@@ -155,21 +155,21 @@ for (let pass = 0; pass < 50; pass++)
 
 <!--ex:practice-04-local-then-write.js timing collapsed-->
 
-<p>Копия вместе с 50 проходами в 2,2 раза быстрее, чем 50 проходов по региону. До встраивания доступа в компиляторы проходы по региону занимали 34,6 мс, и разница была в 8,8 раза, до проверки владельца один раз на цикл — 13,1 мс и в 4 раза. Копия через <code>Array.from</code> раньше проигрывала даже проходам прямо по региону, 17,8 мс против 12,3: она шла через итератор, и каждый элемент читался через рантайм. Теперь <code>Array.from</code> и spread копируют массив региона одним проходом по значениям (<a href="inside.html#methods">как</a>), и выходит 3,5 мс, почти как с копией циклом (3,4 мс). Проход по обычному массиву примерно вдвое дешевле прохода по массиву региона, так что копия окупается уже через несколько проходов. Копия — это снимок. Изменения в регионе в ней не появятся, и запись в неё не попадёт в регион. Для одного прохода копировать смысла нет, об этом следующая практика. А если в массиве только числа, лучше с самого начала хранить их в типизированном массиве (<a href="#typed">практика 9</a>): тогда копия не нужна вовсе.</p>
+<p>A copy plus 50 passes is 2.2 times faster than 50 passes over the region. Before access was inlined in the compilers, the passes over the region took 34.6 ms and the difference was 8.8 times; before the owner was checked once per loop, 13.1 ms and 4 times. A copy with <code>Array.from</code> used to lose even to passes directly over the region, 17.8 ms versus 12.3: it went through the iterator, and each element was read through the runtime. Now <code>Array.from</code> and spread copy a region array in one pass over the values (<a href="inside.html#methods">how</a>), and it comes to 3.5 ms, almost the same as a copy with a loop (3.4 ms). A pass over a plain array is about half the cost of a pass over a region array, so the copy pays for itself after just a few passes. A copy is a snapshot. Changes in the region will not appear in it, and writes to it will not reach the region. For a single pass there is no point in copying; that is the next practice. And if the array holds only numbers, it is better to keep them in a typed array from the start (<a href="#typed">practice 9</a>): then no copy is needed at all.</p>
 
-<h2 id="methods"><span class="practice-num">5</span>Методы массива региона: вызывать прямо, без копии</h2>
-<p>У массива региона нет своего прототипа. <code>map</code>, <code>filter</code>, <code>reduce</code> и другие методы берутся из <code>Array.prototype</code> читающего потока. Раньше они читали каждый элемент через рантайм и были в десятки раз медленнее цикла, поэтому здесь советовали цикл или копию. Теперь методы, <code>for...of</code>, <code>Array.from</code> и spread читают значения прямо из массива региона (<a href="inside.html#methods">как</a>). Копировать массив ради методов больше не нужно.</p>
+<h2 id="methods"><span class="practice-num">5</span>Methods of a region array: call them directly, without a copy</h2>
+<p>A region array has no prototype of its own. <code>map</code>, <code>filter</code>, <code>reduce</code> and other methods come from the reading thread's <code>Array.prototype</code>. They used to read each element through the runtime and were dozens of times slower than a loop, so this page advised a loop or a copy. Now methods, <code>for...of</code>, <code>Array.from</code> and spread read values directly from the region array (<a href="inside.html#methods">how</a>). There is no longer any need to copy the array for the sake of methods.</p>
 <div class="versus">
 <js-bad>
-const local = new Array(numbers.length);   // numbers в регионе
+const local = new Array(numbers.length);   // numbers is in a region
 for (let i = 0; i < numbers.length; i++) local[i] = numbers[i];
-const total = local                 // копия ради методов
+const total = local                 // a copy for the sake of methods
   .filter((x) => x % 2 === 0)
   .map((x) => x * x)
   .reduce((a, b) => a + b, 0);
 </js-bad>
 <js-good>
-const total = numbers               // прямо на массиве региона
+const total = numbers               // directly on the region array
   .filter((x) => x % 2 === 0)
   .map((x) => x * x)
   .reduce((a, b) => a + b, 0);
@@ -180,19 +180,19 @@ const total = numbers               // прямо на массиве регио
 
 <!--ex:practice-05-methods.js timing collapsed-->
 
-<p>Методы на массиве региона занимают 23,9 мс, на обычном массиве с теми же значениями — 19,0 мс, в 1,3 раза меньше. До быстрых путей было 216 мс. Копия циклом перед методами почти ничего не даёт: 22,1 мс вместе с копией, а памяти нужно вдвое больше.</p>
-<p>Цикл <code>for</code> по индексу по-прежнему быстрее цепочки методов, в 11 раз. Но это не особенность регионов: на обычном массиве разница такая же. Методы вызывают колбэк на каждый элемент, а <code>filter</code> и <code>map</code> ещё и создают промежуточные массивы. Так что выбирать между методами и циклом стоит так же, как в обычном JS: методы там, где важнее читаемость, цикл в самых горячих местах. Для одного прохода циклом копия тоже не нужна: 3,5 мс с копией против 2,1 мс без неё, а обычный массив проходится за 1,7 мс.</p>
-<p>Быстрый путь работает, когда поток может читать регион: владеет им или держит билет замороженного. Иначе метод бросает <code>OwnershipError</code>, как и обычное чтение. Элементы, которые сами являются типизированными массивами, читаются по общему пути: каждый раз получается новый локальный view. Если подменить <code>Array.prototype[Symbol.iterator]</code>, <code>for...of</code>, <code>Array.from</code> и spread вызовут подменённый итератор, как и у обычного массива.</p>
+<p>Methods on a region array take 23.9 ms, on a plain array with the same values 19.0 ms, 1.3 times less. Before the fast paths it was 216 ms. Copying with a loop before the methods gains almost nothing: 22.1 ms including the copy, and it needs twice the memory.</p>
+<p>An indexed <code>for</code> loop is still faster than a method chain, by 11 times. But that is not specific to regions: on a plain array the difference is the same. Methods call a callback for every element, and <code>filter</code> and <code>map</code> also create intermediate arrays. So choose between methods and a loop the same way as in ordinary JS: methods where readability matters more, a loop in the hottest places. For a single loop pass a copy is not needed either: 3.5 ms with a copy versus 2.1 ms without one, and a plain array is traversed in 1.7 ms.</p>
+<p>The fast path works when the thread can read the region: it owns it or holds a borrow of a frozen one. Otherwise the method throws <code>OwnershipError</code>, just like an ordinary read. Elements that are themselves typed arrays are read through the generic path: each time you get a new local view. If you replace <code>Array.prototype[Symbol.iterator]</code>, <code>for...of</code>, <code>Array.from</code> and spread call the replaced iterator, as with a plain array.</p>
 
-<h2 id="shapes"><span class="practice-num">6</span>Одинаковая форма объектов</h2>
-<p>У каждого объекта региона есть «форма»: набор ключей в определённом порядке. Объекты <code>{ x, y }</code> и <code>{ y, x }</code> — разные формы. Inline cache в каждом месте кода запоминает формы, которые там встречались. С одной формой он работает быстрее всего, с двумя–четырьмя (полиморфный случай) перебирает их, а дальше переходит на общий медленный путь (мегаморфный случай). Привычный совет для обычного JS — создавать однотипные объекты одинаково, одной функцией или одним литералом.</p>
+<h2 id="shapes"><span class="practice-num">6</span>The same shape for all objects</h2>
+<p>Every region object has a "shape": a set of keys in a particular order. The objects <code>{ x, y }</code> and <code>{ y, x }</code> have different shapes. The inline cache at each place in the code remembers the shapes it has seen there. With one shape it is fastest, with two to four (the polymorphic case) it goes through them, and beyond that it switches to the generic slow path (the megamorphic case). The usual advice for ordinary JS is to create objects of the same kind the same way, with one function or one literal.</p>
 <div class="versus">
 <js-bad>
 const points = region.run(() => rows.map((r) =>
-  r.fromApi ? { y: r.y, x: r.x } : { x: r.x, y: r.y }));   // две формы вперемешку
+  r.fromApi ? { y: r.y, x: r.x } : { x: r.x, y: r.y }));   // two shapes mixed together
 </js-bad>
 <js-good>
-const makePoint = (x, y) => ({ x, y });                     // одна форма
+const makePoint = (x, y) => ({ x, y });                     // one shape
 const points = region.run(() => rows.map((r) => makePoint(r.x, r.y)));
 </js-good>
 </div>
@@ -201,22 +201,22 @@ const points = region.run(() => rows.map((r) => makePoint(r.x, r.y)));
 
 <!--ex:practice-06-shapes.js timing collapsed-->
 
-<p>У обычных объектов всё как в учебнике: одна форма 1,5 мс, 24 формы 7,8 мс, в 5,2 раза медленнее. У объектов региона теперь так же, только мягче: четыре формы на 24% медленнее одной, 24 формы — в 2,4 раза. Компилятор встраивает чтение поля, если во всех формах, которые видел inline cache, поле лежит в одной позиции. В этом замере у первых четырёх форм <code>x</code> идёт первым, поэтому они почти не мешают. Если позиции разные или форм слишком много (мегаморфный случай), остаётся вызов IC на каждом обращении. До встраивания доступа в компиляторы IC вызывался всегда, и 24 формы шли так же быстро, как одна (около 20 мс). Совет теперь работает так же, как для обычного JS.</p>
-<p>Ещё видно, что сумма поля по 100 000 объектов региона с одной формой в 3 раза дольше, чем по обычным (до встраивания было в 13 раз, до проверки владельца один раз на цикл — в 4,5). Это в основном не форма, а проверки в горячем цикле: индекс по массиву региона (практика 4б) и проверка формы и владельца у каждого нового объекта: в каждой итерации это другой объект, и одна проверка на цикл его не покрывает.</p>
+<p>For ordinary objects everything is as in the textbook: one shape 1.5 ms, 24 shapes 7.8 ms, 5.2 times slower. Region objects now behave the same way, only more mildly: four shapes are 24% slower than one, 24 shapes are 2.4 times slower. The compiler inlines a field read if the field is at the same position in all the shapes the inline cache has seen. In this measurement <code>x</code> comes first in the first four shapes, so they barely get in the way. If the positions differ or there are too many shapes (the megamorphic case), an IC call remains on every access. Before access was inlined in the compilers, the IC was always called, and 24 shapes ran as fast as one (about 20 ms). The advice now works the same way as for ordinary JS.</p>
+<p>You can also see that summing a field over 100,000 region objects with one shape takes 3 times longer than over ordinary ones (before inlining it was 13 times, before the owner was checked once per loop, 4.5). This is mostly not the shape but the checks in the hot loop: indexing into a region array (practice 4b) and the shape and owner check on each new object: in each iteration it is a different object, and one check per loop does not cover it.</p>
 
-<h2 id="await"><span class="practice-num">7</span>В главном потоке — <code>await</code>, а не <code>join()</code></h2>
-<p><code>task.join()</code> останавливает поток, пока задача не закончится. В браузере это выглядело бы как зависшая страница: клики не обрабатываются, кадры не рисуются, анимации стоят. Задача при этом считается в другом потоке, но главному от этого не легче, он просто ждёт. <code>await task</code> отпускает поток: пока задача считается, главный поток обрабатывает события, а результат приходит потом.</p>
-<p>В d8 нет страницы, поэтому мы изобразили её цепочкой <code>setTimeout</code>: каждый «тик» — как обработка события. Пока задача считается около 0,2 с, мы считаем, сколько тиков успел сделать главный поток и какой была самая длинная пауза между ними. В d8 <code>setTimeout</code> не ждёт указанную задержку, поэтому тиков так много: цепочка крутится так быстро, как позволяет поток.</p>
+<h2 id="await"><span class="practice-num">7</span>On the main thread, use <code>await</code>, not <code>join()</code></h2>
+<p><code>task.join()</code> stops the thread until the task ends. In a browser this would look like a frozen page: clicks are not handled, frames are not drawn, animations stand still. The task computes on another thread, but that does not help the main thread; it just waits. <code>await task</code> releases the thread: while the task computes, the main thread handles events, and the result arrives later.</p>
+<p>d8 has no page, so we imitated one with a <code>setTimeout</code> chain: each "tick" is like handling an event. While the task computes for about 0.2 s, we count how many ticks the main thread managed to make and how long the longest pause between them was. In d8, <code>setTimeout</code> does not wait for the given delay, which is why there are so many ticks: the chain spins as fast as the thread allows.</p>
 <div class="versus">
 <js-bad>
 button.onclick = () => {
-  const result = spawn(buildReport, rows).join();   // страница стоит, пока считается
+  const result = spawn(buildReport, rows).join();   // the page freezes while it computes
   render(result);
 };
 </js-bad>
 <js-good>
 button.onclick = async () => {
-  const result = await spawn(buildReport, rows);    // страница отвечает
+  const result = await spawn(buildReport, rows);    // the page stays responsive
   render(result);
 };
 </js-good>
@@ -226,33 +226,33 @@ button.onclick = async () => {
 
 <!--ex:practice-07-await-not-join.js timing collapsed-->
 
-<p>С <code>join()</code> главный поток не ответил ни разу, пока шла задача: единственный тик случился уже после неё, и пауза равна длине задачи. С <code>await</code> он ответил около 257 тысяч раз, и самая длинная пауза — 0,3 мс. Сама задача в обоих случаях считается одинаково долго. <code>join()</code> уместен в воркере или в скрипте d8, где отвечать некому. Вызов <code>spawn(...).join()</code> подчёркивает правило Biome из <a href="tooling.html#biome">песочницы</a>.</p>
+<p>With <code>join()</code>, the main thread did not respond even once while the task ran: the only tick happened after it, and the pause equals the length of the task. With <code>await</code>, it responded about 257,000 times, and the longest pause was 0.3 ms. The task itself takes equally long in both cases. <code>join()</code> is appropriate in a worker or in a d8 script, where there is nothing to respond to. A <code>spawn(...).join()</code> call is flagged by the Biome rule from the <a href="tooling.html#biome">playground</a>.</p>
 
-<h2 id="after-move"><span class="practice-num">8</span>Не трогать объект, пока его регион в другом потоке</h2>
-<p>После <code>postMessage(..., [region])</code>, после <code>spawn</code>, захватившего регион, или после отправки объекта региона в <a href="channels.html#move">канал</a> регион принадлежит другому потоку. Ссылка на объект у вас осталась, но любое обращение к нему бросает <code>OwnershipError</code>: и чтение поля, и <code>Object.keys</code>, и <code>JSON.stringify</code>. Это защита от гонки данных, а не ошибка движка. Дождитесь, пока регион вернётся: после <code>await</code> задачи или после ответного сообщения воркера с <code>Region.of(obj)</code> в списке transfer. Замера здесь нет: «плохой» вариант просто не работает.</p>
+<h2 id="after-move"><span class="practice-num">8</span>Do not touch an object while its region is on another thread</h2>
+<p>After <code>postMessage(..., [region])</code>, after a <code>spawn</code> that captured the region, or after sending a region object to a <a href="channels.html#move">channel</a>, the region belongs to another thread. You still have a reference to the object, but any access to it throws <code>OwnershipError</code>: reading a field, <code>Object.keys</code>, and <code>JSON.stringify</code> alike. This is protection against a data race, not an engine bug. Wait until the region comes back: after <code>await</code> on the task, or after the worker's reply message with <code>Region.of(obj)</code> in the transfer list. There is no measurement here: the "bad" variant simply does not work.</p>
 <div class="versus">
 <js-bad>
-const task = spawn(() => addShipping(cart));   // cart уехал в задачу
+const task = spawn(() => addShipping(cart));   // cart moved into the task
 showTotal(cart.total);                         // OwnershipError
 </js-bad>
 <js-good>
 const task = spawn(() => addShipping(cart));
-await task;                                    // регион вернулся
-showTotal(cart.total);                         // тот же объект, уже изменённый
+await task;                                    // the region is back
+showTotal(cart.total);                         // the same object, already changed
 </js-good>
 </div>
 
 <!--ex:practice-08-after-move.js-->
 
-<p>Объект после возврата тот же самый (<code>===</code>), и в нём уже лежат изменения, сделанные в другом потоке. Если нужно что-то показать, пока задача идёт, заранее скопируйте нужные поля в обычные переменные.</p>
-<p>С типизированными массивами в регионе ошибки не будет, но легко ошибиться тише: view, прочитанный до переезда, после него пустой, и после возврата региона таким и останется (<a href="guide.html#typed-detach">подробнее</a>). Перечитайте поле после <code>await</code>. Обращения к захваченному региону, пока задача идёт, подсвечивает правило ESLint <a href="tooling.html#no-region-use-while-spawned"><code>no-region-use-while-spawned</code></a>.</p>
+<p>After the return it is the very same object (<code>===</code>), and it already contains the changes made on the other thread. If you need to show something while the task runs, copy the fields you need into ordinary variables beforehand.</p>
+<p>With typed arrays in a region there is no error, but it is easy to make a quieter mistake: a view read before the move is empty after it, and stays empty after the region comes back (<a href="guide.html#typed-detach">more</a>). Read the field again after <code>await</code>. Accesses to a captured region while the task is running are flagged by the ESLint rule <a href="tooling.html#no-region-use-while-spawned"><code>no-region-use-while-spawned</code></a>.</p>
 
-<h2 id="typed"><span class="practice-num">9</span>Много чисел — в типизированный массив</h2>
-<p>Доступ по индексу к массиву региона компилятор встраивает в машинный код, но на каждом обращении проверяет форму и границы, а при записи ещё и значение (практики <a href="#local-read">4б</a> и <a href="#methods">5</a>). Кроме того, массив значений хранит любые значения JS, и дробное число в нём — отдельный объект в общей куче. Типизированный массив в регионе устроен иначе. При чтении поля вы получаете обычный <code>Float64Array</code> над памятью региона (<a href="guide.html#typed">подробнее</a>), и цикл по нему компилируется так же, как по любому типизированному массиву. Проверка владельца одна, при чтении поля, а не на каждом элементе.</p>
+<h2 id="typed"><span class="practice-num">9</span>Many numbers go into a typed array</h2>
+<p>The compiler inlines indexed access to a region array into machine code, but on every access it checks the shape and bounds, and on writes the value too (practices <a href="#local-read">4b</a> and <a href="#methods">5</a>). Besides, the array of values holds any JS values, and a fractional number in it is a separate object in the shared heap. A typed array in a region works differently. When you read the field, you get an ordinary <code>Float64Array</code> over the region's memory (<a href="guide.html#typed">more</a>), and a loop over it compiles the same way as over any typed array. The owner check happens once, when the field is read, not on every element.</p>
 <div class="versus">
 <js-bad>
 const data = region.run(() => ({
-  samples: Array.from({ length: N }, read),   // обычный массив чисел
+  samples: Array.from({ length: N }, read),   // a plain array of numbers
 }));
 for (let i = 0; i < data.samples.length; i++) total += data.samples[i];
 </js-bad>
@@ -260,7 +260,7 @@ for (let i = 0; i < data.samples.length; i++) total += data.samples[i];
 const data = region.run(() => ({
   samples: Float64Array.from({ length: N }, read),
 }));
-const samples = data.samples;                 // view один раз, до цикла
+const samples = data.samples;                 // the view once, before the loop
 for (let i = 0; i < samples.length; i++) total += samples[i];
 </js-good>
 </div>
@@ -269,56 +269,56 @@ for (let i = 0; i < samples.length; i++) total += samples[i];
 
 <!--ex:practice-09-typed-arrays.js timing collapsed-->
 
-<p>Сумма по <code>Float64Array</code> в регионе идёт с той же скоростью, что по обычному <code>Float64Array</code>, и в 2,1 раза быстрее, чем по массиву чисел в регионе. До встраивания доступа в компиляторы сумма по массиву региона занимала 6,9 мс, и разница была в 10 раз, до проверки владельца один раз на цикл — 2,4 мс и в 3,5 раза. Миллион записей в массив региона теперь занимает 2,0 мс (было около 8), в типизированный массив — около 1,7 мс, как и без регионов. Записи в <code>Float64Array</code> между запусками скачут от 0,8 до 1,7 мс, у обычного и у регионального одинаково. Выигрыш стал скромнее, но совет в силе: на чтении он всё ещё двукратный, типизированный массив занимает меньше памяти, а дробные числа в него пишутся без копии в общую кучу.</p>
-<p>Две оговорки. Читайте поле один раз перед циклом: каждое чтение создаёт новый view, и делать это на каждом шаге незачем. И не держите view после переезда или заморозки региона: он отсоединится и будет читаться как пустой.</p>
+<p>A sum over a <code>Float64Array</code> in a region runs at the same speed as over an ordinary <code>Float64Array</code>, and 2.1 times faster than over an array of numbers in a region. Before access was inlined in the compilers, the sum over the region array took 6.9 ms and the difference was 10 times; before the owner was checked once per loop, 2.4 ms and 3.5 times. A million writes to a region array now take 2.0 ms (it used to be about 8), to a typed array about 1.7 ms, the same as without regions. Writes to a <code>Float64Array</code> vary between runs from 0.8 to 1.7 ms, equally for the ordinary and the region one. The gain has become more modest, but the advice holds: on reads it is still twofold, a typed array takes less memory, and fractional numbers are written into it without a copy in the shared heap.</p>
+<p>Two caveats. Read the field once before the loop: each read creates a new view, and there is no reason to do that on every step. And do not keep a view after the region moves or is frozen: it gets detached and reads as empty.</p>
 
-<h2 id="map"><span class="practice-num">10</span>В <code>map</code> возвращать ручку задачи</h2>
-<p><code>Promise.all(items.map(...))</code> ждёт то, что вернул колбэк <code>map</code>. Если колбэк вызывает <code>spawn</code>, но возвращает что-то другое (номер, исходный элемент, ничего), <code>Promise.all</code> выполнится сразу, а задачи продолжат работать. Код после <code>await</code> решит, что всё готово, хотя это не так. Если задача упадёт, её ошибку тоже никто не поймает, и d8 сообщит о <a href="spawn.html#unhandled">необработанном отклонении</a>.</p>
+<h2 id="map"><span class="practice-num">10</span>In <code>map</code>, return the task handle</h2>
+<p><code>Promise.all(items.map(...))</code> waits for whatever the <code>map</code> callback returned. If the callback calls <code>spawn</code> but returns something else (a number, the original element, nothing), <code>Promise.all</code> resolves immediately, and the tasks keep running. The code after <code>await</code> will decide that everything is done, although it is not. If a task fails, nobody catches its error either, and d8 reports an <a href="spawn.html#unhandled">unhandled rejection</a>.</p>
 <div class="versus">
 <js-bad>
 await Promise.all(parts.map((i) => {
-  spawn(heavy, sizes[i]);     // ручка потерялась
-  return i;                   // Promise.all ждёт число
+  spawn(heavy, sizes[i]);     // the handle is lost
+  return i;                   // Promise.all waits for a number
 }));
 </js-bad>
 <js-good>
 const results = await Promise.all(parts.map((i) =>
-  spawn(heavy, sizes[i])));   // Promise.all ждёт задачи
-// или, если нужно другое значение:
+  spawn(heavy, sizes[i])));   // Promise.all waits for the tasks
+// or, if you need a different value:
 // parts.map((i) => spawn(heavy, sizes[i]).then(() => i))
 </js-good>
 </div>
 
 <!--ex:practice-10-map-handles.js timing-->
 
-<p>В плохом варианте <code>Promise.all</code> вернул номера частей, пока задачи только начинались: эти миллисекунды ушли на сами вызовы <code>spawn</code> и запуск воркеров пула. Задачи закончились намного позже, и узнать об этом удалось только через <code>spawn.idle()</code>. Эту ошибку подсвечивает правило ESLint <a href="tooling.html#no-floating-spawn"><code>no-floating-spawn</code></a>: оно отдельно говорит, что колбэк возвращает не ту ручку.</p>
+<p>In the bad variant, <code>Promise.all</code> returned the part numbers while the tasks were only starting: those milliseconds went to the <code>spawn</code> calls themselves and to starting the pool workers. The tasks finished much later, and the only way to find out was <code>spawn.idle()</code>. This mistake is flagged by the ESLint rule <a href="tooling.html#no-floating-spawn"><code>no-floating-spawn</code></a>: it says separately that the callback returns the wrong handle.</p>
 
-<h2 id="borrow-while"><span class="practice-num">11</span>Билет в асинхронной задаче — через <code>borrowWhile</code></h2>
-<p>Билет <code>region.borrow()</code>, взятый в задаче <code>spawn</code>, сдаётся сам, когда задача закончилась. Для синхронной работы это то, что нужно. Но если задача отложила чтение на потом (таймер, <code>await</code> без возврата промиса), к этому моменту билета уже нет, и чтение бросит <code>OwnershipError</code>: без билета замороженный регион читать нельзя, а его к тому же могли разморозить. <code>region.borrowWhile(fn)</code> держит билет, пока не выполнится промис из <code>fn</code>. Главное — вернуть этот промис из задачи или дождаться его, иначе задача закончится раньше. Замера здесь нет: плохой вариант просто не работает. Пример с настоящим выводом — на <a href="spawn.html#borrow">странице про spawn</a>.</p>
+<h2 id="borrow-while"><span class="practice-num">11</span>A borrow in an async task goes through <code>borrowWhile</code></h2>
+<p>A <code>region.borrow()</code> taken in a <code>spawn</code> task is returned automatically when the task ends. For synchronous work that is exactly what you need. But if the task deferred the read until later (a timer, an <code>await</code> without returning the promise), by then the borrow is gone, and the read throws <code>OwnershipError</code>: a frozen region cannot be read without a borrow, and it may also have been thawed. <code>region.borrowWhile(fn)</code> holds the borrow until the promise from <code>fn</code> settles. The key is to return this promise from the task or wait for it, otherwise the task ends earlier. There is no measurement here: the bad variant simply does not work. An example with real output is on the <a href="spawn.html#borrow">spawn page</a>.</p>
 <div class="versus">
 <js-bad>
 await spawn(() => {
   const ticket = Region.of(prices).borrow();
-  setTimeout(() => show(prices.apple), 100);   // билет уже сдан
+  setTimeout(() => show(prices.apple), 100);   // the borrow is already returned
 });
 </js-bad>
 <js-good>
 const apple = await spawn(() =>
   Region.of(prices).borrowWhile(async () => {
     await sleep(100);
-    return prices.apple;                       // билет ещё у задачи
+    return prices.apple;                       // the task still holds the borrow
   }));
 </js-good>
 </div>
-<p>Голый билет, переживший задачу, d8 замечает при запуске и печатает в воркере предупреждение. <code>borrowWhile</code> с асинхронной функцией без <code>return</code> видно ещё в редакторе: его подсвечивает правило ESLint <a href="tooling.html#no-floating-borrow-while"><code>no-floating-borrow-while</code></a>.</p>
+<p>d8 notices a bare borrow that outlived its task at run time and prints a warning in the worker. <code>borrowWhile</code> with an async function and no <code>return</code> is visible already in the editor: it is flagged by the ESLint rule <a href="tooling.html#no-floating-borrow-while"><code>no-floating-borrow-while</code></a>.</p>
 
-<h2 id="build"><span class="practice-num">12</span>Большой набор данных — литералами <code>#{}</code> или одним <code>run</code>, а не <code>run</code> на каждый объект</h2>
-<p>Один объект, собранный обычным кодом, кладут в регион через <code>region.run(() =&gt; ({ ... }))</code> (<a href="guide.html#direct">как</a>). Но каждый вызов копирует то, что вернул: сначала движок создаёт обычный объект, потом его копию в регионе. На десятке объектов этого не видно, на сотнях тысяч видно хорошо.</p>
-<p>Литерал <code>#{}</code> ничего не копирует и после первого объекта каждой формы создаёт объект прямо в машинном коде. Собирайте большой набор литералами. Если данные уже лежат обычными объектами, скопируйте их в регион одним <code>run</code>: одна копия всего набора дешевле копии на каждый объект.</p>
+<h2 id="build"><span class="practice-num">12</span>A large data set: <code>#{}</code> literals or one <code>run</code>, not <code>run</code> per object</h2>
+<p>A single object built by ordinary code is put into a region with <code>region.run(() =&gt; ({ ... }))</code> (<a href="guide.html#direct">how</a>). But each call copies what it returned: first the engine creates an ordinary object, then its copy in the region. With a dozen objects this is invisible; with hundreds of thousands it is very visible.</p>
+<p>The <code>#{}</code> literal copies nothing, and after the first object of each shape it creates objects directly in machine code. Build a large data set with literals. If the data already exists as ordinary objects, copy it into the region with one <code>run</code>: one copy of the whole set is cheaper than a copy per object.</p>
 <div class="versus">
 <js-bad>
 const items = region.run(() => []);
-for (const row of rows) {                 // 200 000 строк
+for (const row of rows) {                 // 200,000 rows
   items.push(region.run(() => ({ id: row.id, name: row.name,
     tags: [...row.tags], price: row.price })));
 }
@@ -327,12 +327,12 @@ for (const row of rows) {                 // 200 000 строк
 {
   using _ = region.enter();
   const items = #[];
-  for (const row of rows) {               // без копии
+  for (const row of rows) {               // no copy
     items.push(#{ id: row.id, name: row.name,
       tags: #[row.tags[0], row.tags[1]], price: row.price });
   }
 }
-// Данные уже есть обычными объектами: одна копия всего набора.
+// The data already exists as ordinary objects: one copy of the whole set.
 const items = region.run(() => rows.map((row) => ({
   id: row.id, name: row.name, tags: [...row.tags], price: row.price,
 })));
@@ -343,5 +343,5 @@ const items = region.run(() => rows.map((row) => ({
 
 <!--ex:36-create.js timing collapsed-->
 
-<p>Литералы в 2,2 раза быстрее одного <code>run</code> и в 5 раз быстрее <code>run</code> на каждый объект. Один <code>run</code> в свою очередь в 2,3 раза быстрее, чем по одному. Читать потом все три массива почти одинаково быстро, около 1 мс за проход: объекты с одинаковыми ключами получают одну форму, каким бы способом их ни создали. Все четыре способа — на странице <a href="numbers.html#create">«Цифры»</a>.</p>
-<p>Добавлять отдельные объекты в готовый регион по ходу работы можно спокойно, это микросекунды на объект. Из двух способов литерал <code>#{}</code> дешевле, потому что не копирует.</p>
+<p>Literals are 2.2 times faster than one <code>run</code> and 5 times faster than <code>run</code> per object. One <code>run</code>, in turn, is 2.3 times faster than one at a time. Reading all three arrays afterwards is almost equally fast, about 1 ms per pass: objects with the same keys get the same shape, no matter how they were created. All four ways are on the <a href="numbers.html#create">"Numbers"</a> page.</p>
+<p>Adding individual objects to an existing region as you go is fine; it costs microseconds per object. Of the two ways, the <code>#{}</code> literal is cheaper, because it does not copy.</p>

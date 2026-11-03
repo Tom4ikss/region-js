@@ -1,0 +1,7 @@
+abort: AbortError: spawn() task was aborted
+timeout: TimeoutError: spawn() task did not finish in 50 ms
+цикл: TimeoutError: spawn() task did not finish in 20 ms
+готово: 10 мс
+готово: 40 мс
+готово: 80 мс
+осталось задач: 1

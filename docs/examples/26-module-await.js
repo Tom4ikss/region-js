@@ -1,16 +1,16 @@
 // d8-flags: --module
-// С флагом --module await работает прямо на верхнем уровне файла.
+// With the --module flag, await works directly at the top level of the file.
 const total = await spawn((n) => {
   let sum = 0;
   for (let i = 1; i <= n; i++) sum += i;
   return sum;
 }, 1000);
-print('сумма:', total);
+print('sum:', total);
 
-// Задачу без await d8 тоже дождётся и только потом завершится.
+// d8 also waits for a task without await, and only then exits.
 spawn(() => {
   let x = 0;
   for (let i = 0; i < 30_000_000; i++) x += i;
-  print('задача без await закончилась');
+  print('the task without await finished');
 });
-print('файл выполнен до конца');
+print('the file ran to the end');

@@ -1,2 +1,2 @@
-join : задача 193 ms, главный поток ответил 1 раз, самая длинная пауза 193.4 ms
-await: задача 192 ms, главный поток ответил 262392 раз, самая длинная пауза 0.3 ms
+join : task 185 ms, the main thread responded 1 times, longest pause 184.7 ms
+await: task 201 ms, the main thread responded 267784 times, longest pause 0.4 ms

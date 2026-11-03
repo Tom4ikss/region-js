@@ -1,15 +1,15 @@
 // d8-flags: --module
-// Ссылка из региона на объект своего потока: Region.localRef.
+// A reference from a region to an object of your own thread: Region.localRef.
 const cache = new Map([['sku1', 120]]);
 
 const region = new Region();
 const order = region.run(() => ({ sku: 'sku1', count: 2, prices: Region.localRef(cache) }));
 
-// В своём потоке deref() возвращает сам объект.
-print('здесь:', order.prices.local, order.prices.deref().get(order.sku) * order.count);
+// In its own thread deref() returns the object itself.
+print('here:', order.prices.local, order.prices.deref().get(order.sku) * order.count);
 
-// Задача получает регион целиком, а Map остаётся тут: в задаче ручка есть,
-// но разыменовать её нельзя.
+// The task gets the whole region, but the Map stays here: the task has the handle,
+// but cannot dereference it.
 const inTask = await spawn(() => {
   try {
     return order.prices.deref().size;
@@ -17,7 +17,7 @@ const inTask = await spawn(() => {
     return `${order.prices.local} ${e.name} ${e.reason}`;
   }
 });
-print('в задаче:', inTask);
+print('in a task:', inTask);
 
-// После задачи регион снова здесь, и ручка снова работает.
-print('снова здесь:', order.prices.deref() === cache);
+// After the task the region is back here, and the handle works again.
+print('back here:', order.prices.deref() === cache);

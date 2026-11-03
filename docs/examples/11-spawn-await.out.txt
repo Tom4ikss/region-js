@@ -1,4 +1,4 @@
-задачи запущены, главный поток свободен
-результаты: 998763, 997894, 996692
-async-колбэк: page-7 3 строки
-ошибка из потока: RangeError: слишком далеко
+tasks started, the main thread is free
+results: 998763, 997894, 996692
+async callback: page-7 3 rows
+error from the thread: RangeError: too far

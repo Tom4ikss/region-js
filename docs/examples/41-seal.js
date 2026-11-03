@@ -1,5 +1,5 @@
-// Region.share(): общие данные навсегда, как Arc<T> в Rust. Читают все потоки,
-// без билетов и без копий; изменить, разморозить или освободить нельзя.
+// Region.share(): data shared forever, like Arc<T> in Rust. All threads read it,
+// without borrows and without copies; it cannot be changed, thawed or freed.
 const config = Region.share({
   api: 'https://example.test',
   retries: 3,
@@ -8,24 +8,24 @@ const config = Region.share({
 const region = Region.of(config);
 print('sealed:', region.sealed, '| frozen:', region.frozen);
 
-// Задачи читают те же объекты параллельно: билет не нужен, копии нет.
+// Tasks read the same objects in parallel: no borrow needed, no copy.
 const results = [1, 2, 3].map((n) => spawn((config, n) => {
   const w = config.weights;
-  return `задача ${n}: ${config.api}, retries ${config.retries}, w[${n - 1}] = ${w[n - 1]}`;
+  return `task ${n}: ${config.api}, retries ${config.retries}, w[${n - 1}] = ${w[n - 1]}`;
 }, config, n));
 for (const task of results) print(task.join());
 
-// Воркер тоже читает без билета.
+// A worker also reads without a borrow.
 const worker = new Worker(
   'onmessage = ({ data }) => postMessage(data.retries * 10)',
   { type: 'string' },
 );
 worker.postMessage(config);
-print('воркер:', worker.getMessage());
+print('worker:', worker.getMessage());
 worker.terminate();
 
 for (const [what, fn] of [
-  ['запись', () => { config.retries = 5; }],
+  ['write', () => { config.retries = 5; }],
   ['thaw', () => region.thaw()],
   ['free', () => region.free()],
 ]) {
@@ -36,8 +36,8 @@ for (const [what, fn] of [
   }
 }
 
-// Запечатать можно и свой регион, и замороженный, даже пока его читают под
-// билетами: право разморозить пропадает навсегда.
+// You can seal your own region or a frozen one, even while it is read under
+// borrows: the right to thaw is gone for good.
 const own = new Region();
 const stats = own.run(() => ({ hits: 0 }));
 stats.hits = 42;

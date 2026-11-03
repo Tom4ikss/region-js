@@ -1,277 +1,277 @@
-<!-- title: Данные в регионах -->
-<!-- description: Регион и литералы #{} и 'use region', правила чтения и записи, массивы, типизированные массивы, Region.share, freeze и borrow, free, воркеры напрямую через postMessage и Region.of. Каждый шаг с запущенным примером. -->
-<p class="eyebrow">Глава 4</p>
-<h1>Данные в регионах</h1>
-<p class="lead"><a href="spawn.html"><code>spawn</code></a> и <a href="channels.html">каналы</a> перемещают между потоками регионы. Эта страница — о том, как данные попадают в регион и что с ними можно делать: литералы и <code>'use region'</code>, правила чтения и записи, общие данные только для чтения, освобождение памяти. В конце — нижний уровень, на котором всё это построено: переезд региона в воркер через <code>postMessage</code>. Каждый пример — файл из папки <code>examples/</code>, запущенный в собранном d8. Под кодом — его настоящий вывод.</p>
+<!-- title: Data in regions -->
+<!-- description: Regions, the #{} literals and 'use region', read and write rules, arrays, typed arrays, Region.share, freeze and borrow, free, workers directly via postMessage and Region.of. Every step comes with an example that was actually run. -->
+<p class="eyebrow">Chapter 4</p>
+<h1>Data in regions</h1>
+<p class="lead"><a href="spawn.html"><code>spawn</code></a> and <a href="channels.html">channels</a> move regions between threads. This page is about how data gets into a region and what you can do with it: literals and <code>'use region'</code>, read and write rules, shared read-only data, freeing memory. At the end comes the low level everything is built on: moving a region to a worker with <code>postMessage</code>. Every example is a file from the <code>examples/</code> folder, run in a built d8. Below the code is its real output.</p>
 
 <div class="callout aside">
-<span class="callout-title">Как читать примеры</span>
-<p>Примеры запускаются так: <code>d8 --harmony-regions файл.js</code> (полная команда — на странице <a href="limits.html#run">«Ограничения и планы»</a>). Вместо <code>console.log</code> в d8 используется <code>print</code>. Строку-предупреждение «V8 is running with experimental features enabled», которую d8 печатает первой, мы из вывода убрали.</p>
-<p>Некоторые примеры запускаются с флагом <code>--module</code>, чтобы писать <code>await</code> прямо на верхнем уровне файла. Такие файлы начинаются со строки <code>// d8-flags: --module</code>.</p>
-<p>Ещё одна особенность d8: <code>worker.getMessage()</code> останавливает поток, пока не придёт ответ от воркера. Так короче писать примеры. В браузере то же самое делается через <code>worker.onmessage</code> или промис, который ждут через <code>await</code>.</p>
+<span class="callout-title">How to read the examples</span>
+<p>The examples are run like this: <code>d8 --harmony-regions file.js</code> (the full command is on the <a href="limits.html#run">“Limits and plans”</a> page). d8 uses <code>print</code> instead of <code>console.log</code>. We removed the warning line “V8 is running with experimental features enabled”, which d8 prints first, from the output.</p>
+<p>Some examples run with the <code>--module</code> flag so they can use <code>await</code> directly at the top level of the file. Such files start with the line <code>// d8-flags: --module</code>.</p>
+<p>One more d8 specific: <code>worker.getMessage()</code> blocks the thread until the worker replies. This keeps the examples short. In a browser you do the same with <code>worker.onmessage</code> or a promise you <code>await</code>.</p>
 </div>
 
-<h2 id="region">Создать регион</h2>
-<p><code>new Region()</code> создаёт пустой регион, владелец — текущий поток. Положить в него данные можно через <code>region.run(fn)</code>: функция выполняется как обычно, а то, что она вернула, копируется в регион вместе со всем, на что ссылается. <code>run</code> возвращает уже копию, которая лежит в регионе. Быстрее всего создавать объекты сразу в регионе: литералами <code>#{}</code> и <code>#[]</code> или в коде с директивой <code>'use region'</code> (<a href="#literals">следующий раздел</a>).</p>
+<h2 id="region">Create a region</h2>
+<p><code>new Region()</code> creates an empty region owned by the current thread. You can put data into it with <code>region.run(fn)</code>: the function runs as usual, and whatever it returns is copied into the region together with everything it references. <code>run</code> returns the copy that lives in the region. The fastest way is to create objects directly in the region: with the <code>#{}</code> and <code>#[]</code> literals or in code with the <code>'use region'</code> directive (<a href="#literals">next section</a>).</p>
 
 <!--ex:01-first-region.js-->
 
-<p>Копирование внутрь происходит один раз, при создании. Дальше объекты можно передавать сколько угодно раз без копий. <code>region.id</code> — номер региона, <code>region.owner</code> — номер потока-владельца (в терминах V8 — isolate; у главного потока номер 0). Номера освободившихся регионов движок раздаёт заново, так что <code>id</code> уникален только среди живых регионов.</p>
+<p>Copying in happens once, at creation. After that the objects can be passed around any number of times without copies. <code>region.id</code> is the region number, <code>region.owner</code> is the number of the owner thread (in V8 terms, the isolate; the main thread is number 0). The engine reuses the numbers of freed regions, so <code>id</code> is unique only among live regions.</p>
 <div class="callout limit">
-<span class="callout-title">Важно</span>
-<p>Объекты, которые вы создали внутри <code>fn</code>, и объекты в регионе — разные. Если внутри функции вы сохранили ссылку на свой объект где-то снаружи, она будет указывать на обычный объект, а не на копию в регионе. Работайте с тем, что вернул <code>run</code>.</p>
+<span class="callout-title">Important</span>
+<p>The objects you created inside <code>fn</code> and the objects in the region are different objects. If inside the function you stored a reference to your object somewhere outside, it points to the ordinary object, not to the copy in the region. Work with what <code>run</code> returned.</p>
 </div>
 
-<h2 id="literals">Литералы <code>#{}</code> и <code>#[]</code></h2>
-<p><code>run</code> копирует в регион то, что создал обычный код. Литералы <code>#{...}</code> и <code>#[...]</code> создают объект или массив сразу в текущем регионе, без промежуточного объекта в куче потока и без копии. Они включены вместе с <code>--harmony-regions</code>.</p>
+<h2 id="literals">The <code>#{}</code> and <code>#[]</code> literals</h2>
+<p><code>run</code> copies into the region what ordinary code created. The <code>#{...}</code> and <code>#[...]</code> literals create an object or array directly in the current region, with no intermediate object on the thread's heap and no copy. They are enabled together with <code>--harmony-regions</code>.</p>
 
 <!--ex:37-literals.js-->
 
-<p>Литерал создаёт объект в текущем регионе, поэтому работает внутри <code>using _ = region.enter()</code> или <code>run()</code>. В задаче <code>spawn</code> текущего региона нет, туда входят явно: <code>using _ = Region.of(x).enter()</code>.</p>
+<p>A literal creates an object in the current region, so it works inside <code>using _ = region.enter()</code> or <code>run()</code>. A <code>spawn</code> task has no current region; you enter one explicitly: <code>using _ = Region.of(x).enter()</code>.</p>
 <ul>
-  <li><strong>Ключи</strong> — имена, строки в кавычках и короткая запись <code>#{ id }</code>.</li>
-  <li><strong>Значения</strong> — примитивы, объекты того же региона (в том числе другие <code>#{}</code> и <code>#[]</code>) и типизированные массивы, которые копируются. Литерал ничего не копирует за вас, поэтому обычный <code>{}</code> или <code>[]</code> внутри него — ошибка: вложенные объекты тоже пишутся как <code>#{}</code>, массивы — как <code>#[]</code>. Объект другого региона внутри даёт <code>OwnershipError</code>, как при записи в поле.</li>
-  <li><strong>Нельзя:</strong> spread, дырки в массиве, методы и вычисляемые ключи. Это синтаксическая ошибка.</li>
-  <li>Форма объекта фиксирована, как у любого объекта региона. Массив растёт через <code>push</code>.</li>
+  <li><strong>Keys</strong>: names, quoted strings and the shorthand <code>#{ id }</code>.</li>
+  <li><strong>Values</strong>: primitives, objects of the same region (including other <code>#{}</code> and <code>#[]</code>) and typed arrays, which are copied. A literal copies nothing for you, so a plain <code>{}</code> or <code>[]</code> inside it is an error: nested objects are written as <code>#{}</code> too, arrays as <code>#[]</code>. An object from another region inside gives <code>OwnershipError</code>, as when writing a field.</li>
+  <li><strong>Not allowed:</strong> spread, holes in arrays, methods and computed keys. These are a syntax error.</li>
+  <li>The shape of the object is fixed, as with any region object. An array grows with <code>push</code>.</li>
 </ul>
-<p>Литерал выделяет объект прямо в машинном коде, без копии и без рантайма, и стоит около 15–20 нс (<a href="inside.html#literals">как</a>). Это самый быстрый способ наполнить регион: 200 000 товаров литералами и <code>push</code> создаются за 74 мс, одним <code>run</code> — за 165 мс, через <code>run</code> на каждый товар — за 377 мс. <code>push</code> в массив региона тоже идёт без рантайма, около 25 нс на элемент. Замер — на странице <a href="numbers.html#create">«Цифры»</a>.</p>
-<p>В VS Code типы в файлах с литералами работают через расширение из <code>playground/</code>, Biome и ESLint синтаксис <code>#{}</code> пока не понимают (<a href="tooling.html#literals">подробнее</a>).</p>
+<p>A literal allocates the object directly in machine code, without a copy and without the runtime, and costs about 15–20 ns (<a href="inside.html#literals">how</a>). This is the fastest way to fill a region: 200,000 products are created in 74 ms with literals and <code>push</code>, in 165 ms with one <code>run</code>, and in 377 ms with one <code>run</code> per product. <code>push</code> into a region array also skips the runtime, about 25 ns per element. The measurement is on the <a href="numbers.html#create">“Numbers”</a> page.</p>
+<p>In VS Code, types in files with literals work through the extension from <code>playground/</code>; Biome and ESLint do not understand the <code>#{}</code> syntax yet (<a href="tooling.html#literals">details</a>).</p>
 
-<h3 id="use-region">Директива <code>'use region'</code></h3>
-<p>Если почти все объекты функции должны лежать в регионе, решётку перед каждым <code>{</code> и <code>[</code> можно не писать. Директива <code>'use region'</code> в начале функции или файла, как <code>'use strict'</code>, делает каждый <code>{}</code> в этом коде литералом <code>#{}</code>, а каждый <code>[]</code> — <code>#[]</code>. Это обычный синтаксис JavaScript, поэтому TypeScript, ESLint, Biome и Prettier такой код понимают без расширений. Директива работает с флагом <code>--harmony-regions</code>, без него это просто строка.</p>
+<h3 id="use-region">The <code>'use region'</code> directive</h3>
+<p>If almost all objects of a function belong in a region, you can skip the hash before every <code>{</code> and <code>[</code>. The <code>'use region'</code> directive at the start of a function or file, like <code>'use strict'</code>, turns every <code>{}</code> in that code into a <code>#{}</code> literal and every <code>[]</code> into <code>#[]</code>. It is ordinary JavaScript syntax, so TypeScript, ESLint, Biome and Prettier understand such code without extensions. The directive works with the <code>--harmony-regions</code> flag; without it, it is just a string.</p>
 
 <!--ex:42-use-region.js-->
 
 <ul>
-  <li><strong>Охват.</strong> Директива действует на тело функции и на все функции внутри неё, в том числе на колбэки вроде <code>rows.map((r) =&gt; ({ ... }))</code>, даже если их вызовут позже. Параметры самой функции разобраны раньше директивы и остаются обычными. Код в <code>eval</code> директиву не наследует.</li>
-  <li><strong>Текущий регион</strong> нужен так же, как для <code>#{}</code>: <code>using _ = region.enter()</code> или <code>run</code>.</li>
-  <li><strong>Деструктуризация</strong> не меняется: <code>const { a } = x</code>, <code>[a, b] = [b, a]</code>, <code>({ name }) =&gt; name</code>. Это шаблоны, а не литералы.</li>
-  <li><strong>Нельзя</strong> то же, что в <code>#{}</code>: spread, дырки, методы, геттеры и сеттеры, <code>__proto__</code>, вычисляемые и числовые ключи. Это синтаксическая ошибка с текстом «In 'use region' code {} and [] are #{} and #[], …». В шаблонах всё это по-прежнему можно.</li>
+  <li><strong>Scope.</strong> The directive applies to the function body and to all functions inside it, including callbacks like <code>rows.map((r) =&gt; ({ ... }))</code>, even if they are called later. The parameters of the function itself are parsed before the directive and stay ordinary. Code in <code>eval</code> does not inherit the directive.</li>
+  <li><strong>A current region</strong> is needed just as for <code>#{}</code>: <code>using _ = region.enter()</code> or <code>run</code>.</li>
+  <li><strong>Destructuring</strong> does not change: <code>const { a } = x</code>, <code>[a, b] = [b, a]</code>, <code>({ name }) =&gt; name</code>. These are patterns, not literals.</li>
+  <li><strong>Not allowed</strong> is the same as in <code>#{}</code>: spread, holes, methods, getters and setters, <code>__proto__</code>, computed and numeric keys. This is a syntax error with the text “In 'use region' code {} and [] are #{} and #[], …”. In patterns all of this is still allowed.</li>
 </ul>
 
-<h2 id="direct">Писать прямо в регион</h2>
-<p><code>region.run(fn)</code> удобен, когда данные уже есть или их проще собрать обычным кодом: всё, что вернёт <code>fn</code>, копируется в регион одним махом. Складывать данные в регион по ходу работы удобнее литералами: войти в регион через <code>using _ = region.enter()</code> и создавать в нём объекты <code>#{}</code> и массивы <code>#[]</code>, без копии.</p>
+<h2 id="direct">Write directly into a region</h2>
+<p><code>region.run(fn)</code> is convenient when the data already exists or is easier to build with ordinary code: everything <code>fn</code> returns is copied into the region in one go. To add data to a region as you work, literals are more convenient: enter the region with <code>using _ = region.enter()</code> and create <code>#{}</code> objects and <code>#[]</code> arrays in it, without a copy.</p>
 
 <!--ex:35-direct.js-->
 
-<p><code>enter()</code> возвращает скоуп: объявленный через <code>using</code>, он заканчивается вместе с блоком, и текущим снова становится предыдущий регион. Внутри <code>run(fn)</code> регион тоже текущий. В задаче <code>spawn</code> текущего региона нет, ведь туда может приехать несколько регионов сразу, поэтому в регион входят явно, взяв его у объекта, который приехал: <code>using _ = Region.of(obj).enter()</code>. Если объект проще собрать обычным кодом, <code>region.run(() =&gt; ({ ... }))</code> скопирует в регион его одного, текущий регион для этого не нужен.</p>
-<p>Обычный объект в поле региона по-прежнему не кладётся: регион хранит только свои объекты. Ошибка подскажет создать его в регионе через <code>run()</code> или <code>#{}</code>. Объекты, которые уже лежат в регионе, <code>run</code> заново не копирует: если вложенные значения уже в регионе, копируется только то, что создал сам <code>fn</code>.</p>
-<p>Для больших объёмов <code>run</code> на каждый объект — самый медленный способ: каждый вызов — отдельная копия, и 200 000 объектов, добавленных по одному, создаются в 2,3 раза дольше, чем через один <code>run</code> (377 мс против 165), и в 5 раз дольше, чем литералами. Читаются они потом так же быстро, потому что объекты с одинаковыми ключами получают одну форму, как бы их ни создали (<a href="practices.html#build">практика 12</a>). Поэтому <code>run</code> на один объект хорош, чтобы иногда добавить в регион то, что собрал обычный код. Большой набор быстрее собрать литералами или обычными объектами и скопировать одним <code>run</code>.</p>
+<p><code>enter()</code> returns a scope: declared with <code>using</code>, it ends with the block, and the previous region becomes current again. Inside <code>run(fn)</code> the region is current too. A <code>spawn</code> task has no current region, since several regions can arrive in it at once, so you enter a region explicitly by taking it from an object that arrived: <code>using _ = Region.of(obj).enter()</code>. If an object is easier to build with ordinary code, <code>region.run(() =&gt; ({ ... }))</code> copies just that object into the region; no current region is needed for this.</p>
+<p>A plain object still cannot be stored in a field of a region object: a region holds only its own objects. The error suggests creating it in the region with <code>run()</code> or <code>#{}</code>. <code>run</code> does not copy objects that are already in the region again: if the nested values are already in the region, only what <code>fn</code> itself created is copied.</p>
+<p>For large volumes, one <code>run</code> per object is the slowest way: every call is a separate copy, and 200,000 objects added one at a time take 2.3 times longer to create than with one <code>run</code> (377 ms versus 165) and 5 times longer than with literals. They are read just as fast afterwards, because objects with the same keys get the same shape no matter how they were created (<a href="practices.html#build">practice 12</a>). So <code>run</code> for a single object is good for occasionally adding something ordinary code built. A large set is faster to build with literals, or with ordinary objects copied in with one <code>run</code>.</p>
 
-<h2 id="rules">Чтение и запись</h2>
-<p>Владелец читает и пишет поля как обычно. Но есть три правила:</p>
+<h2 id="rules">Reading and writing</h2>
+<p>The owner reads and writes fields as usual. But there are three rules:</p>
 <ul>
-  <li>в поле можно записать число, строку, <code>true</code>/<code>false</code>, <code>null</code>, <code>undefined</code> или объект <em>из того же региона</em>;</li>
-  <li>обычный объект из своего потока записать нельзя: он живёт вне региона, и другой поток не смог бы его прочитать. Исключение — типизированный массив: он копируется в регион (<a href="#typed">типизированные массивы</a>);</li>
-  <li>набор полей у объекта фиксирован: добавить новое свойство нельзя. Отсутствующее поле читается как <code>undefined</code>. Массивы при этом растут и укорачиваются (<a href="#arrays">массивы и методы</a>).</li>
+  <li>a field can hold a number, a string, <code>true</code>/<code>false</code>, <code>null</code>, <code>undefined</code> or an object <em>from the same region</em>;</li>
+  <li>an ordinary object from your own thread cannot be written: it lives outside the region, and another thread could not read it. The exception is a typed array: it is copied into the region (<a href="#typed">typed arrays</a>);</li>
+  <li>the set of fields of an object is fixed: you cannot add a new property. A missing field reads as <code>undefined</code>. Arrays, however, grow and shrink (<a href="#arrays">arrays and methods</a>).</li>
 </ul>
 
 <!--ex:03-read-write.js-->
 
-<p>Циклы и общие куски графа при копировании сохраняются: если два поля указывали на один объект, в регионе они тоже указывают на одну копию.</p>
+<p>Cycles and shared parts of the graph survive copying: if two fields pointed to one object, in the region they also point to one copy.</p>
 
 <div class="callout analogy">
-<span class="callout-title">Почему форма фиксирована</span>
-<p>Регион — как квартира с уже расставленной мебелью. Переставлять вещи внутри (менять значения полей) можно, а пристраивать новую комнату (добавлять свойство) нельзя. Благодаря этому другой поток, получив регион, видит объекты точно такой формы, какой их создали, и движку не нужно согласовывать изменения структуры между потоками.</p>
+<span class="callout-title">Why the shape is fixed</span>
+<p>A region is like an apartment with the furniture already in place. You can rearrange things inside (change field values), but you cannot build on a new room (add a property). Thanks to this, another thread that receives the region sees objects of exactly the shape they were created with, and the engine does not need to coordinate structure changes between threads.</p>
 </div>
 
-<h2 id="arrays">Массивы и методы</h2>
-<p>У объектов региона нет своего прототипа. Когда вы обращаетесь к полю, которого нет в самом объекте, движок ищет его в <code>Array.prototype</code> или <code>Object.prototype</code> того потока, который сейчас читает. Поэтому работают <code>for...of</code>, spread, <code>map</code>, <code>filter</code>, <code>slice</code>, <code>includes</code> и другие методы массивов. Массивы региона растут и укорачиваются: <code>push</code>, <code>pop</code>, <code>splice</code>, запись за концом и <code>length = n</code> работают. Лишнее место под элементы массив держит про запас, как обычный массив JS, так что серия <code>push</code> не копирует его каждый раз. Форма объектов, наоборот, фиксирована: новое поле у объекта региона добавить нельзя.</p>
+<h2 id="arrays">Arrays and methods</h2>
+<p>Region objects have no prototype of their own. When you access a field the object itself does not have, the engine looks it up in the <code>Array.prototype</code> or <code>Object.prototype</code> of the thread that is currently reading. That is why <code>for...of</code>, spread, <code>map</code>, <code>filter</code>, <code>slice</code>, <code>includes</code> and other array methods work. Region arrays grow and shrink: <code>push</code>, <code>pop</code>, <code>splice</code>, writing past the end and <code>length = n</code> work. An array keeps spare room for elements, like an ordinary JS array, so a series of <code>push</code> calls does not copy it every time. The shape of objects, on the other hand, is fixed: you cannot add a new field to a region object.</p>
 
 <!--ex:04-arrays.js-->
 
-<p>Перечисление ключей тоже работает как у обычных объектов: <code>Object.keys</code>, <code>Object.values</code>, <code>Object.entries</code>, <code>for...in</code>, <code>JSON.stringify</code> (массив региона превращается в JSON-массив), <code>Array.isArray</code>, <code>flat</code>, spread объекта <code>{ ...obj }</code> и деструктуризация. Spread даёт обычный объект, в который уже можно добавлять поля. Копия при этом поверхностная: вложенные объекты остаются в регионе.</p>
-<p>Для потока, который не владеет регионом, всё это бросает <code>OwnershipError</code>, как и обычное чтение поля (пример в разделе <a href="#move">«Переезд в воркер»</a>).</p>
+<p>Key enumeration also works as with ordinary objects: <code>Object.keys</code>, <code>Object.values</code>, <code>Object.entries</code>, <code>for...in</code>, <code>JSON.stringify</code> (a region array becomes a JSON array), <code>Array.isArray</code>, <code>flat</code>, object spread <code>{ ...obj }</code> and destructuring. Spread gives an ordinary object, to which you can add fields. The copy is shallow: nested objects stay in the region.</p>
+<p>For a thread that does not own the region, all of this throws <code>OwnershipError</code>, just like an ordinary field read (example in the <a href="#move">“Moving to a worker”</a> section).</p>
 
 <div class="callout limit">
-<span class="callout-title">Про скорость</span>
-<p>Методы из <code>Array.prototype</code> (<code>map</code>, <code>filter</code>, <code>reduce</code>, <code>includes</code>), <code>for...of</code>, <code>Array.from</code> и spread массива читают массив региона напрямую и стоят почти столько же, сколько на обычном массиве. Доступ по индексу в цикле <code>for</code> медленнее обычного примерно в 2 раза: владельца оптимизированный цикл проверяет один раз, но форма и индекс проверяются на каждом обращении. Цифры — на страницах <a href="numbers.html#methods">«Цифры»</a> и <a href="practices.html#methods">«Как делать и как не делать»</a>.</p>
+<span class="callout-title">On speed</span>
+<p>The <code>Array.prototype</code> methods (<code>map</code>, <code>filter</code>, <code>reduce</code>, <code>includes</code>), <code>for...of</code>, <code>Array.from</code> and array spread read a region array directly and cost almost the same as on an ordinary array. Indexed access in a <code>for</code> loop is about 2 times slower than usual: the optimized loop checks the owner once, but the shape and index are checked on every access. Numbers are on the <a href="numbers.html#methods">“Numbers”</a> and <a href="practices.html#methods">“Practices”</a> pages.</p>
 </div>
 
-<h2 id="not-allowed">Что нельзя положить в регион</h2>
-<p>В регион попадают только простые объекты (их прототип — <code>Object.prototype</code> или <code>null</code>), обычные массивы, типизированные массивы, примитивы, функции из <code>Region.fn</code> (<a href="#functions">ниже</a>) и ручки <code>Region.localRef</code> на объекты своего потока (<a href="#local-ref">ещё ниже</a>). Остальные функции, <code>Map</code>, <code>Set</code>, <code>Date</code>, <code>BigInt</code>, <code>Symbol</code>, сам <code>ArrayBuffer</code>, <code>DataView</code>, экземпляры классов, наследники <code>Array</code> и объекты из другого региона вызовут ошибку. Про типизированные массивы — <a href="#typed">отдельный раздел</a>.</p>
+<h2 id="not-allowed">What cannot go into a region</h2>
+<p>Only plain objects (whose prototype is <code>Object.prototype</code> or <code>null</code>), ordinary arrays, typed arrays, primitives, functions from <code>Region.fn</code> (<a href="#functions">below</a>) and <code>Region.localRef</code> handles to objects of your own thread (<a href="#local-ref">further below</a>) go into a region. Other functions, <code>Map</code>, <code>Set</code>, <code>Date</code>, <code>BigInt</code>, <code>Symbol</code>, a bare <code>ArrayBuffer</code>, <code>DataView</code>, class instances, <code>Array</code> subclasses and objects from another region cause an error. Typed arrays have <a href="#typed">their own section</a>.</p>
 
 <!--ex:05-not-allowed.js-->
 
-<p>Экземпляр класса раньше молча копировался как обычный объект и терял класс. Теперь это ошибка: у объекта в регионе нет своего прототипа, поэтому методы класса до него всё равно бы не дошли. Если нужны данные из экземпляра, переложите их в простой объект: <code>region.run(() =&gt; ({ x: point.x }))</code>.</p>
+<p>A class instance used to be silently copied as a plain object and lose its class. Now it is an error: an object in a region has no prototype of its own, so the class methods would not reach it anyway. If you need the data from an instance, move it into a plain object: <code>region.run(() =&gt; ({ x: point.x }))</code>.</p>
 
-<h2 id="functions">Функции в регионе: <code>Region.fn</code></h2>
-<p>Обычную функцию в регион не положить: её код и замыкание живут в куче одного потока. <code>Region.fn(f)</code> делает из функции такую, которую объекты региона могут хранить в полях и массивах. Регион держит только её исходный текст и место в файле, а каждый поток, который её прочитал, компилирует текст сам, один раз, и дальше получает ту же функцию: <code>a.f === b.f</code> для любых регионов, в которых она лежит. Вызывается она как обычная функция, <code>this</code> — объект, на котором её вызвали, а стек ошибки показывает строку, где её написали.</p>
-<p>Раз замыкание с функцией не переезжает, ей можно пользоваться только своими аргументами, <code>this</code>, встроенными глобальными объектами (<code>Math</code>, <code>JSON</code> и т. п.) и своим именем, чтобы вызвать себя. Захваченная переменная, <code>this</code> внешней функции у стрелки, <code>eval</code>, классы и методы объектов — <code>TypeError</code> сразу в <code>Region.fn</code>, с подсказкой, что передать аргументом. Проверку делает тот же разбор, что и у <code>spawn</code> (<a href="spawn.html#captures">захват</a>).</p>
+<h2 id="functions">Functions in a region: <code>Region.fn</code></h2>
+<p>An ordinary function cannot go into a region: its code and closure live on one thread's heap. <code>Region.fn(f)</code> turns a function into one that region objects can hold in fields and arrays. The region keeps only its source text and its location in the file, and every thread that reads it compiles the text itself, once, and gets the same function after that: <code>a.f === b.f</code> for any regions it is in. It is called like an ordinary function, <code>this</code> is the object it was called on, and an error stack shows the line where it was written.</p>
+<p>Since the closure does not move with the function, it can use only its own arguments, <code>this</code>, built-in globals (<code>Math</code>, <code>JSON</code> and so on) and its own name, to call itself. A captured variable, the outer function's <code>this</code> in an arrow function, <code>eval</code>, classes and object methods give a <code>TypeError</code> right in <code>Region.fn</code>, with a hint on what to pass as an argument. The check is done by the same analysis as in <code>spawn</code> (<a href="spawn.html#captures">captures</a>).</p>
 <!--ex:48-region-fn.js-->
-<p>Каждый регион, куда попала функция, хранит свою маленькую запись о ней, около 48 байт. Сколько бы объектов одного <code>run</code> ни ссылались на функцию, запись одна; повторная запись той же функции в поле ничего не создаёт.</p>
+<p>Every region the function gets into keeps its own small record of it, about 48 bytes. No matter how many objects of one <code>run</code> refer to the function, there is one record; writing the same function into a field again creates nothing.</p>
 
-<h2 id="local-ref">Ссылка на объект своего потока: <code>Region.localRef</code></h2>
-<p>Иногда объекту региона нужно знать про то, что в регион не положить: <code>Map</code> с кешем, обработчик, объект окна. <code>Region.localRef(obj)</code> делает для такого объекта ручку <code>LocalRef</code>, которую регион хранит как обычное значение. Сам объект остаётся в потоке, где его создали. В этом потоке <code>ref.deref()</code> возвращает его, в любом другом бросает <code>OwnershipError</code> с причиной <code>other-thread</code>. Так устроен <code>SendWrapper</code> в Rust: ручку можно отправить куда угодно, а разыменовать только дома. <code>ref.local</code> говорит, можно ли разыменовать ручку здесь.</p>
+<h2 id="local-ref">A reference to an object of your own thread: <code>Region.localRef</code></h2>
+<p>Sometimes a region object needs to know about something that cannot go into a region: a <code>Map</code> with a cache, a handler, a window object. <code>Region.localRef(obj)</code> makes a <code>LocalRef</code> handle for such an object, which the region stores as an ordinary value. The object itself stays in the thread where it was created. In that thread <code>ref.deref()</code> returns it; in any other thread it throws <code>OwnershipError</code> with the reason <code>other-thread</code>. This is how <code>SendWrapper</code> works in Rust: the handle can be sent anywhere, but dereferenced only at home. <code>ref.local</code> tells whether the handle can be dereferenced here.</p>
 <!--ex:49-local-ref.js-->
-<p>Каждый поток читает ручку из региона как свой объект <code>LocalRef</code>, и это один и тот же объект при каждом чтении: <code>a.ref === b.ref</code>, а в потоке-создателе это та самая ручка, которую вернул <code>Region.localRef</code>. Аргументы и захваченные переменные <code>spawn</code> едут в регионе, так что ручку можно передать задаче и напрямую. <code>postMessage</code> и <code>send</code> канала копируют обычные объекты, и копия ручки ни на что бы не ссылалась, поэтому голая ручка там — ошибка «a LocalRef cannot be copied to another thread»: положите её в объект региона и отправьте его.</p>
-<p>Объект живёт, пока жива ручка в каком-нибудь потоке или объект региона, который её держит. Ручки в регионах видит только сборка общей кучи, поэтому объект, на который осталась ссылка только из брошенного региона, отпускается не сразу, а после ближайшей общей сборки. Освобождённый регион (<code>free()</code>) свои ручки больше не держит. Цикл «объект потока ссылается на регион, регион — на объект через ручку» сам не соберётся, как цикл <code>Rc</code> в Rust: разорвите его, освободив регион или переписав поле.</p>
+<p>Every thread reads the handle from the region as its own <code>LocalRef</code> object, and it is the same object on every read: <code>a.ref === b.ref</code>, and in the creating thread it is the very handle that <code>Region.localRef</code> returned. The arguments and captured variables of <code>spawn</code> travel in a region, so you can also pass a handle to a task directly. <code>postMessage</code> and a channel's <code>send</code> copy ordinary objects, and a copy of a handle would refer to nothing, so a bare handle there is an error, “a LocalRef cannot be copied to another thread”: put it in a region object and send that.</p>
+<p>The object lives as long as a handle is alive in some thread or a region object holds it. Handles in regions are seen only by the shared heap GC, so an object that is referenced only from an abandoned region is released not immediately but after the next shared GC. A freed region (<code>free()</code>) no longer holds its handles. A cycle where a thread object refers to a region and the region refers back to the object through a handle is not collected on its own, like an <code>Rc</code> cycle in Rust: break it by freeing the region or overwriting the field.</p>
 
-<h2 id="typed">Типизированные массивы</h2>
-<p>В регион можно положить <code>Uint8Array</code>, <code>Float64Array</code> и остальные типизированные массивы, включая <code>BigInt64Array</code> и <code>Float16Array</code>. Они устроены иначе, чем объекты региона: регион хранит сам блок памяти, а при чтении поля вы получаете обычный локальный типизированный массив, который смотрит на эту память (view). Поэтому работа с ним идёт на полной скорости, как с любым типизированным массивом, без проверки владельца на каждом элементе.</p>
+<h2 id="typed">Typed arrays</h2>
+<p>You can put <code>Uint8Array</code>, <code>Float64Array</code> and the other typed arrays, including <code>BigInt64Array</code> and <code>Float16Array</code>, into a region. They work differently from region objects: the region stores the memory block itself, and when you read the field you get an ordinary local typed array that looks at that memory (a view). So working with it runs at full speed, like with any typed array, without an owner check on every element.</p>
 
 <!--ex:20-typed-arrays.js timing-->
 
 <ul>
-  <li><strong>По умолчанию массив копируется</strong> в регион, исходный остаётся у вас и с регионом не связан. Если массив был частью большого буфера (<code>subarray</code>), копируются только его байты.</li>
-  <li><strong>Без копии</strong> — через второй аргумент <code>run</code>: <code>region.run(fn, [buffer])</code>. Память массивов, чей <code>ArrayBuffer</code> есть в этом списке, переезжает в регион, а исходный буфер отсоединяется, как после transfer в <code>postMessage</code>: его длина становится 0.</li>
-  <li><strong>Сразу в регионе</strong> — <code>region.typedArray(Float64Array, n)</code>: массив из <code>n</code> нулей, чьи байты с самого начала принадлежат региону. Это view, как и при чтении поля; заполните его и положите в <code>#{}</code>, <code>run</code> или поле — копии не будет. Так же без копии возвращается в свой регион view, прочитанный из поля, и его <code>subarray</code>. Как любой view региона, он отсоединяется, когда регион переезжает или замораживается.</li>
-  <li><strong>Каждое чтение поля даёт новый view</strong>: <code>state.pixels === state.pixels</code> — <code>false</code>, но байты те же. Сохранить view в переменную перед циклом можно и нужно.</li>
-  <li><strong>Записать в поле</strong> новый типизированный массив можно, даже другой длины: он копируется, как в <code>run</code>.</li>
-  <li><strong>Нельзя:</strong> массивы поверх <code>SharedArrayBuffer</code> и буферов с изменяемым размером, сам <code>ArrayBuffer</code> и <code>DataView</code>.</li>
+  <li><strong>By default the array is copied</strong> into the region; the original stays yours and is not connected to the region. If the array was part of a larger buffer (<code>subarray</code>), only its bytes are copied.</li>
+  <li><strong>Without a copy</strong>: through the second argument of <code>run</code>, <code>region.run(fn, [buffer])</code>. The memory of arrays whose <code>ArrayBuffer</code> is in this list moves into the region, and the original buffer is detached, as after a transfer in <code>postMessage</code>: its length becomes 0.</li>
+  <li><strong>Directly in the region</strong>: <code>region.typedArray(Float64Array, n)</code> gives an array of <code>n</code> zeros whose bytes belong to the region from the start. It is a view, as when reading a field; fill it and put it into <code>#{}</code>, <code>run</code> or a field, and there is no copy. A view read from a field, and its <code>subarray</code>, also go back into their own region without a copy. Like any region view, it is detached when the region moves or is frozen.</li>
+  <li><strong>Every read of the field gives a new view</strong>: <code>state.pixels === state.pixels</code> is <code>false</code>, but the bytes are the same. You can and should save the view to a variable before a loop.</li>
+  <li><strong>You can write</strong> a new typed array to the field, even of a different length: it is copied, as in <code>run</code>.</li>
+  <li><strong>Not allowed:</strong> arrays over <code>SharedArrayBuffer</code> and resizable buffers, a bare <code>ArrayBuffer</code> and <code>DataView</code>.</li>
 </ul>
 
-<h3 id="typed-detach">Когда view отсоединяются</h3>
-<p>Пока регион у вас, view над его памятью работают как обычно. Когда регион уезжает в другой поток или замораживается, все view владельца отсоединяются: длина становится 0, элементы читаются как <code>undefined</code>. Так же ведёт себя <code>ArrayBuffer</code> после transfer. Ошибки <code>OwnershipError</code> здесь нет, потому что проверки владельца на каждом элементе нет. После возврата региона старые view так и остаются пустыми: прочитайте поле заново и получите новый.</p>
-<p>Читатели замороженного региона получают view только для чтения. Запись в него вне strict mode молча не проходит, в strict mode и у методов вроде <code>fill</code> и <code>set</code> бросает <code>TypeError</code>.</p>
-<p id="typed-borrow">View замороженного региона получают те же потоки, что могут читать его поля: тот, кто его заморозил, и тот, кто держит билет <code>borrow()</code>. Но у view есть своё правило. Обычное поле проверяется при каждом чтении, а view читает память напрямую. Если бы view жил дольше права читать, поток видел бы регион и после разморозки, когда в него уже пишет новый владелец. Поэтому, когда поток сдаёт последний билет, его view отсоединяются. View того, кто заморозил, отсоединяются при <code>thaw()</code> или когда он передаёт право разморозки. Внутри <code>spawn</code> билет на замороженные регионы задача берёт сама, на всё время работы (<a href="spawn.html#frozen">подробнее</a>).</p>
+<h3 id="typed-detach">When views are detached</h3>
+<p>While the region is yours, views over its memory work as usual. When the region leaves for another thread or is frozen, all of the owner's views are detached: the length becomes 0, elements read as <code>undefined</code>. An <code>ArrayBuffer</code> behaves the same way after a transfer. There is no <code>OwnershipError</code> here, because there is no owner check on every element. After the region comes back, the old views stay empty: read the field again to get a new one.</p>
+<p>Readers of a frozen region get read-only views. Writing to one outside strict mode silently fails; in strict mode, and in methods like <code>fill</code> and <code>set</code>, it throws <code>TypeError</code>.</p>
+<p id="typed-borrow">Views of a frozen region are available to the same threads that can read its fields: the one that froze it and the ones that hold a <code>borrow()</code>. But views have a rule of their own. An ordinary field is checked on every read, while a view reads memory directly. If a view outlived the right to read, the thread would see the region even after it is thawed, when a new owner is already writing to it. So when a thread releases its last borrow, its views are detached. The views of the thread that froze the region are detached on <code>thaw()</code> or when it hands over the right to thaw. Inside <code>spawn</code> a task takes the borrow on frozen regions itself, for the whole time it runs (<a href="spawn.html#frozen">details</a>).</p>
 
 <!--ex:21-typed-views.js-->
 
-<p>Отсюда правило: не держите view дольше, чем нужно. Прочитали поле, поработали, отпустили. После <code>await</code> задачи, переезда или <code>freeze</code> читайте поле заново. Почему для больших массивов чисел это ещё и быстрее, показано в <a href="practices.html#typed">практике 9</a>.</p>
+<p>Hence the rule: do not hold a view longer than needed. Read the field, do the work, let it go. After an <code>await</code> on a task, a move or a <code>freeze</code>, read the field again. Why this is also faster for large number arrays is shown in <a href="practices.html#typed">practice 9</a>.</p>
 
-<h2 id="share">Общие данные: <code>Region.share</code></h2>
-<p>Если данные общие на всё время работы (конфиг, справочник, таблица весов) и никто не будет их менять, это <code>Region.share</code>. <code>region.seal()</code> замораживает регион навсегда: разморозить, освободить и перенести его нельзя, поэтому читают его все потоки без билетов, как <code>Arc&lt;T&gt;</code> в Rust. <code>Region.share(data)</code> делает всё сразу: копирует данные в новый регион, запечатывает его и возвращает копию. Вторым аргументом, как у <code>run</code>, можно передать список буферов типизированных массивов, которые переедут без копии.</p>
+<h2 id="share">Shared data: <code>Region.share</code></h2>
+<p>If the data is shared for the whole run (a config, a lookup table, a table of weights) and nobody will change it, use <code>Region.share</code>. <code>region.seal()</code> freezes a region forever: it cannot be thawed, freed or moved, so all threads read it without borrows, like <code>Arc&lt;T&gt;</code> in Rust. <code>Region.share(data)</code> does it all at once: it copies the data into a new region, seals it and returns the copy. As the second argument, as with <code>run</code>, you can pass a list of typed array buffers that move without a copy.</p>
 
 <!--ex:41-seal.js-->
 
-<p>Запечатать может владелец или тот, кто регион заморозил, в том числе пока регион читают под билетами: выданные билеты сдаются как обычно, но право разморозить пропадает. Повторный <code>seal()</code> ничего не делает. View типизированных массивов запечатанного региона доступны только для чтения и не отсоединяются никогда, ведь регион больше не изменится. View владельца, как при <code>freeze()</code>, отсоединяются в момент запечатки.</p>
-<p>Память запечатанного региона освобождает сборщик мусора, когда на его объекты не осталось ссылок ни в одном потоке. <code>free()</code> и <code>using</code> его не освобождают. Отправляют запечатанный регион без списка transfer, задачам <code>spawn</code> и в каналы он передаётся так же, как замороженный: по ссылке.</p>
+<p>A region can be sealed by its owner or by the thread that froze it, including while the region is read under borrows: the borrows already given out are released as usual, but the right to thaw is gone. A repeated <code>seal()</code> does nothing. Typed array views of a sealed region are read-only and are never detached, since the region will not change again. The owner's views, as with <code>freeze()</code>, are detached at the moment of sealing.</p>
+<p>The memory of a sealed region is freed by the garbage collector when no thread has references to its objects. <code>free()</code> and <code>using</code> do not free it. A sealed region is sent without a transfer list; it is passed to <code>spawn</code> tasks and into channels the same way as a frozen one: by reference.</p>
 <div class="callout aside">
-<span class="callout-title">Как это устроено</span>
-<p>Проверка чтения в машинном коде не изменилась: регион заморожен, и у потока в таблице чтения стоит его бит. У запечатанного региона бит ставится при первом чтении в потоке, в медленном пути, и больше не снимается: разморозки, после которой его пришлось бы снять, не будет. Когда сборщик освобождает номер региона, бит снимается во всех таблицах, так что новый регион с тем же номером снова потребует билет.</p>
+<span class="callout-title">How it works</span>
+<p>The read check in machine code did not change: the region is frozen, and the thread has its bit set in the read table. For a sealed region the bit is set on the first read in the thread, on the slow path, and is never cleared: there will be no thaw that would require clearing it. When the collector frees the region number, the bit is cleared in all tables, so a new region with the same number requires a borrow again.</p>
 </div>
 
-<h2 id="freeze">Заморозка и рассылка</h2>
-<p>Запечатанный регион уже не изменить. Если данные нужно раздать на чтение, а потом снова писать в них, регион замораживают на время. <code>region.freeze()</code> делает регион доступным только для чтения, причём всем потокам, но читают его под билетом <code>borrow()</code> (<a href="#borrow">билеты</a>). Замороженный регион отправляют без списка transfer: каждый получатель видит те же объекты. Без билета чтение у получателя бросает <code>OwnershipError</code>, это видно в выводе воркера 0. <code>region.frozen</code> показывает, заморожен ли регион. <code>region.thaw()</code> возвращает владельцу право писать.</p>
+<h2 id="freeze">Freezing and broadcasting</h2>
+<p>A sealed region can no longer change. If the data needs to be handed out for reading and then written again, the region is frozen for a while. <code>region.freeze()</code> makes the region read-only, and readable by all threads, but they read it under a <code>borrow()</code> (<a href="#borrow">borrows</a>). A frozen region is sent without a transfer list: every receiver sees the same objects. Without a borrow, reading on the receiver throws <code>OwnershipError</code>, as the output of worker 0 shows. <code>region.frozen</code> tells whether the region is frozen. <code>region.thaw()</code> gives the owner back the right to write.</p>
 
 <!--ex:08-freeze-broadcast.js-->
 
-<h3 id="thaw-right">Кто может разморозить</h3>
-<p>Разморозить регион может только тот поток, который его заморозил. Остальные получат ошибку «Region is not frozen by this isolate», даже если читают регион. Есть ли это право у текущего потока, показывает <code>region.frozenHere</code>.</p>
-<p>Право можно передать. Если положить замороженный регион в список transfer, данные никуда не едут (они и так общие), а получатель получает право разморозить. Отправитель его теряет и дальше читает регион, как все остальные, под билетом.</p>
+<h3 id="thaw-right">Who can thaw</h3>
+<p>Only the thread that froze a region can thaw it. Others get the error “Region is not frozen by this isolate”, even if they read the region. <code>region.frozenHere</code> shows whether the current thread has this right.</p>
+<p>The right can be handed over. If you put a frozen region in the transfer list, the data goes nowhere (it is shared already), and the receiver gets the right to thaw. The sender loses it and from then on reads the region like everyone else, under a borrow.</p>
 
 <!--ex:22-freeze-handover.js-->
 
-<p>Отдать право может только тот, у кого оно есть: если другой поток положит регион в transfer list, будет ошибка «Region was frozen by another isolate». Задача <code>spawn</code>, которая заморозила регион, возвращает право вызывающему вместе с результатом (<a href="spawn.html#frozen">пример на странице про spawn</a>).</p>
+<p>Only the thread that has the right can hand it over: if another thread puts the region in a transfer list, the error is “Region was frozen by another isolate”. A <code>spawn</code> task that froze a region returns the right to the caller together with the result (<a href="spawn.html#frozen">example on the spawn page</a>).</p>
 
-<h2 id="borrow">Билеты читателя: <code>borrow</code></h2>
-<p><code>region.borrow()</code> выдаёт билет и увеличивает счётчик <code>region.readers</code>. Пока есть хотя бы один билет, <code>thaw()</code> не сработает. <code>ticket.release()</code> сдаёт билет. Если объявить билет через <code>using</code>, он сдастся сам при выходе из блока, даже если внутри случилось исключение.</p>
+<h2 id="borrow">Reader's borrows: <code>borrow</code></h2>
+<p><code>region.borrow()</code> issues a borrow and increments the <code>region.readers</code> counter. While there is at least one borrow, <code>thaw()</code> fails. <code>ticket.release()</code> releases the borrow. If you declare the borrow with <code>using</code>, it is released automatically when the block exits, even if an exception was thrown inside.</p>
 
 <!--ex:09-borrow.js-->
 
-<p>Брать билет можно в любом потоке, в том числе в воркере: <code>Region.of(obj).borrow()</code>. Без билета замороженный регион читают только тот поток, который его заморозил (или получил право разморозить), и задачи <code>spawn</code>, которые захватили регион или получили его аргументом: им билет выдаётся сам, на всё время задачи (<a href="spawn.html#frozen">подробнее</a>). Остальные получают <code>OwnershipError: region N is frozen; borrow it to read it</code>, и на обычных полях, и на типизированных массивах. Это касается и объекта, который пришёл через <code>postMessage</code> или канал.</p>
-<p>Зато пока билет у вас, <code>thaw()</code> не пройдёт: он бросит «Region is still borrowed by N reader(s)». Поэтому читатель никогда не увидит разморозку посреди чтения и не прочитает устаревшее значение.</p>
-<p>Ждать, пока билеты сдадут, не надо циклом с повторами: <code>await region.thawWhenFree()</code> разморозит регион, как только последний читатель сдаст билет, и выполнится. Если читателей нет, регион размораживается сразу. Если билет держит тот же поток и сдать его некому, промис отказывает с <code>DeadlockError</code>, а в отменённой задаче — с её <code>AbortError</code>. Когда ждут несколько <code>thawWhenFree()</code> одного региона, размораживает первый, остальные отказывают, как <code>thaw()</code> уже размороженного региона.</p>
-<p><code>region.borrowWhile(fn)</code> берёт билет, вызывает <code>fn</code> и сдаёт билет, когда <code>fn</code> закончилась. Если <code>fn</code> вернула промис, билет сдаётся, когда промис выполнится или отклонится. <code>borrowWhile</code> возвращает то, что вернула <code>fn</code> (для асинхронной функции — промис с её результатом). Внутри задач <code>spawn</code> для асинхронной работы нужен именно он, потому что обычный билет живёт не дольше задачи (<a href="spawn.html#borrow">подробнее на странице про spawn</a>).</p>
+<p>A borrow can be taken in any thread, including a worker: <code>Region.of(obj).borrow()</code>. Without a borrow, a frozen region can be read only by the thread that froze it (or received the right to thaw), and by <code>spawn</code> tasks that captured the region or received it as an argument: they get a borrow automatically, for the whole task (<a href="spawn.html#frozen">details</a>). Everyone else gets <code>OwnershipError: region N is frozen; borrow it to read it</code>, on ordinary fields and on typed arrays alike. This also applies to an object that arrived through <code>postMessage</code> or a channel.</p>
+<p>In return, while you hold a borrow, <code>thaw()</code> does not go through: it throws “Region is still borrowed by N reader(s)”. So a reader never sees a thaw in the middle of a read and never reads a stale value.</p>
+<p>You do not need a retry loop to wait for the borrows to be released: <code>await region.thawWhenFree()</code> thaws the region as soon as the last reader releases its borrow, and resolves. If there are no readers, the region is thawed immediately. If the borrow is held by the same thread and nobody can release it, the promise rejects with <code>DeadlockError</code>, and in a cancelled task with that task's <code>AbortError</code>. When several <code>thawWhenFree()</code> calls wait on one region, the first one thaws it, and the rest reject, like <code>thaw()</code> on a region that is already thawed.</p>
+<p><code>region.borrowWhile(fn)</code> takes a borrow, calls <code>fn</code> and releases the borrow when <code>fn</code> has finished. If <code>fn</code> returned a promise, the borrow is released when the promise resolves or rejects. <code>borrowWhile</code> returns what <code>fn</code> returned (for an async function, a promise of its result). Inside <code>spawn</code> tasks this is the one to use for async work, because an ordinary borrow lives no longer than the task (<a href="spawn.html#borrow">details on the spawn page</a>).</p>
 
-<h2 id="free">Освободить регион: <code>free</code></h2>
-<p>Обычно память регионов, как и любых объектов JS, освобождает сборщик мусора: когда на объекты не осталось ссылок, они исчезают. Но иногда ссылки остаются там, где их не ждёшь: в кэше, в замыкании, в забытой переменной. Тогда большие данные висят в памяти, пока на них кто-то смотрит.</p>
-<p><code>region.free()</code> отдаёт регион сразу, не дожидаясь, пока пропадут ссылки. После этого любое обращение к его объектам бросает <code>OwnershipError: region N was freed</code>, из любого потока и из любого кода, в том числе из уже скомпилированного. Память типизированных массивов освобождается в момент вызова, а view владельца отсоединяются. Сами объекты опустошаются при ближайшей сборке общей кучи: всё, что они держали, уходит, даже если на них ещё есть ссылки. В C такая операция оставила бы висячий указатель, а здесь она безопасна: доступ к региону и так проверяется при каждом обращении, а освобождённый регион — просто ещё одно его состояние.</p>
-<p>Освободить можно только свой регион. Замороженный регион освобождает тот, кто его заморозил, и только когда не осталось билетов, как при <code>thaw()</code>. Регион в пути или чужой освободить нельзя. Объявленный через <code>using</code>, регион освобождается в конце блока. Если к этому времени он уехал в другой поток, <code>using</code> ничего не делает: уехавшее значение не освобождают, как в Rust.</p>
+<h2 id="free">Free a region: <code>free</code></h2>
+<p>Usually the memory of regions, like that of any JS objects, is freed by the garbage collector: when no references to the objects remain, they disappear. But sometimes references remain where you do not expect them: in a cache, in a closure, in a forgotten variable. Then large data hangs in memory as long as something looks at it.</p>
+<p><code>region.free()</code> releases the region immediately, without waiting for the references to go away. After that any access to its objects throws <code>OwnershipError: region N was freed</code>, from any thread and from any code, including code that is already compiled. The memory of typed arrays is freed at the moment of the call, and the owner's views are detached. The objects themselves are emptied at the next shared heap GC: everything they held goes away, even if there are still references to them. In C such an operation would leave a dangling pointer, but here it is safe: access to a region is checked on every access anyway, and a freed region is just one more of its states.</p>
+<p>You can free only your own region. A frozen region is freed by the thread that froze it, and only when no borrows remain, as with <code>thaw()</code>. A region in transit or someone else's region cannot be freed. Declared with <code>using</code>, a region is freed at the end of the block. If by then it has moved to another thread, <code>using</code> does nothing: a moved-out value is not freed, as in Rust.</p>
 
 <!--ex:34-free.js-->
 
-<p><code>region.byteSize</code> показывает, сколько байт региону досталось при копировании: объекты, их массивы, строки и память типизированных массивов. Это приблизительная цифра: литералы <code>#{}</code> и <code>#[]</code> и рост массивов в неё входят, а строки, записанные в поля позже, нет. <code>Region.stats()</code> показывает, сколько регионов живо, сколько освобождено, но ещё не собрано, и сколько байт держат живые.</p>
+<p><code>region.byteSize</code> shows how many bytes the region got when copying: objects, their arrays, strings and typed array memory. It is an approximate figure: the <code>#{}</code> and <code>#[]</code> literals and array growth are included, but strings written to fields later are not. <code>Region.stats()</code> shows how many regions are alive, how many are freed but not yet collected, and how many bytes the live ones hold.</p>
 
-<h2 id="move">Переезд в воркер</h2>
-<p><a href="spawn.html"><code>spawn</code></a> и <a href="channels.html">каналы</a> перемещают регионы сами. Если нужен свой воркер, регион передают ему напрямую, через <code>postMessage</code> со списком transfer: отправьте объекты региона через <code>postMessage</code> и укажите сам регион в списке transfer. Воркер получит те же объекты, а не копию, и станет их владельцем. Главный поток доступ потеряет.</p>
+<h2 id="move">Moving to a worker</h2>
+<p><a href="spawn.html"><code>spawn</code></a> and <a href="channels.html">channels</a> move regions for you. If you need your own worker, you pass the region to it directly, with <code>postMessage</code> and a transfer list: send the region's objects with <code>postMessage</code> and put the region itself in the transfer list. The worker gets the same objects, not a copy, and becomes their owner. The main thread loses access.</p>
 
 <!--ex:06-move.js-->
 
-<p>Переезд не зависит от размера данных: движок меняет владельца региона, а объекты остаются на месте. Копия через <code>postMessage</code> обходит каждый объект. Вот одно и то же дерево из 131 071 узла, отправленное обоими способами:</p>
+<p>A move does not depend on the size of the data: the engine changes the region's owner, and the objects stay where they are. A copy through <code>postMessage</code> walks every object. Here is the same tree of 131,071 nodes sent both ways:</p>
 
 <!--ex:02-before-after.js timing-->
 
-<p>Видно два разных текста ошибки. Сразу после отправки регион ещё в пути: «was sent to another thread and has not been received yet». Когда воркер получил сообщение, владелец уже он: «belongs to another thread». Обе ошибки заканчиваются местом отправки. <code>Object.keys</code>, <code>JSON.stringify</code> и прочее перечисление ключей проверяют владельца так же, как чтение поля.</p>
-<p>Сам объект <code>region</code> в данные сообщения класть не нужно, достаточно объектов из него. Объекты региона всегда передаются по ссылке. Если отправить их без списка transfer, воркер получит ссылку, но прочитать по ней ничего не сможет, пока регион к нему не переедет: владелец остаётся прежним.</p>
-<p>В списке transfer можно указать и сам объект региона, он означает свой регион: <code>worker.postMessage(order, [order])</code> работает так же, как <code>[region]</code> или <code>[Region.of(order)]</code>.</p>
-<p><code>postMessage</code> со списком transfer — самый низкий уровень. <code>spawn</code> делает то же самое без списка transfer и мимо <code>postMessage</code>, через свою очередь, поэтому обходится дешевле.</p>
+<p>There are two different error texts. Right after sending, the region is still in transit: “was sent to another thread and has not been received yet”. Once the worker has received the message, it is the owner: “belongs to another thread”. Both errors end with the place where the region was sent. <code>Object.keys</code>, <code>JSON.stringify</code> and other key enumeration check the owner the same way as a field read.</p>
+<p>You do not need to put the <code>region</code> object itself into the message data; its objects are enough. Region objects are always passed by reference. If you send them without a transfer list, the worker gets a reference but cannot read anything through it until the region moves to it: the owner stays the same.</p>
+<p>The transfer list can also hold a region object itself; it stands for its region: <code>worker.postMessage(order, [order])</code> works the same as <code>[region]</code> or <code>[Region.of(order)]</code>.</p>
+<p><code>postMessage</code> with a transfer list is the lowest level. <code>spawn</code> does the same without a transfer list and bypasses <code>postMessage</code>, using its own queue, so it is cheaper.</p>
 
-<h2 id="of">Вернуть регион обратно: <code>Region.of</code></h2>
-<p>В воркере нет переменной <code>region</code>, есть только полученные объекты. <code>Region.of(obj)</code> находит регион по любому его объекту. С ним воркер может вернуть данные тем же способом. Для списка transfer хватит и самого объекта (<a href="#move">переезд</a>), а <code>Region.of</code> нужен, чтобы вызвать методы региона: <code>borrow()</code>, <code>freeze()</code>, <code>free()</code>. Проверить, лежит ли значение в регионе, не ловя ошибку, можно через <code>Region.isRegionObject(value)</code>. У региона в одном потоке одна ручка: <code>Region.of(a) === Region.of(b)</code>, если <code>a</code> и <code>b</code> из одного региона, и <code>Region.of(obj) === region</code> для того <code>region</code>, в котором объект создан.</p>
+<h2 id="of">Getting a region back: <code>Region.of</code></h2>
+<p>A worker has no <code>region</code> variable, only the objects it received. <code>Region.of(obj)</code> finds the region from any of its objects. With it the worker can send the data back the same way. For the transfer list the object itself is enough (<a href="#move">moving</a>), and <code>Region.of</code> is needed to call region methods: <code>borrow()</code>, <code>freeze()</code>, <code>free()</code>. To check whether a value is in a region without catching an error, use <code>Region.isRegionObject(value)</code>. A region has one handle per thread: <code>Region.of(a) === Region.of(b)</code> if <code>a</code> and <code>b</code> are from the same region, and <code>Region.of(obj) === region</code> for the <code>region</code> the object was created in.</p>
 
 <!--ex:07-ping-pong.js timing-->
 
-<p>Тысяча кругов «туда и обратно», и в конце в руках тот же самый объект: <code>current === state</code>. Один круг — два переезда и две пересылки сообщения — занимает около 10–11 микросекунд, от запуска к запуску по-разному.</p>
+<p>A thousand round trips, and at the end you hold the very same object: <code>current === state</code>. One round trip, two moves and two message sends, takes about 10–11 microseconds, varying from run to run.</p>
 
-<h2 id="reference">Всё API на одной странице</h2>
+<h2 id="reference">The whole API on one page</h2>
 <div class="table-wrap">
 <table>
-<thead><tr><th>Что</th><th>Что делает</th></tr></thead>
+<thead><tr><th>What</th><th>What it does</th></tr></thead>
 <tbody>
-<tr><td><code>new Region()</code></td><td>Пустой регион, владелец — текущий поток.</td></tr>
-<tr><td><code>region.run(fn)</code></td><td>Вызывает <code>fn</code>, копирует результат в регион и возвращает копию.</td></tr>
-<tr><td><code>region.run(fn, [buffer])</code></td><td>То же, но память типизированных массивов с этими <code>ArrayBuffer</code> переезжает без копии, а исходные буферы отсоединяются.</td></tr>
-<tr><td><code>region.id</code>, <code>region.owner</code></td><td>Номер региона и номер потока-владельца.</td></tr>
-<tr><td><code>Region.of(obj)</code></td><td>Регион, в котором лежит <code>obj</code>. Для обычного объекта — ошибка.</td></tr>
-<tr><td><code>Region.fn(f)</code></td><td>Функция, которую можно хранить в регионе. Каждый поток компилирует её сам и получает одну и ту же функцию. Замыкания у неё нет.</td></tr>
-<tr><td><code>Region.localRef(obj)</code></td><td>Ручка <code>LocalRef</code> на объект своего потока, которую можно хранить в регионе. <code>ref.deref()</code> возвращает объект в этом потоке и бросает в других, <code>ref.local</code> говорит, этот ли поток.</td></tr>
-<tr><td><code>Region.isRegionObject(value)</code></td><td>Лежит ли значение в каком-нибудь регионе. Ошибок не бросает.</td></tr>
-<tr><td><code>worker.postMessage(msg, [region])</code></td><td>Переезд: получатель становится владельцем, отправитель теряет доступ. Вместо <code>region</code> можно указать любой его объект.</td></tr>
-<tr><td><code>worker.postMessage(msg)</code></td><td>Для объектов замороженного региона — рассылка без копии.</td></tr>
-<tr><td><code>worker.postMessage(msg, [frozenRegion])</code></td><td>Для замороженного региона — передать право разморозить.</td></tr>
-<tr><td><code>region.freeze()</code>, <code>region.thaw()</code></td><td>Заморозить (читают все под билетом, не пишет никто) и разморозить (только тот, кто заморозил или получил право, и только без читателей).</td></tr>
-<tr><td><code>region.thawWhenFree()</code></td><td>Промис: разморозить, когда сданы все билеты.</td></tr>
-<tr><td><code>region.frozen</code>, <code>region.readers</code></td><td>Заморожен ли регион и сколько билетов сейчас выдано.</td></tr>
-<tr><td><code>region.frozenHere</code></td><td>Есть ли у текущего потока право разморозить регион.</td></tr>
-<tr><td><code>region.borrow()</code></td><td>Билет читателя: без него замороженный регион читает только тот, кто его заморозил, и задачи <code>spawn</code>, которым он достался. У билета есть <code>release()</code>, и его можно объявить через <code>using</code>.</td></tr>
-<tr><td><code>region.seal()</code>, <code>region.sealed</code></td><td>Заморозить навсегда: читают все потоки без билетов, разморозить, освободить и перенести нельзя, память освобождает сборщик. Запечатан ли регион.</td></tr>
-<tr><td><code>Region.share(data)</code></td><td>Скопировать данные в новый запечатанный регион и вернуть копию, как <code>Arc::new</code>.</td></tr>
-<tr><td><code>region.borrowWhile(fn)</code></td><td>Держит билет, пока выполняется <code>fn</code> или пока не выполнится её промис. Возвращает результат <code>fn</code>.</td></tr>
-<tr><td><code>using _ = region.enter()</code></td><td>Сделать регион текущим до конца блока.</td></tr>
-<tr><td><code>#{ key: value }</code>, <code>#[a, b]</code></td><td>Объект или массив сразу в текущем регионе, без копии.</td></tr>
-<tr><td><code>'use region'</code></td><td>Директива в начале функции или файла: каждый <code>{}</code> и <code>[]</code> в этом коде и во вложенных функциях — <code>#{}</code> и <code>#[]</code>.</td></tr>
-<tr><td><code>region.free()</code>, <code>using region = new Region()</code></td><td>Освободить регион: обращения к нему запрещены навсегда, память типизированных массивов отдаётся сразу, объекты опустошаются при сборке.</td></tr>
-<tr><td><code>region.freed</code>, <code>region.byteSize</code>, <code>Region.stats()</code></td><td>Освобождён ли регион, сколько байт в него скопировано, и сводка по всем регионам процесса.</td></tr>
-<tr><td><code>spawn(fn, ...args)</code></td><td>Запустить функцию в отдельном потоке. См. <a href="spawn.html">следующую страницу</a>.</td></tr>
-<tr><td><code>spawn.scope(async (s) =&gt; ...)</code></td><td>Блок задач <code>s.spawn(...)</code>: ждёт их все, первая ошибка отменяет остальные. См. <a href="spawn.html#scope">spawn.scope</a>.</td></tr>
-<tr><td><code>spawn.shield(fn, { timeout })</code></td><td>Уборка, которую отмена задачи не прерывает: её <code>await</code> не бросают. <code>timeout</code> в миллисекундах — дедлайн, после него <code>shield</code> отменяется с <code>TimeoutError</code>. См. <a href="spawn.html#abort">отмену</a>.</td></tr>
-<tr><td><code>spawn.poolSize</code></td><td>Сколько воркеров в пуле <code>spawn</code>, по умолчанию 4.</td></tr>
-<tr><td><code>spawn.idle()</code></td><td>Промис, который выполнится, когда закончатся все задачи, запущенные этим потоком.</td></tr>
-<tr><td><code>new Channel(capacity)</code></td><td>Канал между потоками: <code>send</code>, <code>recv</code>, <code>close</code>, <code>Channel.select</code> и блокирующие версии. См. <a href="channels.html">страницу про каналы</a>.</td></tr>
+<tr><td><code>new Region()</code></td><td>An empty region owned by the current thread.</td></tr>
+<tr><td><code>region.run(fn)</code></td><td>Calls <code>fn</code>, copies the result into the region and returns the copy.</td></tr>
+<tr><td><code>region.run(fn, [buffer])</code></td><td>The same, but the memory of typed arrays with these <code>ArrayBuffer</code>s moves without a copy, and the original buffers are detached.</td></tr>
+<tr><td><code>region.id</code>, <code>region.owner</code></td><td>The region number and the number of the owner thread.</td></tr>
+<tr><td><code>Region.of(obj)</code></td><td>The region <code>obj</code> is in. For an ordinary object, an error.</td></tr>
+<tr><td><code>Region.fn(f)</code></td><td>A function that can be stored in a region. Every thread compiles it itself and gets the same function. It has no closure.</td></tr>
+<tr><td><code>Region.localRef(obj)</code></td><td>A <code>LocalRef</code> handle to an object of your own thread that can be stored in a region. <code>ref.deref()</code> returns the object in that thread and throws in others; <code>ref.local</code> tells whether this is that thread.</td></tr>
+<tr><td><code>Region.isRegionObject(value)</code></td><td>Whether the value is in some region. Throws no errors.</td></tr>
+<tr><td><code>worker.postMessage(msg, [region])</code></td><td>Move: the receiver becomes the owner, the sender loses access. Instead of <code>region</code> you can pass any of its objects.</td></tr>
+<tr><td><code>worker.postMessage(msg)</code></td><td>For objects of a frozen region, broadcasting without a copy.</td></tr>
+<tr><td><code>worker.postMessage(msg, [frozenRegion])</code></td><td>For a frozen region, hand over the right to thaw.</td></tr>
+<tr><td><code>region.freeze()</code>, <code>region.thaw()</code></td><td>Freeze (everyone reads under a borrow, nobody writes) and thaw (only the thread that froze it or received the right, and only with no readers).</td></tr>
+<tr><td><code>region.thawWhenFree()</code></td><td>A promise: thaw once all borrows are released.</td></tr>
+<tr><td><code>region.frozen</code>, <code>region.readers</code></td><td>Whether the region is frozen and how many borrows are currently out.</td></tr>
+<tr><td><code>region.frozenHere</code></td><td>Whether the current thread has the right to thaw the region.</td></tr>
+<tr><td><code>region.borrow()</code></td><td>A reader's borrow: without it a frozen region is read only by the thread that froze it and by the <code>spawn</code> tasks that got it. A borrow has <code>release()</code> and can be declared with <code>using</code>.</td></tr>
+<tr><td><code>region.seal()</code>, <code>region.sealed</code></td><td>Freeze forever: all threads read without borrows; it cannot be thawed, freed or moved, and the collector frees the memory. Whether the region is sealed.</td></tr>
+<tr><td><code>Region.share(data)</code></td><td>Copy the data into a new sealed region and return the copy, like <code>Arc::new</code>.</td></tr>
+<tr><td><code>region.borrowWhile(fn)</code></td><td>Holds a borrow while <code>fn</code> runs or until its promise settles. Returns the result of <code>fn</code>.</td></tr>
+<tr><td><code>using _ = region.enter()</code></td><td>Make the region current until the end of the block.</td></tr>
+<tr><td><code>#{ key: value }</code>, <code>#[a, b]</code></td><td>An object or array directly in the current region, without a copy.</td></tr>
+<tr><td><code>'use region'</code></td><td>A directive at the start of a function or file: every <code>{}</code> and <code>[]</code> in that code and in nested functions is <code>#{}</code> and <code>#[]</code>.</td></tr>
+<tr><td><code>region.free()</code>, <code>using region = new Region()</code></td><td>Free the region: access to it is forbidden forever, typed array memory is released immediately, objects are emptied at GC.</td></tr>
+<tr><td><code>region.freed</code>, <code>region.byteSize</code>, <code>Region.stats()</code></td><td>Whether the region is freed, how many bytes were copied into it, and a summary of all regions in the process.</td></tr>
+<tr><td><code>spawn(fn, ...args)</code></td><td>Run a function on a separate thread. See the <a href="spawn.html">next page</a>.</td></tr>
+<tr><td><code>spawn.scope(async (s) =&gt; ...)</code></td><td>A block of <code>s.spawn(...)</code> tasks: waits for all of them; the first error cancels the rest. See <a href="spawn.html#scope">spawn.scope</a>.</td></tr>
+<tr><td><code>spawn.shield(fn, { timeout })</code></td><td>Cleanup that task cancellation does not interrupt: its <code>await</code>s do not throw. <code>timeout</code> in milliseconds is a deadline after which <code>shield</code> is cancelled with <code>TimeoutError</code>. See <a href="spawn.html#abort">cancellation</a>.</td></tr>
+<tr><td><code>spawn.poolSize</code></td><td>How many workers are in the <code>spawn</code> pool, 4 by default.</td></tr>
+<tr><td><code>spawn.idle()</code></td><td>A promise that resolves when all tasks started by this thread have finished.</td></tr>
+<tr><td><code>new Channel(capacity)</code></td><td>A channel between threads: <code>send</code>, <code>recv</code>, <code>close</code>, <code>Channel.select</code> and blocking versions. See the <a href="channels.html">channels page</a>.</td></tr>
 </tbody>
 </table>
 </div>
 
-<h3 id="errors">Ошибки</h3>
-<p>Нарушения владения бросают <code>OwnershipError</code>. Это наследник <code>TypeError</code>, так что код, который ловил <code>TypeError</code>, работает как раньше. У ошибки два поля: <code>region</code> — номер региона и <code>reason</code> — причина одним словом, по которой удобно ветвиться вместо разбора текста.</p>
-<p>В конце текста ошибка говорит, где с регионом случилось то, из-за чего она возникла: где его отправили, разморозили, заморозили, запечатали, освободили или положили в <code>RwLock</code>. Например, <code>(sent at main.js:12:5)</code>. Код задачи <code>spawn</code> сохраняет строки своего файла, поэтому и отправка из задачи показывает место в файле. Если файла у кода нет, например у воркера из строки, будет номер потока: <code>(sent by isolate 2)</code>. Запись места стоит около 60 нс на событие, флаг d8 <code>--no-region-history</code> её выключает.</p>
+<h3 id="errors">Errors</h3>
+<p>Ownership violations throw <code>OwnershipError</code>. It is a subclass of <code>TypeError</code>, so code that caught <code>TypeError</code> works as before. The error has two fields: <code>region</code>, the region number, and <code>reason</code>, the cause in one word, convenient to branch on instead of parsing the text.</p>
+<p>At the end of its text, the error says where the thing that caused it happened to the region: where it was sent, thawed, frozen, sealed, freed or put into an <code>RwLock</code>. For example, <code>(sent at main.js:12:5)</code>. Code in a <code>spawn</code> task keeps the lines of its file, so a send from a task also shows the place in the file. If the code has no file, for example a worker created from a string, you get the thread number: <code>(sent by isolate 2)</code>. Recording the place costs about 60 ns per event; the d8 flag <code>--no-region-history</code> turns it off.</p>
 <!--ex:44-errors.js-->
 <div class="table-wrap">
 <table>
-<thead><tr><th>Текст</th><th><code>reason</code></th><th>Когда бывает</th></tr></thead>
+<thead><tr><th>Text</th><th><code>reason</code></th><th>When it happens</th></tr></thead>
 <tbody>
-<tr><td><code>region N belongs to another thread (isolate X, this is isolate Y)</code></td><td><code>not-owner</code></td><td>Обращение к региону, которым владеет другой поток.</td></tr>
-<tr><td><code>region N was sent to another thread and has not been received yet</code></td><td><code>in-transit</code></td><td>Регион отправлен, но ещё не получен: лежит в канале, в очереди задач или в сообщении.</td></tr>
-<tr><td><code>region N was freed</code></td><td><code>freed</code></td><td>Обращение к освобождённому региону. <code>Region was already freed</code> — повторный <code>free()</code>.</td></tr>
-<tr><td><code>region N is frozen; thaw it before writing</code></td><td><code>frozen</code></td><td>Запись в замороженный регион, в том числе владельцем. <code>Region is already frozen</code> — повторный <code>freeze()</code>.</td></tr>
-<tr><td><code>region N is frozen; borrow it to read it</code></td><td><code>not-borrowed</code></td><td>Чтение замороженного региона без билета потоком, который его не замораживал: поля, типизированные массивы, <code>Object.keys</code> и прочее.</td></tr>
-<tr><td><code>region N is sealed and cannot change</code></td><td><code>sealed</code></td><td>Запись в запечатанный регион.</td></tr>
-<tr><td><code>Region is sealed and cannot be thawed</code>, <code>Region is sealed; the GC frees it once nothing refers to it</code></td><td><code>sealed</code></td><td><code>thaw()</code> и <code>free()</code> запечатанного региона.</td></tr>
-<tr><td><code>Region is sealed: its objects are shared, send them without a transfer list</code></td><td><code>sealed</code></td><td>Запечатанный регион в списке transfer.</td></tr>
-<tr><td><code>region N is in an RwLock; use it through lock.read() or lock.write()</code></td><td><code>locked</code></td><td>Обращение к региону, который лежит в <code>RwLock</code>, мимо guard. Своими текстами <code>free()</code>, <code>freeze()</code>, список transfer и второй <code>RwLock</code> на тот же регион.</td></tr>
-<tr><td><code>region N is locked for reading; use lock.write() to change it</code></td><td><code>read-locked</code></td><td>Запись под <code>lock.read()</code>.</td></tr>
-<tr><td><code>Region is still borrowed by N reader(s)</code></td><td><code>borrowed</code></td><td><code>thaw()</code> и <code>free()</code>, пока не сданы билеты, в том числе билеты задач <code>spawn</code>, которые ещё ждут в очереди. Дождаться их — <code>thawWhenFree()</code>.</td></tr>
-<tr><td><code>Region is not frozen by this isolate</code></td><td><code>not-frozen</code></td><td><code>thaw()</code> в потоке, у которого нет права разморозить.</td></tr>
-<tr><td><code>Region must be frozen to borrow it</code></td><td><code>not-frozen</code></td><td><code>borrow()</code> у незамороженного региона.</td></tr>
-<tr><td><code>a region object cannot reference objects outside its region; create them in it with region.run() or #{}</code></td><td><code>outside-reference</code></td><td>Запись в поле обычного объекта или объекта из другого региона.</td></tr>
-<tr><td><code>this LocalRef refers to an object of another thread (isolate X, this is isolate Y); only that thread can deref() it</code></td><td><code>other-thread</code></td><td><code>deref()</code> ручки <code>Region.localRef</code> не в том потоке, где её сделали. Поле <code>region</code> у этой ошибки равно −1.</td></tr>
+<tr><td><code>region N belongs to another thread (isolate X, this is isolate Y)</code></td><td><code>not-owner</code></td><td>Access to a region owned by another thread.</td></tr>
+<tr><td><code>region N was sent to another thread and has not been received yet</code></td><td><code>in-transit</code></td><td>The region was sent but not yet received: it sits in a channel, in the task queue or in a message.</td></tr>
+<tr><td><code>region N was freed</code></td><td><code>freed</code></td><td>Access to a freed region. <code>Region was already freed</code> is a repeated <code>free()</code>.</td></tr>
+<tr><td><code>region N is frozen; thaw it before writing</code></td><td><code>frozen</code></td><td>A write to a frozen region, including by the owner. <code>Region is already frozen</code> is a repeated <code>freeze()</code>.</td></tr>
+<tr><td><code>region N is frozen; borrow it to read it</code></td><td><code>not-borrowed</code></td><td>Reading a frozen region without a borrow by a thread that did not freeze it: fields, typed arrays, <code>Object.keys</code> and so on.</td></tr>
+<tr><td><code>region N is sealed and cannot change</code></td><td><code>sealed</code></td><td>A write to a sealed region.</td></tr>
+<tr><td><code>Region is sealed and cannot be thawed</code>, <code>Region is sealed; the GC frees it once nothing refers to it</code></td><td><code>sealed</code></td><td><code>thaw()</code> and <code>free()</code> of a sealed region.</td></tr>
+<tr><td><code>Region is sealed: its objects are shared, send them without a transfer list</code></td><td><code>sealed</code></td><td>A sealed region in a transfer list.</td></tr>
+<tr><td><code>region N is in an RwLock; use it through lock.read() or lock.write()</code></td><td><code>locked</code></td><td>Access to a region that is in an <code>RwLock</code>, bypassing the guard. <code>free()</code>, <code>freeze()</code>, a transfer list and a second <code>RwLock</code> on the same region have their own texts.</td></tr>
+<tr><td><code>region N is locked for reading; use lock.write() to change it</code></td><td><code>read-locked</code></td><td>A write under <code>lock.read()</code>.</td></tr>
+<tr><td><code>Region is still borrowed by N reader(s)</code></td><td><code>borrowed</code></td><td><code>thaw()</code> and <code>free()</code> while borrows are not released, including the borrows of <code>spawn</code> tasks still waiting in the queue. To wait for them, use <code>thawWhenFree()</code>.</td></tr>
+<tr><td><code>Region is not frozen by this isolate</code></td><td><code>not-frozen</code></td><td><code>thaw()</code> in a thread that does not have the right to thaw.</td></tr>
+<tr><td><code>Region must be frozen to borrow it</code></td><td><code>not-frozen</code></td><td><code>borrow()</code> on a region that is not frozen.</td></tr>
+<tr><td><code>a region object cannot reference objects outside its region; create them in it with region.run() or #{}</code></td><td><code>outside-reference</code></td><td>Writing an ordinary object or an object from another region to a field.</td></tr>
+<tr><td><code>this LocalRef refers to an object of another thread (isolate X, this is isolate Y); only that thread can deref() it</code></td><td><code>other-thread</code></td><td><code>deref()</code> of a <code>Region.localRef</code> handle outside the thread where it was made. The <code>region</code> field of this error is −1.</td></tr>
 </tbody>
 </table>
 </div>
-<p>Задачи и общие данные бросают свои классы, наследники <code>Error</code>: <code>AbortError</code> (задачу отменили), <code>TimeoutError</code> (наследник <code>AbortError</code>, задача не успела за <code>timeout(ms)</code>), <code>DeadlockError</code> (все потоки ждут друг друга) и <code>PoisonError</code> (<code>RwLock</code> отравлен писателем, который не закончил работу, см. <a href="channels.html#rwlock">RwLock</a>).</p>
-<p>Ошибки формы данных — обычные <code>TypeError</code>, без <code>region</code> и <code>reason</code>:</p>
+<p>Tasks and shared data throw their own classes, subclasses of <code>Error</code>: <code>AbortError</code> (the task was cancelled), <code>TimeoutError</code> (a subclass of <code>AbortError</code>; the task did not finish within <code>timeout(ms)</code>), <code>DeadlockError</code> (all threads are waiting for each other) and <code>PoisonError</code> (the <code>RwLock</code> was poisoned by a writer that did not finish its work, see <a href="channels.html#rwlock">RwLock</a>).</p>
+<p>Data shape errors are ordinary <code>TypeError</code>s, without <code>region</code> and <code>reason</code>:</p>
 <div class="table-wrap">
 <table>
-<thead><tr><th>Текст</th><th>Когда бывает</th></tr></thead>
+<thead><tr><th>Text</th><th>When it happens</th></tr></thead>
 <tbody>
-<tr><td><code>Cannot add property X, region objects have a fixed shape</code></td><td>Новое свойство у объекта региона.</td></tr>
-<tr><td><code>… cannot be moved into a region</code></td><td>В <code>run</code> попала функция, <code>Map</code>, <code>Date</code>, <code>DataView</code>, массив поверх <code>SharedArrayBuffer</code>, экземпляр класса, наследник <code>Array</code> и т. п.</td></tr>
-<tr><td><code>#{} and #[] need a current region: use region.enter() or region.run()</code></td><td>Литерал вне <code>enter()</code> и <code>run()</code>.</td></tr>
-<tr><td><code>#{} and #[] hold primitives and objects of their region; write nested objects as #{} and arrays as #[]</code></td><td>Обычный объект или массив внутри литерала.</td></tr>
-<tr><td><code>In 'use region' code {} and [] are #{} and #[], which allow no spread, holes, methods, accessors, __proto__, computed or numeric keys</code></td><td>Синтаксическая ошибка: в коде с <code>'use region'</code> литерал, который не может быть <code>#{}</code> или <code>#[]</code>.</td></tr>
-<tr><td><code>Region.of() expects an object from a region</code></td><td><code>Region.of</code> для обычного объекта.</td></tr>
+<tr><td><code>Cannot add property X, region objects have a fixed shape</code></td><td>A new property on a region object.</td></tr>
+<tr><td><code>… cannot be moved into a region</code></td><td><code>run</code> got a function, <code>Map</code>, <code>Date</code>, <code>DataView</code>, an array over <code>SharedArrayBuffer</code>, a class instance, an <code>Array</code> subclass and so on.</td></tr>
+<tr><td><code>#{} and #[] need a current region: use region.enter() or region.run()</code></td><td>A literal outside <code>enter()</code> and <code>run()</code>.</td></tr>
+<tr><td><code>#{} and #[] hold primitives and objects of their region; write nested objects as #{} and arrays as #[]</code></td><td>An ordinary object or array inside a literal.</td></tr>
+<tr><td><code>In 'use region' code {} and [] are #{} and #[], which allow no spread, holes, methods, accessors, __proto__, computed or numeric keys</code></td><td>A syntax error: in code with <code>'use region'</code>, a literal that cannot be <code>#{}</code> or <code>#[]</code>.</td></tr>
+<tr><td><code>Region.of() expects an object from a region</code></td><td><code>Region.of</code> for an ordinary object.</td></tr>
 </tbody>
 </table>
 </div>

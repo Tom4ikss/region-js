@@ -1,6 +1,6 @@
 // d8-flags: --module
-// Отмена прерывает обычный await, писатель, отменённый под локом, отравляет
-// лок, а уборку под spawn.shield() отмена не прерывает.
+// Cancellation interrupts a plain await, a writer cancelled under a lock poisons
+// the lock, and cancellation does not interrupt cleanup under spawn.shield().
 const sleep = (ms) => new Promise((resolve) => {
   const end = performance.now() + ms;
   const tick = () => (performance.now() >= end ? resolve() : setTimeout(tick, 0));
@@ -11,8 +11,8 @@ const doc = new Region().run(() => ({ title: '', words: 0 }));
 try {
   await spawn(async (doc) => {
     doc.title = 'final';
-    await sleep(1000);         // таймаут прерывает это ожидание
-    doc.words = 1000;          // и сюда задача уже не дойдёт
+    await sleep(1000);         // the timeout interrupts this wait
+    doc.words = 1000;          // and the task never gets here
   }, doc).timeout(20);
 } catch (e) {
   print(String(e));
@@ -38,11 +38,11 @@ try {
 } catch (e) {
   print(String(e));
 }
-stats.clearPoison();           // данные проверены
+stats.clearPoison();           // the data has been checked
 using g = await stats.read();
 print(JSON.stringify(g.value));
 
-// Уборка под spawn.shield(): отмена её не прерывает, и счётчик сходится.
+// Cleanup under spawn.shield(): cancellation does not interrupt it, and the counter adds up.
 const fair = new RwLock({ inFlight: 0, served: 0 });
 const work = spawn(async (fair) => {
   {

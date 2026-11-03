@@ -1,6 +1,6 @@
-внешняя задача вернула значение
-вложенная задача закончилась
-главный поток получил: готово
-задача без await
-spawn.idle() выполнен
-poolSize здесь: 6 | в задаче: 4
+the outer task returned a value
+the nested task finished
+the main thread got: done
+a task without await
+spawn.idle() resolved
+poolSize here: 6 | in a task: 4

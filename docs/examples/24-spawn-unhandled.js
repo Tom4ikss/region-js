@@ -1,7 +1,7 @@
 // d8-exit: 1
-// Задачу, которая упала, никто не ждёт. Ошибка не пропадает: d8 сообщает
-// о необработанном отклонении промиса и завершается с кодом 1.
+// Nobody waits for a task that failed. The error is not lost: d8 reports
+// an unhandled promise rejection and exits with code 1.
 spawn(() => {
-  throw new RangeError('индекс за пределами');
+  throw new RangeError('index out of range');
 });
-print('главный поток закончил');
+print('the main thread finished');
