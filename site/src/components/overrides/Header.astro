@@ -5,14 +5,15 @@ import Search from '@astrojs/starlight/components/Search.astro';
 import SiteTitle from '@astrojs/starlight/components/SiteTitle.astro';
 import ThemeSelect from '@astrojs/starlight/components/ThemeSelect.astro';
 import LanguageSelect from './LanguageSelect.astro';
-import { GITHUB, pageHref } from '../../lib/site.mjs';
+import { GITHUB, PAGES, pageHref } from '../../lib/site.mjs';
 import { ui } from '../../lib/i18n';
 
 const { lang, t } = ui(Astro.url);
 const path = Astro.url.pathname;
 const numbers = pageHref(lang, 'numbers');
+const inDocs = PAGES.some((p) => p.slug !== 'index' && p.slug !== 'numbers' && path.startsWith(pageHref(lang, p.slug)));
 const links = [
-	{ label: t.docs, href: pageHref(lang, 'problem'), current: path !== pageHref(lang, 'index') && !path.startsWith(numbers) },
+	{ label: t.docs, href: pageHref(lang, 'problem'), current: inDocs },
 	{ label: t.benchmarks, href: numbers, current: path.startsWith(numbers) },
 ];
 ---
