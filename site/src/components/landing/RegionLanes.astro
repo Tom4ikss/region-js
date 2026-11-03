@@ -42,7 +42,7 @@ const lanes = [30, 140, 250];
 		{
 			lanes.map((y, i) => (
 				<g class={`lane lane-${i}`}>
-					<rect x="4" y={y} width="512" height="88" rx="18" class="lane-bg" />
+					<rect x="4" y={y} width="512" height="88" rx="10" class="lane-bg" />
 					<text x="22" y={y + 22} class="lane-label">{T.lanes[i]}</text>
 				</g>
 			))
@@ -62,8 +62,8 @@ const lanes = [30, 140, 250];
 
 		<!-- the frozen (mint) region on the main thread -->
 		<g class="region region-c">
-			<rect width="56" height="56" rx="14" class="box"></rect>
-			<rect width="56" height="56" rx="14" class="frost"></rect>
+			<rect width="56" height="56" rx="8" class="box"></rect>
+			<rect width="56" height="56" rx="8" class="frost"></rect>
 			<circle cx="19" cy="19" r="5" class="dot"></circle>
 			<circle cx="37" cy="19" r="5" class="dot"></circle>
 			<circle cx="19" cy="37" r="5" class="dot"></circle>
@@ -75,7 +75,7 @@ const lanes = [30, 140, 250];
 
 		<!-- the coral region: thread 2 → main → thread 2 -->
 		<g class="region region-b">
-			<rect width="56" height="56" rx="14" class="box"></rect>
+			<rect width="56" height="56" rx="8" class="box"></rect>
 			<circle cx="19" cy="19" r="5" class="dot"></circle>
 			<circle cx="37" cy="19" r="5" class="dot"></circle>
 			<circle cx="19" cy="37" r="5" class="dot"></circle>
@@ -84,7 +84,7 @@ const lanes = [30, 140, 250];
 
 		<!-- the violet region: main → thread 1 → main -->
 		<g class="region region-a">
-			<rect width="56" height="56" rx="14" class="box"></rect>
+			<rect width="56" height="56" rx="8" class="box"></rect>
 			<circle cx="19" cy="19" r="5" class="dot"></circle>
 			<circle cx="37" cy="19" r="5" class="dot"></circle>
 			<circle cx="19" cy="37" r="5" class="dot"></circle>

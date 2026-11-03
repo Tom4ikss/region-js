@@ -30,17 +30,17 @@ Passing a region to another thread means handing over the keys. In code this is 
 <figure class="diagram">
 <svg viewBox="0 0 680 200" role="img" aria-labelledby="i1t">
 <title id="i1t">A region moves: the owner is the main thread, then the region is in transit and accessible to nobody, then the owner is the worker</title>
-<rect class="d-box-a" x="10" y="20" width="190" height="120" rx="12"/>
+<rect class="d-box-a" x="10" y="20" width="190" height="120" rx="7"/>
 <text class="d-t-b" x="105" y="48" text-anchor="middle">Main thread</text>
 <text class="d-t-a" x="105" y="70" text-anchor="middle">owner</text>
 <text class="d-t-s" x="105" y="98" text-anchor="middle">reads and writes</text>
 <text class="d-t-s" x="105" y="116" text-anchor="middle">tree.value = 5</text>
-<rect class="d-box-w" x="245" y="20" width="190" height="120" rx="12"/>
+<rect class="d-box-w" x="245" y="20" width="190" height="120" rx="7"/>
 <text class="d-t-b" x="340" y="48" text-anchor="middle">In transit</text>
 <text class="d-t-w" x="340" y="70" text-anchor="middle">nobody has the keys</text>
 <text class="d-t-s" x="340" y="98" text-anchor="middle">any access throws</text>
 <text class="d-t-s" x="340" y="116" text-anchor="middle">OwnershipError</text>
-<rect class="d-box-a" x="480" y="20" width="190" height="120" rx="12"/>
+<rect class="d-box-a" x="480" y="20" width="190" height="120" rx="7"/>
 <text class="d-t-b" x="575" y="48" text-anchor="middle">Worker</text>
 <text class="d-t-a" x="575" y="70" text-anchor="middle">new owner</text>
 <text class="d-t-s" x="575" y="98" text-anchor="middle">reads and writes</text>
@@ -80,19 +80,19 @@ While at least one ticket is out, the exhibit will not be taken down: `thaw()` t
 <figure class="diagram">
 <svg viewBox="0 0 680 300" role="img" aria-labelledby="i2t">
 <title id="i2t">Region states: owned by thread A; in transit; owned by thread B; frozen with n readers</title>
-<rect class="d-box-a" x="20" y="30" width="170" height="78" rx="12"/>
+<rect class="d-box-a" x="20" y="30" width="170" height="78" rx="7"/>
 <text class="d-t-b" x="105" y="58" text-anchor="middle">Owned by thread A</text>
 <text class="d-t-s" x="105" y="80" text-anchor="middle">only A reads</text>
 <text class="d-t-s" x="105" y="96" text-anchor="middle">and writes</text>
-<rect class="d-box-w" x="255" y="30" width="170" height="78" rx="12"/>
+<rect class="d-box-w" x="255" y="30" width="170" height="78" rx="7"/>
 <text class="d-t-b" x="340" y="58" text-anchor="middle">In transit</text>
 <text class="d-t-s" x="340" y="80" text-anchor="middle">accessible</text>
 <text class="d-t-s" x="340" y="96" text-anchor="middle">to nobody</text>
-<rect class="d-box-a" x="490" y="30" width="170" height="78" rx="12"/>
+<rect class="d-box-a" x="490" y="30" width="170" height="78" rx="7"/>
 <text class="d-t-b" x="575" y="58" text-anchor="middle">Owned by thread B</text>
 <text class="d-t-s" x="575" y="80" text-anchor="middle">only B reads</text>
 <text class="d-t-s" x="575" y="96" text-anchor="middle">and writes</text>
-<rect class="d-box" x="20" y="190" width="300" height="84" rx="12"/>
+<rect class="d-box" x="20" y="190" width="300" height="84" rx="7"/>
 <text class="d-t-b" x="170" y="218" text-anchor="middle">Frozen, n readers</text>
 <text class="d-t-s" x="170" y="240" text-anchor="middle">everyone reads with a ticket,</text>
 <text class="d-t-s" x="170" y="256" text-anchor="middle">nobody writes</text>

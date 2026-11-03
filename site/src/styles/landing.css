@@ -9,7 +9,7 @@
 	height: 2.9rem;
 	padding: 0 1.3rem;
 	border: 2px solid transparent;
-	border-radius: 999px;
+	border-radius: var(--rj-radius);
 	font: 700 0.98rem/1 var(--__sl-font);
 	text-decoration: none;
 	cursor: pointer;
@@ -26,16 +26,12 @@
 	transform: translateY(0) scale(0.97);
 }
 .rj-btn.primary {
-	background: linear-gradient(135deg, var(--rj-violet), var(--rj-pink));
-	color: #fff;
-	box-shadow: 0 8px 22px -8px color-mix(in srgb, var(--rj-violet) 70%, transparent);
-}
-:root:not([data-theme='light']) .rj-btn.primary {
-	background: linear-gradient(135deg, #8e6cff, #ff5ca8);
+	background: var(--rj-violet);
+	color: var(--rj-on-color);
 }
 .rj-btn.primary:hover {
-	box-shadow: 0 12px 28px -8px color-mix(in srgb, var(--rj-violet) 80%, transparent);
-	color: #fff;
+	background: color-mix(in srgb, var(--rj-violet) 88%, var(--sl-color-white));
+	color: var(--rj-on-color);
 }
 .rj-btn.ghost {
 	border-color: var(--rj-border-strong);
@@ -127,8 +123,9 @@
 	margin: 0;
 	padding: 1.2rem 1.2rem 1.25rem;
 	border: 1px solid color-mix(in srgb, var(--c) 35%, var(--rj-border));
-	border-radius: 1.2rem;
-	background: linear-gradient(180deg, var(--w), transparent 70%), var(--rj-surface);
+	border-top: 3px solid var(--c);
+	border-radius: var(--rj-radius-lg);
+	background: var(--rj-surface);
 	box-shadow: var(--rj-shadow);
 	transition: transform 0.2s var(--rj-bounce);
 }
@@ -148,11 +145,10 @@
 	place-items: center;
 	width: 2.4rem;
 	height: 2.4rem;
-	border-radius: 0.8rem;
+	border-radius: var(--rj-radius);
 	background: var(--c);
 	color: var(--rj-on-color);
 	font: 800 1.1rem/1 var(--rj-font-display);
-	box-shadow: 0 6px 16px -6px var(--c);
 }
 .rj-steps h3 {
 	margin: 0.2rem 0 0;
@@ -177,7 +173,7 @@
 .rj-steps pre {
 	margin: auto 0 0;
 	padding: 0.8rem 0.9rem;
-	border-radius: 0.8rem;
+	border-radius: 0.5rem;
 	overflow-x: auto;
 	font: 0.76rem/1.6 var(--__sl-font-mono);
 	font-variant-ligatures: none;
@@ -242,7 +238,7 @@
 	padding: 1rem 1.1rem 1.05rem;
 	border: 1px solid var(--rj-border);
 	border-top: 4px solid var(--c);
-	border-radius: 1rem;
+	border-radius: 0.6rem;
 	background: var(--rj-surface);
 	font-size: 0.92rem;
 	line-height: 1.55;
@@ -275,7 +271,7 @@
 	height: 100%;
 	padding: 1.05rem 1.15rem;
 	border: 1px solid var(--rj-border);
-	border-radius: 1rem;
+	border-radius: 0.6rem;
 	background: var(--rj-surface);
 	color: var(--sl-color-gray-3);
 	font-size: 0.9rem;

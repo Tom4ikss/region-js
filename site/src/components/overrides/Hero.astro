@@ -51,9 +51,7 @@ const typoHtml = (s: string) => (lang === 'ru' ? typographHtml(s) : s);
 		height: 30rem;
 		z-index: -1;
 		background:
-			radial-gradient(28rem 16rem at 22% 18%, color-mix(in srgb, var(--rj-violet) 22%, transparent), transparent 70%),
-			radial-gradient(24rem 14rem at 78% 30%, color-mix(in srgb, var(--rj-pink) 16%, transparent), transparent 70%),
-			radial-gradient(22rem 12rem at 55% 85%, color-mix(in srgb, var(--rj-mint) 14%, transparent), transparent 70%);
+			radial-gradient(circle, var(--rj-border) 1px, transparent 1.2px) 0 0 / 22px 22px;
 		pointer-events: none;
 	}
 	.pitch {
