@@ -1,0 +1,95 @@
+name: d8
+
+# Builds d8 with the regions patch for Linux x64 (release with DCHECKs, the same
+# args as scripts/setup.sh), keeps it as a workflow artifact and runs the tests
+# once. On a v* tag it also attaches the archive to the GitHub release and
+# publishes a Docker image to ghcr.io/tom4ikss/region-js.
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  group: d8-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  linux-x64:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    env:
+      ARCHIVE: region-js-d8-linux-x64.tar.gz
+    steps:
+      - uses: actions/checkout@v4
+
+      # A V8 checkout and build need ~25 GB; the runner image ships with less free space.
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          df -h /
+
+      - name: Fetch V8, apply the patch, build d8
+        run: scripts/setup.sh
+
+      - name: Package
+        run: |
+          out=v8-src/v8/out/release
+          mkdir -p dist/region-js-d8
+          cp "$out/d8" "$out/snapshot_blob.bin" "$out/icudtl.dat" dist/region-js-d8/
+          cp LICENSE dist/region-js-d8/LICENSE
+          cp v8-src/v8/LICENSE dist/region-js-d8/LICENSE.v8
+          {
+            echo "region-js $GITHUB_SHA"
+            echo "V8 $(cat v8/BASE)"
+            echo "gn args:"
+            cat v8/args.gn
+          } > dist/region-js-d8/BUILD_INFO
+          tar -C dist -czf "dist/$ARCHIVE" region-js-d8
+          (cd dist && sha256sum "$ARCHIVE" > "$ARCHIVE.sha256")
+          ls -la dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: region-js-d8-linux-x64
+          path: dist/${{ env.ARCHIVE }}*
+
+      - name: Tests
+        run: |
+          LOGS=test-logs scripts/run-tests.sh v8-src/v8/out/release/d8 | tee test-summary.txt
+          echo "::notice::$(tail -1 test-summary.txt)"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-logs
+          path: |
+            test-summary.txt
+            test-logs/
+
+      - name: Attach to the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="$GITHUB_REF_NAME"
+          gh release view "$tag" >/dev/null 2>&1 ||
+            gh release create "$tag" --verify-tag --title "$tag" \
+              --notes "Prebuilt d8 for Linux x64 with the regions patch. See CHANGELOG.md for what changed."
+          gh release upload "$tag" "dist/$ARCHIVE" "dist/$ARCHIVE.sha256" --clobber
+
+      - name: Docker image
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          image=ghcr.io/tom4ikss/region-js
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker build -f docker/Dockerfile -t "$image:$GITHUB_REF_NAME" -t "$image:latest" .
+          docker run --rm "$image:$GITHUB_REF_NAME" -e 'print(typeof Region, typeof spawn)'
+          docker push "$image:$GITHUB_REF_NAME"
+          docker push "$image:latest"

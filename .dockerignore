@@ -1,0 +1,5 @@
+# Only what docker/Dockerfile copies; everything else (v8-src is ~20 GB) stays out of the context.
+*
+!dist/region-js-d8/
+!tests/
+!site/examples/

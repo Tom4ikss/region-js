@@ -1,0 +1,20 @@
+{
+  // Codespaces / dev container: the prebuilt d8 from the latest release, the playground with
+  // its types, Biome and ESLint rules. Cmd/Ctrl+Shift+B runs the open file with d8.
+  "name": "region-js",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu-24.04",
+  "features": {
+    "ghcr.io/devcontainers/features/node:1": { "version": "22" }
+  },
+  "hostRequirements": { "cpus": 4 },
+  "workspaceFolder": "/workspaces/region-js/playground",
+  "postCreateCommand": "../scripts/get-d8.sh && npm install --no-audit --no-fund",
+  "customizations": {
+    "vscode": {
+      "extensions": ["biomejs.biome", "dbaeumer.vscode-eslint"]
+    },
+    "codespaces": {
+      "openFiles": ["examples/demo.js"]
+    }
+  }
+}
