@@ -194,6 +194,7 @@ b.<span class="tok-api">terminate</span>();</code></pre><div class="out-head"><s
 
 <h2 id="pochemu-v-region-kladut-tolko-dannye"><a class="anchor" href="#pochemu-v-region-kladut-tolko-dannye" aria-hidden="true" tabindex="-1"></a>Почему в регион кладут только данные</h2>
 <p>В регионе могут лежать обычные объекты, массивы, типизированные массивы, строки, числа, <code>true</code>/<code>false</code>, <code>null</code> и <code>undefined</code>. Функции, экземпляры <code>Map</code>, <code>Set</code>, <code>Date</code> и подобное туда не попадают. Причина простая: функция помнит переменные того потока, где её создали (замыкание), а встроенные объекты вроде <code>Map</code> устроены внутри движка по-своему и привязаны к своему потоку. Отдать их другому потоку по ссылке без копии нельзя. Обычные данные отдать можно: им нужен только сам граф полей.</p>
+<p>Два исключения сделаны специально. Функция без замыкания (<code>Region.fn</code>) — это по сути её исходный текст, и каждый поток компилирует его сам. Ручка <code>Region.localRef</code> на объект своего потока переезжает вместе с регионом, но сам объект остаётся дома, и разыменовать ручку можно только там, как <code>SendWrapper</code> в Rust (<a href="guide.html#functions">подробнее</a>).</p>
 
 <div class="callout aside">
 <span class="callout-title">Если вы знаете Rust</span>

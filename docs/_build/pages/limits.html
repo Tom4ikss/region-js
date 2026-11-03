@@ -40,7 +40,7 @@
 <h3>Что можно хранить</h3>
 <ul>
   <li>Только простые объекты (прототип <code>Object.prototype</code> или <code>null</code>), обычные массивы, типизированные массивы, строки, числа, <code>true</code>/<code>false</code>, <code>null</code>, <code>undefined</code>.</li>
-  <li>Нет функций, <code>Map</code>, <code>Set</code>, <code>Date</code>, <code>BigInt</code>, <code>Symbol</code>, самих <code>ArrayBuffer</code> и <code>DataView</code>.</li>
+  <li>Нет <code>Map</code>, <code>Set</code>, <code>Date</code>, <code>BigInt</code>, <code>Symbol</code>, самих <code>ArrayBuffer</code> и <code>DataView</code>. Функции — только из <code>Region.fn</code>, без замыкания. Объект своего потока регион держит только через ручку <code>Region.localRef</code>, и разыменовать её можно только в этом потоке (<a href="guide.html#functions">подробнее</a>).</li>
   <li>Типизированные массивы поверх <code>SharedArrayBuffer</code> и буферов с изменяемым размером не кладутся. Обычные копируются или переезжают без копии через <code>region.run(fn, [buffer])</code>. View над памятью региона отсоединяются, когда регион переезжает или замораживается, и после этого читаются как пустые (<a href="guide.html#typed">подробнее</a>).</li>
   <li>Экземпляры классов и наследники <code>Array</code> не кладутся: ошибка «cannot be moved into a region».</li>
   <li>Форма объектов фиксирована: новое поле добавить нельзя. Массивы растут и укорачиваются (<code>push</code>, <code>pop</code>, <code>splice</code>, <code>length</code>). Запись по индексу и <code>push</code> идут по быстрому пути, пока в массиве есть запас, а <code>pop</code>, <code>splice</code>, <code>length = n</code> и рост запаса — через рантайм.</li>
