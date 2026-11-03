@@ -14,6 +14,8 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TIMEOUT="${TIMEOUT:-600}"
 LOGS="${LOGS:-$(mktemp -d /tmp/region-tests.XXXXXX)}"
 mkdir -p "$LOGS"
+# Absolute, because the tests run from tests/.
+LOGS="$(cd "$LOGS" && pwd)"
 
 # Runs d8 with a deadline; prints its output and "TIMEOUT" if it was killed.
 run() {
@@ -49,7 +51,7 @@ for test in ${TESTS:-*.js}; do
   fi
   t0=$(date +%s)
   # shellcheck disable=SC2086
-  run $flags "$test" > "$LOGS/$test.log"
+  run $flags "$test" > "$LOGS/$test.log" || { echo "cannot write $LOGS/$test.log" >&2; exit 2; }
   total=$((total + 1))
   bad=$(grep -E "$BAD" "$LOGS/$test.log" | head -3)
   if [ -n "$bad" ]; then
