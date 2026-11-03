@@ -1,0 +1,4 @@
+---
+const { data } = Astro.locals.starlightRoute.entry;
+---
+<div class="rj-hero"><h1 id="_top" data-page-title set:html={data.hero?.title} /></div>

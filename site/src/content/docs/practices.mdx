@@ -1,0 +1,433 @@
+---
+title: "Practices"
+description: "Twelve practices for working with regions and spawn: what to do, what to avoid, and a \"bad\" versus \"good\" measurement where it makes sense."
+eyebrow: "Chapter 6"
+sidebar:
+  label: "Practices"
+---
+import Example from '../../components/Example.astro';
+import Chart from '../../components/Chart.astro';
+
+<div class="lead">
+
+Regions and `spawn` have their own expensive and cheap operations, and they do not always match habits from ordinary JS. Here are twelve practices. Each has a short explanation, "bad" and "good" code, and a measurement where it makes sense.
+
+</div>
+
+:::caution[How to read the numbers]
+All measurements were taken on the `out/docs/d8` build with internal checks enabled (`dcheck_always_on`), on Apple Silicon with 6 performance and 6 efficiency cores. In a regular build and on another machine the absolute values will differ, so look at the ratios. Each measurement script is in `site/examples/en/` and was run five times. Within a run, the best of several repetitions is taken; the charts show the median of five runs. Under each chart you can expand the measurement code and the output of one run made when the site was built.
+
+Practices 4, 5, 6 and 9 were remeasured after Maglev and Turbofan learned to inline access to region objects into machine code ([how](/region-js/inside/#jit)), on the `out/release/d8` build with the same settings. Practices 4b and 5 were remeasured again after array methods started reading a region array directly ([how](/region-js/inside/#methods)).
+:::
+
+## Cheat sheet {/* #cheatsheet */}
+
+| Situation | Bad | Good | Measurement: bad → good |
+| --- | --- | --- | ---: |
+| [1. Large data for many tasks](#frozen) | capture a plain array | freeze a region and capture it | 1,065 ms → 0.7 ms |
+| [2. Data goes back and forth](#move) | `region.run` every time | one region, moved via `Region.of` | 3,585 → 8.8 µs per round trip |
+| [3. Lots of small work](#batch) | thousands of small `spawn` calls | dozens of tasks of a few milliseconds each | 57 ms → 52 ms |
+| [4a. Hot loop with writes](#local) | write to a region object on every step | compute in local variables, write once | 4.6 ms → 0.66 ms |
+| [4b. Many passes over a region array](#local-read) | read `arr[i]` from the region every time | copy once into a plain array, with `Array.from` or a loop | 13.1 ms → 3.1 ms |
+| [5. Methods of a region array](#methods) | copy the array for `filter` / `map` | call the methods directly on the region array | no copy needed: 20.1 ms and 21.1 ms |
+| [6. Many objects of one kind](#shapes) | keys in different orders | the same keys in the same order | 11.1 ms → 5.9 ms |
+| [7. Waiting for a task on the main thread](#await) | `task.join()` | `await task` | pause 192.5 ms → 0.3 ms |
+| [8. An object after a move](#after-move) | read right after sending | wait until the region comes back | OwnershipError → works |
+| [9. Many numbers](#typed) | a plain array of numbers in a region | a typed array in a region | 2.4 ms → 0.68 ms |
+| [10. Tasks in `map`](#map) | the callback starts a task and returns something else | the callback returns the task handle | tasks not awaited → awaited |
+| [11. A borrow in an async task](#borrow-while) | `borrow()` and a deferred read | `return region.borrowWhile(async ...)` | OwnershipError → works |
+| [12. A large data set into a region](#build) | `run` per object | `#{}` literals or one `run` | 377 ms → 74 ms |
+
+Several measurements did not match what we expected, and the advice was adjusted to them. "One task per core" turned out not to be the best way to split work: dozens of smaller tasks balanced the load and finished faster ([3](#batch)). And creating many objects in a region is fastest with the `#{}` literal, while `run` per object is slowest ([12](#build)).
+
+After the compilers learned to inline region access, the gain in practices [4](#local) and [9](#typed) shrank: the "bad" variants, which go to the region on every step, became about three times faster. The advice stays, but the difference is now a few times rather than an order of magnitude. Object shape ([6](#shapes)) now matters just as it does for ordinary objects.
+
+Later, array methods, `for...of`, `Array.from` and spread learned to read a region array directly instead of going through the runtime for each element. Methods on a region array became about 10 times faster and cost almost as much as on a plain array. So practice [5](#methods) was rewritten: it used to advise replacing `filter`, `map` and `reduce` with a loop (the difference was 67 times); now it says a copy for the sake of methods is not needed. In practice [4b](#local-read), a copy with `Array.from` used to be the slowest option; now it costs the same as a copy with a loop.
+
+## <span class="practice-num">1</span> Large read-only data goes into a frozen region {/* #frozen */}
+
+When a `spawn` task captures a plain array or object, it is copied. Each task gets its own copy, and the main thread makes it at the moment of the call. Thirty-two tasks over one catalog means thirty-two copies of the catalog.
+
+A frozen region is not copied at all. All tasks and the main thread read the same objects. You pay once, when you put the data into the region.
+
+<div class="versus">
+
+```js bad
+const catalog = await loadCatalog();      // plain array, 100,000 products
+const sums = await Promise.all(parts.map((k) =>
+  spawn(() => sumPart(catalog, k))));     // catalog is copied into every task
+```
+
+```js good
+const data = await loadCatalog();
+const region = new Region();
+const catalog = region.run(() => data);   // one copy, into the region
+region.freeze();                          // all tasks can read it at once
+const sums = await Promise.all(parts.map((k) =>
+  spawn(() => sumPart(catalog, k))));     // no copies
+```
+
+</div>
+
+<Chart id="p-frozen" />
+
+<Example file="practice-01-frozen-shared.js" timing collapsed />
+
+The difference is about 1,500 times, and almost all of it is copying: about 33 ms per copy of the catalog, thirty-two copies in a row. The work in the tasks themselves is tiny here. If the data needs to be both read and changed, it cannot be frozen. Then see the next practice.
+
+## <span class="practice-num">2</span> Create a region once and move it around instead of rebuilding it {/* #move */}
+
+`region.run` copies into the region the whole graph the function returned: that is O(n). Moving a ready region costs O(1), no matter how many objects it holds. If the data travels between threads many times, create the region once and after that only pass it along. In a worker, the region is found with `Region.of(obj)`. With `spawn` it is the same: a captured region moves into the task by itself and comes back.
+
+<div class="versus">
+
+```js bad
+for (const step of steps) {
+  const region = new Region();
+  const items = region.run(() => localItems);   // 10,000 objects are copied again
+  worker.postMessage({ items, step }, [region]);
+  await nextMessage(worker);
+}
+```
+
+```js good
+const region = new Region();
+let items = region.run(() => localItems);       // copied once
+for (const step of steps) {
+  worker.postMessage({ items, step }, [Region.of(items)]);
+  items = (await nextMessage(worker)).items;    // the same object came back
+}
+```
+
+</div>
+
+<Chart id="p-move" />
+
+<Example file="practice-02-move-not-rebuild.js" timing collapsed />
+
+8.8 microseconds per round trip is two messages and two region moves; the time does not depend on the size of the data. The 3.5 ms is almost entirely the copy of 10,000 objects into a new region. The more data, the bigger the difference.
+
+## <span class="practice-num">3</span> A few large tasks instead of thousands of small ones {/* #batch */}
+
+`spawn` tasks go to a pool of long-lived workers, four by default (`spawn.poolSize`). Starting one task costs about 3 microseconds, and about 4 when tasks are started by the thousand at once: pack the arguments, hand them to a worker, receive and unpack the answer. If the work in a task is comparable to this time, the overhead eats it. Let each task work for at least half a millisecond: then the start takes less than a percent of its time.
+
+We expected one task per worker to be best. The measurement showed otherwise: if the parts are unequal in work, several tasks per worker finish faster. A worker that becomes free takes the next task from the queue and does not wait for the longest one.
+
+<div class="versus">
+
+```js bad
+// 10,000 tasks of 200 numbers, about 20 µs of work each
+const counts = await Promise.all(ranges.map(([from, to]) =>
+  spawn(countPrimes, from, to)));
+```
+
+```js good
+// 100 tasks of 20,000 numbers, about 2 ms of work each
+const parts = 100;
+const counts = await Promise.all(Array.from({ length: parts }, (_, i) =>
+  spawn(countPrimes, Math.floor((LIMIT * i) / parts), Math.floor((LIMIT * (i + 1)) / parts))));
+```
+
+</div>
+
+<Chart id="p-batch" />
+
+<Example file="practice-03-batch.js" timing collapsed />
+
+100 tasks are 3.7 times faster than the main thread, nearly ideal for four workers. 10,000 small tasks took 57 ms: 5 ms longer than 100 tasks, that is, about 0.5 µs extra for each of the 10,000. Earlier, when a start cost about 40 µs, this variant took 377 ms and was twice as slow as the same work on the main thread without any `spawn`. Now the difference from large tasks has almost disappeared, but very small tasks still lose a little.
+
+Four large tasks gave only ×3: checking a large number for primality takes longer than a small one, so the last quarter takes longer than the first, and three workers sit idle at the end. In a separate check we tried other part counts too: 8 parts, about 59 ms; 16, about 55; from 32 to 1,000, 52–53 ms; 10,000, about 57.
+
+## <span class="practice-num">4</span> Hot loops: compute locally, write to the region once {/* #local */}
+
+Maglev and Turbofan inline access to region objects into machine code ([how](/region-js/inside/#jit)), and in a loop without calls Turbofan checks the owner once. But the shape and index checks, and on writes the value check, remain on every access, and the values themselves live in memory. An ordinary local variable is clear to the compiler: it keeps it in a CPU register, and there is nothing to check.
+
+### a) Writes {/* #local-write */}
+
+<div class="versus">
+
+```js bad
+for (let i = 0; i < values.length; i++) {
+  stats.count += 1;          // stats lives in a region
+  stats.sum += values[i];
+}
+```
+
+```js good
+let count = stats.count, sum = stats.sum;
+for (let i = 0; i < values.length; i++) {
+  count += 1;
+  sum += values[i];
+}
+stats.count = count;         // into the region once
+stats.sum = sum;
+```
+
+</div>
+
+<Chart id="p-write" />
+
+Local variables are 4.2 times faster. Before access was inlined in the compilers, writing on every step took 14.3 ms and the difference was 19 times; before the owner was checked once per loop, 4.6 ms and 7 times. This is more than the write gap on the ["Numbers"](/region-js/numbers/#access) page (×1.7): there, ordinary objects also write to memory, while here the local variant does not touch memory at all, both variables live in registers. An ordinary object in the same loop takes about 1.7 ms, by a separate check. So the advice is useful in ordinary JS too, and with regions it gives more: every step also has checks. The hotter the loop, the bigger the gain.
+
+### b) Many passes over a region array {/* #local-read */}
+
+If you need to go over a region array by index many times, it is cheaper to copy it once into a plain array. `Array.from(arr)`, `[...arr]` and a simple loop all copy it: for a region array, all three make one pass over the array of values and cost about the same.
+
+<div class="versus">
+
+```js bad
+for (let pass = 0; pass < 50; pass++)
+  for (let i = 0; i < prices.length; i++) total += prices[i];   // prices is in a region
+```
+
+```js good
+const local = Array.from(prices);   // copied once, a plain array
+for (let pass = 0; pass < 50; pass++)
+  for (let i = 0; i < local.length; i++) total += local[i];
+```
+
+</div>
+
+<Chart id="p-read" />
+
+<Example file="practice-04-local-then-write.js" timing collapsed />
+
+A copy plus 50 passes is 2.2 times faster than 50 passes over the region. Before access was inlined in the compilers, the passes over the region took 34.6 ms and the difference was 8.8 times; before the owner was checked once per loop, 13.1 ms and 4 times. A copy with `Array.from` used to lose even to passes directly over the region, 17.8 ms versus 12.3: it went through the iterator, and each element was read through the runtime. Now `Array.from` and spread copy a region array in one pass over the values ([how](/region-js/inside/#methods)), and it comes to 3.5 ms, almost the same as a copy with a loop (3.4 ms). A pass over a plain array is about half the cost of a pass over a region array, so the copy pays for itself after just a few passes. A copy is a snapshot. Changes in the region will not appear in it, and writes to it will not reach the region. For a single pass there is no point in copying; that is the next practice. And if the array holds only numbers, it is better to keep them in a typed array from the start ([practice 9](#typed)): then no copy is needed at all.
+
+## <span class="practice-num">5</span> Methods of a region array: call them directly, without a copy {/* #methods */}
+
+A region array has no prototype of its own. `map`, `filter`, `reduce` and other methods come from the reading thread's `Array.prototype`. They used to read each element through the runtime and were dozens of times slower than a loop, so this page advised a loop or a copy. Now methods, `for...of`, `Array.from` and spread read values directly from the region array ([how](/region-js/inside/#methods)). There is no longer any need to copy the array for the sake of methods.
+
+<div class="versus">
+
+```js bad
+const local = new Array(numbers.length);   // numbers is in a region
+for (let i = 0; i < numbers.length; i++) local[i] = numbers[i];
+const total = local                 // a copy for the sake of methods
+  .filter((x) => x % 2 === 0)
+  .map((x) => x * x)
+  .reduce((a, b) => a + b, 0);
+```
+
+```js good
+const total = numbers               // directly on the region array
+  .filter((x) => x % 2 === 0)
+  .map((x) => x * x)
+  .reduce((a, b) => a + b, 0);
+```
+
+</div>
+
+<Chart id="p-methods" />
+
+<Example file="practice-05-methods.js" timing collapsed />
+
+Methods on a region array take 23.9 ms, on a plain array with the same values 19.0 ms, 1.3 times less. Before the fast paths it was 216 ms. Copying with a loop before the methods gains almost nothing: 22.1 ms including the copy, and it needs twice the memory.
+
+An indexed `for` loop is still faster than a method chain, by 11 times. But that is not specific to regions: on a plain array the difference is the same. Methods call a callback for every element, and `filter` and `map` also create intermediate arrays. So choose between methods and a loop the same way as in ordinary JS: methods where readability matters more, a loop in the hottest places. For a single loop pass a copy is not needed either: 3.5 ms with a copy versus 2.1 ms without one, and a plain array is traversed in 1.7 ms.
+
+The fast path works when the thread can read the region: it owns it or holds a borrow of a frozen one. Otherwise the method throws `OwnershipError`, just like an ordinary read. Elements that are themselves typed arrays are read through the generic path: each time you get a new local view. If you replace `Array.prototype[Symbol.iterator]`, `for...of`, `Array.from` and spread call the replaced iterator, as with a plain array.
+
+## <span class="practice-num">6</span> The same shape for all objects {/* #shapes */}
+
+Every region object has a "shape": a set of keys in a particular order. The objects `{ x, y }` and `{ y, x }` have different shapes. The inline cache at each place in the code remembers the shapes it has seen there. With one shape it is fastest, with two to four (the polymorphic case) it goes through them, and beyond that it switches to the generic slow path (the megamorphic case). The usual advice for ordinary JS is to create objects of the same kind the same way, with one function or one literal.
+
+<div class="versus">
+
+```js bad
+const points = region.run(() => rows.map((r) =>
+  r.fromApi ? { y: r.y, x: r.x } : { x: r.x, y: r.y }));   // two shapes mixed together
+```
+
+```js good
+const makePoint = (x, y) => ({ x, y });                     // one shape
+const points = region.run(() => rows.map((r) => makePoint(r.x, r.y)));
+```
+
+</div>
+
+<Chart id="p-shapes" />
+
+<Example file="practice-06-shapes.js" timing collapsed />
+
+For ordinary objects everything is as in the textbook: one shape 1.5 ms, 24 shapes 7.8 ms, 5.2 times slower. Region objects now behave the same way, only more mildly: four shapes are 24% slower than one, 24 shapes are 2.4 times slower. The compiler inlines a field read if the field is at the same position in all the shapes the inline cache has seen. In this measurement `x` comes first in the first four shapes, so they barely get in the way. If the positions differ or there are too many shapes (the megamorphic case), an IC call remains on every access. Before access was inlined in the compilers, the IC was always called, and 24 shapes ran as fast as one (about 20 ms). The advice now works the same way as for ordinary JS.
+
+You can also see that summing a field over 100,000 region objects with one shape takes 3 times longer than over ordinary ones (before inlining it was 13 times, before the owner was checked once per loop, 4.5). This is mostly not the shape but the checks in the hot loop: indexing into a region array (practice 4b) and the shape and owner check on each new object: in each iteration it is a different object, and one check per loop does not cover it.
+
+## <span class="practice-num">7</span> On the main thread, use `await`, not `join()` {/* #await */}
+
+`task.join()` stops the thread until the task ends. In a browser this would look like a frozen page: clicks are not handled, frames are not drawn, animations stand still. The task computes on another thread, but that does not help the main thread; it just waits. `await task` releases the thread: while the task computes, the main thread handles events, and the result arrives later.
+
+d8 has no page, so we imitated one with a `setTimeout` chain: each "tick" is like handling an event. While the task computes for about 0.2 s, we count how many ticks the main thread managed to make and how long the longest pause between them was. In d8, `setTimeout` does not wait for the given delay, which is why there are so many ticks: the chain spins as fast as the thread allows.
+
+<div class="versus">
+
+```js bad
+button.onclick = () => {
+  const result = spawn(buildReport, rows).join();   // the page freezes while it computes
+  render(result);
+};
+```
+
+```js good
+button.onclick = async () => {
+  const result = await spawn(buildReport, rows);    // the page stays responsive
+  render(result);
+};
+```
+
+</div>
+
+<Chart id="p-await" />
+
+<Example file="practice-07-await-not-join.js" timing collapsed />
+
+With `join()`, the main thread did not respond even once while the task ran: the only tick happened after it, and the pause equals the length of the task. With `await`, it responded about 257,000 times, and the longest pause was 0.3 ms. The task itself takes equally long in both cases. `join()` is appropriate in a worker or in a d8 script, where there is nothing to respond to. A `spawn(...).join()` call is flagged by the Biome rule from the [playground](/region-js/tooling/#biome).
+
+## <span class="practice-num">8</span> Do not touch an object while its region is on another thread {/* #after-move */}
+
+After `postMessage(..., [region])`, after a `spawn` that captured the region, or after sending a region object to a [channel](/region-js/channels/#move), the region belongs to another thread. You still have a reference to the object, but any access to it throws `OwnershipError`: reading a field, `Object.keys`, and `JSON.stringify` alike. This is protection against a data race, not an engine bug. Wait until the region comes back: after `await` on the task, or after the worker's reply message with `Region.of(obj)` in the transfer list. There is no measurement here: the "bad" variant simply does not work.
+
+<div class="versus">
+
+```js bad
+const task = spawn(() => addShipping(cart));   // cart moved into the task
+showTotal(cart.total);                         // OwnershipError
+```
+
+```js good
+const task = spawn(() => addShipping(cart));
+await task;                                    // the region is back
+showTotal(cart.total);                         // the same object, already changed
+```
+
+</div>
+
+<Example file="practice-08-after-move.js" />
+
+After the return it is the very same object (`===`), and it already contains the changes made on the other thread. If you need to show something while the task runs, copy the fields you need into ordinary variables beforehand.
+
+With typed arrays in a region there is no error, but it is easy to make a quieter mistake: a view read before the move is empty after it, and stays empty after the region comes back ([more](/region-js/guide/#typed-detach)). Read the field again after `await`. Accesses to a captured region while the task is running are flagged by the ESLint rule [`no-region-use-while-spawned`](/region-js/tooling/#no-region-use-while-spawned).
+
+## <span class="practice-num">9</span> Many numbers go into a typed array {/* #typed */}
+
+The compiler inlines indexed access to a region array into machine code, but on every access it checks the shape and bounds, and on writes the value too (practices [4b](#local-read) and [5](#methods)). Besides, the array of values holds any JS values, and a fractional number in it is a separate object in the shared heap. A typed array in a region works differently. When you read the field, you get an ordinary `Float64Array` over the region's memory ([more](/region-js/guide/#typed)), and a loop over it compiles the same way as over any typed array. The owner check happens once, when the field is read, not on every element.
+
+<div class="versus">
+
+```js bad
+const data = region.run(() => ({
+  samples: Array.from({ length: N }, read),   // a plain array of numbers
+}));
+for (let i = 0; i < data.samples.length; i++) total += data.samples[i];
+```
+
+```js good
+const data = region.run(() => ({
+  samples: Float64Array.from({ length: N }, read),
+}));
+const samples = data.samples;                 // the view once, before the loop
+for (let i = 0; i < samples.length; i++) total += samples[i];
+```
+
+</div>
+
+<Chart id="p-typed" />
+
+<Example file="practice-09-typed-arrays.js" timing collapsed />
+
+A sum over a `Float64Array` in a region runs at the same speed as over an ordinary `Float64Array`, and 2.1 times faster than over an array of numbers in a region. Before access was inlined in the compilers, the sum over the region array took 6.9 ms and the difference was 10 times; before the owner was checked once per loop, 2.4 ms and 3.5 times. A million writes to a region array now take 2.0 ms (it used to be about 8), to a typed array about 1.7 ms, the same as without regions. Writes to a `Float64Array` vary between runs from 0.8 to 1.7 ms, equally for the ordinary and the region one. The gain has become more modest, but the advice holds: on reads it is still twofold, a typed array takes less memory, and fractional numbers are written into it without a copy in the shared heap.
+
+Two caveats. Read the field once before the loop: each read creates a new view, and there is no reason to do that on every step. And do not keep a view after the region moves or is frozen: it gets detached and reads as empty.
+
+## <span class="practice-num">10</span> In `map`, return the task handle {/* #map */}
+
+`Promise.all(items.map(...))` waits for whatever the `map` callback returned. If the callback calls `spawn` but returns something else (a number, the original element, nothing), `Promise.all` resolves immediately, and the tasks keep running. The code after `await` will decide that everything is done, although it is not. If a task fails, nobody catches its error either, and d8 reports an [unhandled rejection](/region-js/spawn/#unhandled).
+
+<div class="versus">
+
+```js bad
+await Promise.all(parts.map((i) => {
+  spawn(heavy, sizes[i]);     // the handle is lost
+  return i;                   // Promise.all waits for a number
+}));
+```
+
+```js good
+const results = await Promise.all(parts.map((i) =>
+  spawn(heavy, sizes[i])));   // Promise.all waits for the tasks
+// or, if you need a different value:
+// parts.map((i) => spawn(heavy, sizes[i]).then(() => i))
+```
+
+</div>
+
+<Example file="practice-10-map-handles.js" timing />
+
+In the bad variant, `Promise.all` returned the part numbers while the tasks were only starting: those milliseconds went to the `spawn` calls themselves and to starting the pool workers. The tasks finished much later, and the only way to find out was `spawn.idle()`. This mistake is flagged by the ESLint rule [`no-floating-spawn`](/region-js/tooling/#no-floating-spawn): it says separately that the callback returns the wrong handle.
+
+## <span class="practice-num">11</span> A borrow in an async task goes through `borrowWhile` {/* #borrow-while */}
+
+A `region.borrow()` taken in a `spawn` task is returned automatically when the task ends. For synchronous work that is exactly what you need. But if the task deferred the read until later (a timer, an `await` without returning the promise), by then the borrow is gone, and the read throws `OwnershipError`: a frozen region cannot be read without a borrow, and it may also have been thawed. `region.borrowWhile(fn)` holds the borrow until the promise from `fn` settles. The key is to return this promise from the task or wait for it, otherwise the task ends earlier. There is no measurement here: the bad variant simply does not work. An example with real output is on the [spawn page](/region-js/spawn/#borrow).
+
+<div class="versus">
+
+```js bad
+await spawn(() => {
+  const ticket = Region.of(prices).borrow();
+  setTimeout(() => show(prices.apple), 100);   // the borrow is already returned
+});
+```
+
+```js good
+const apple = await spawn(() =>
+  Region.of(prices).borrowWhile(async () => {
+    await sleep(100);
+    return prices.apple;                       // the task still holds the borrow
+  }));
+```
+
+</div>
+
+d8 notices a bare borrow that outlived its task at run time and prints a warning in the worker. `borrowWhile` with an async function and no `return` is visible already in the editor: it is flagged by the ESLint rule [`no-floating-borrow-while`](/region-js/tooling/#no-floating-borrow-while).
+
+## <span class="practice-num">12</span> A large data set: `#{}` literals or one `run`, not `run` per object {/* #build */}
+
+A single object built by ordinary code is put into a region with `region.run(() => ({ ... }))` ([how](/region-js/guide/#direct)). But each call copies what it returned: first the engine creates an ordinary object, then its copy in the region. With a dozen objects this is invisible; with hundreds of thousands it is very visible.
+
+The `#{}` literal copies nothing, and after the first object of each shape it creates objects directly in machine code. Build a large data set with literals. If the data already exists as ordinary objects, copy it into the region with one `run`: one copy of the whole set is cheaper than a copy per object.
+
+<div class="versus">
+
+```js bad
+const items = region.run(() => []);
+for (const row of rows) {                 // 200,000 rows
+  items.push(region.run(() => ({ id: row.id, name: row.name,
+    tags: [...row.tags], price: row.price })));
+}
+```
+
+```js good
+{
+  using _ = region.enter();
+  const items = #[];
+  for (const row of rows) {               // no copy
+    items.push(#{ id: row.id, name: row.name,
+      tags: #[row.tags[0], row.tags[1]], price: row.price });
+  }
+}
+// The data already exists as ordinary objects: one copy of the whole set.
+const items = region.run(() => rows.map((row) => ({
+  id: row.id, name: row.name, tags: [...row.tags], price: row.price,
+})));
+```
+
+</div>
+
+<Chart id="p-build" />
+
+<Example file="36-create.js" timing collapsed />
+
+Literals are 2.2 times faster than one `run` and 5 times faster than `run` per object. One `run`, in turn, is 2.3 times faster than one at a time. Reading all three arrays afterwards is almost equally fast, about 1 ms per pass: objects with the same keys get the same shape, no matter how they were created. All four ways are on the ["Numbers"](/region-js/numbers/#create) page.
+
+Adding individual objects to an existing region as you go is fine; it costs microseconds per object. Of the two ways, the `#{}` literal is cheaper, because it does not copy.

@@ -1,0 +1,212 @@
+---
+title: "spawn: a function on a separate thread"
+description: "spawn(callback, ...args): a function on a separate thread, join and await, capturing variables, this and arguments, nested tasks, errors, freezing and borrows inside tasks."
+eyebrow: "Chapter 3"
+sidebar:
+  label: "spawn: tasks on threads"
+---
+import Example from '../../components/Example.astro';
+
+<div class="lead">
+
+Moving work to a worker usually takes a separate file or a string of code, a message handler, and a protocol for what to send and what to receive. `spawn` reduces this to one call: you pass a function and arguments and get the result. Data moves between threads in regions, without a copy, and if the task creates its result with the `'use region'` directive, the result lives in shared memory from the start and is never copied at all.
+
+</div>
+
+## Start and wait {/* #basic */}
+
+`spawn(callback, ...args)` runs `callback(...args)` on one of the workers in the pool and immediately returns a task handle. The main thread keeps going in the meantime. `handle.join()` waits for the result and blocks the thread.
+
+<Example file="10-spawn-basic.js" />
+
+Arguments and the result travel through regions. Plain data in the arguments is copied into a region and moves to the worker together with it. A region object passed as an argument is not copied: it travels the same way as a captured one (more on that [below](#captures)). The worker puts the result into its own region and sends it back. Once `join()` has returned a value, its owner is the main thread: the result can be read and changed, but, as with any region object, new fields cannot be added.
+
+A plain object returned by a task is copied into a region once, in the worker. This copy can be avoided: if the task enters its own region and creates the result with `#{}` literals or in code with `'use region'`, the objects live in the region from the start, and the region itself travels back. This is how the orders are built in the [example on the home page](/region-js/); for more on literals, see [Literals](/region-js/guide/#literals).
+
+## Waiting without blocking: `await` {/* #await */}
+
+`join()` blocks the thread, and in a browser you should not do that on the main thread (Biome in the [sandbox](/region-js/tooling/#biome) warns about it). A task handle can be awaited with `await`: it behaves like a promise, and the thread stays free in the meantime. `Promise.all` works too. The task function itself can also be `async`: the worker waits for its promise and only then answers.
+
+<Example file="11-spawn-await.js" />
+
+An error thrown on the thread comes back with the same type (a `RangeError` stays a `RangeError`) and the same message. A handle can be waited on any number of times and in any way: `join()`, `await`, `join()` again. The task finishes once, and every time you get the same result (the same object) or the same error.
+
+The example uses `setTimeout(resolve, 10)`. In d8, `setTimeout` does not wait for the given delay: callbacks run in turn as soon as the thread is free. In the examples the timer is there only to make the work asynchronous.
+
+### Modules: top-level `await` {/* #module */}
+
+A plain d8 script does not allow `await` outside a function, so the examples above wrap the code in `(async () => { ... })()`. With the `--module` flag the file runs as a module, and `await spawn(...)` can be written directly at the top level. Before exiting, d8 waits for tasks that are still running, even those nobody waits for.
+
+<Example file="26-module-await.js" />
+
+## Capturing variables {/* #captures */}
+
+A function in a worker does not see the main thread's variables: the worker has its own world. `spawn` itself looks at which outer names your function uses and sends them along with it. Arguments follow the same rules as captured variables.
+
+<Example file="12-spawn-captures.js" />
+
+What happens to a captured value depends on its kind:
+
+| What is captured or passed as an argument | What happens to it |
+| --- | --- |
+| Plain data: numbers, strings, simple objects, arrays, typed arrays | Copied, again for every task. Changes made on the thread do not come back. |
+| An object from a region | The region moves into the task and comes back to you after it, even if the task failed with an error. Typed arrays in it travel with the region, without a copy; your old views are [detached](/region-js/guide/#typed-detach) for the duration of the task. |
+| An object from a frozen region | Stays shared: the task and the main thread read it at the same time. |
+| Your function, arrow or regular (captures only) | Sent as source text and analyzed the same way, together with its own captures. |
+| Built-ins `Math`, `JSON`, `Array`, etc. | Not sent: the worker has its own. |
+
+:::tip[Analogy]
+You send an assistant on a business trip and pack a suitcase for them. `spawn` reads the instructions (the function's code) and packs everything mentioned there. Reference data goes as photocopies. Working folders (regions) go as originals, to be returned when the trip is over. The shared library (a frozen region) goes as just an address that everyone can visit. Pen and paper (`Math`, `JSON`) need not be packed: there are some on site.
+:::
+
+### Returning regions is like a loan {/* #returning-regions-is-like-a-loan */}
+
+A region captured by a task or passed to it as an argument behaves as if you lent it out for the duration of the task. While the task is running, the main thread will not touch it: it is in the worker. As soon as the task has finished (with an answer or an error), the region is back, and you can write to it again.
+
+:::note[If you know Rust]
+This is similar to `std::thread::scope`: what was borrowed comes back when the thread has finished. The similarity holds for nested tasks too; more on that [below](#nested).
+:::
+
+## this and arguments {/* #this */}
+
+An arrow function has no `this` or `arguments` of its own: it takes them from the outer function. `spawn` captures them as well. If `this` at the top level of a script is the global object, the worker gets its own global object.
+
+<Example file="13-spawn-this.js" />
+
+In the second case, `this` is the `store` object with the `count` method. Functions do not go into a region, so such a `this` cannot be sent. The fix is to move what you need into a variable: `const items = this.items`, and use `items` in the task.
+
+## Three things that are easy to forget {/* #gotchas */}
+
+<Example file="18-spawn-gotchas.js" />
+
+1. **Plain data is a copy**, both captured and passed as an argument. Changes made on the thread do not come back.
+2. **For changes to come back, the data must live in a region.** The region goes into the task and comes back after it, however you passed it: by capture or as an argument. The other way is to return the new data as the result.
+3. **The result lives in a region.** Its shape is fixed and a new field cannot be added, while arrays in it grow and shrink as usual. If you need a mutable object, make a copy with spread: `{ ...result }`. The copy is shallow: nested objects and arrays stay in the region.
+
+## What spawn rejects right away {/* #errors */}
+
+If a function cannot be sent, `spawn` throws an error at the call site, before the worker starts. Errors from the task, on the other hand, arrive at `join()` or `await` (and if nobody waits for the task, see the [next section](#unhandled)).
+
+<Example file="14-spawn-errors.js" />
+
+| What | Why it is not allowed |
+| --- | --- |
+| `eval` and `with` | With them, there is no way to tell in advance which names the function uses. |
+| Classes (declared inside or captured) | Not supported yet. Besides, a class instance cannot be put into a region (see [what cannot go into a region](/region-js/guide/#not-allowed)), and so it cannot be returned as a result either. |
+| Built-in functions, bound (`bind`) functions and object methods | Their source text cannot be run as a standalone function. The callback must be an arrow function or a function expression. |
+| A variable declared after the call | At the time of the call it has no value yet (temporal dead zone). |
+| One name with different values | Two captured functions see different values under the same name, while in the worker each name has one value. |
+| `this` or an argument with functions, a `Map`, class instances, etc. | These do not go into a region. |
+
+The callbacks themselves cannot use `super`, `new.target` or `import`: the function runs in the worker as a standalone piece of code, without its class or module.
+
+## Errors are not lost {/* #unhandled */}
+
+A task handle is like a promise, and it behaves the same way with errors. If a task failed and nobody waits for its handle with `join()` or `await`, the error does not disappear silently: d8 reports it as an unhandled promise rejection and exits with code 1.
+
+<Example file="24-spawn-unhandled.js" />
+
+The error's stack starts with the task's stack: the task code keeps the lines of its file, so you can see exactly where it failed. After it, following the `at spawn()` line, come the frames that started the task, as with async stacks in V8: the function that called `spawn` and its callers. Nested tasks have several such lines, one per `spawn`. Recording the call site costs about 150 ns per `spawn`: on empty tasks it is 1.15 µs instead of 1.3 per `spawn` and `await`. The d8 flag `--no-spawn-stack` turns it off; then `spawn` does not look at the caller at all. To keep the error from being unhandled, wait for the task and catch it: `try { await task } catch (e) { ... }`. Tasks nobody waits for are also caught by the linter, with the [`no-floating-spawn`](/region-js/tooling/#no-floating-spawn) rule. The simplest way is to start tasks in a [`spawn.scope` block](#scope): it waits for them itself.
+
+## Several tasks at once {/* #parallel */}
+
+Tasks run in a worker pool, which has four workers by default. If you first start all the tasks and then wait, up to four of them run in parallel, and the rest wait in the queue for a free worker.
+
+<Example file="15-spawn-parallel.js" timing />
+
+Four tasks at once run about 3.5 times faster than one after another. It does not come out to exactly 4 times, and startup is not the reason: it costs a few microseconds, while a task computes for more than a hundred milliseconds. We have not looked into the cause separately.
+
+All workers in the pool take tasks from a single queue, like tokio's worker threads: a task waits only while all workers are busy, and never sits behind a long task if there is a free worker nearby. A worker waiting in `await` is free too: while one of its tasks waits on a channel or a timer, it runs others. If there are more tasks than workers, the extra ones wait their turn: six tasks with a pool of four take almost twice as long as one. The pool can be made larger, for example for the 6 fast cores of this machine: `spawn.poolSize = 6`. There is no point in setting it higher than the number of cores: the threads would start sharing the same cores. `spawn` treats values below 1 and non-numbers as 1.
+
+If tasks are started in `map`, the callback must return the handle: `tasks.map((t) => spawn(work, t))`. Then `Promise.all` waits for the tasks themselves. If the callback calls `spawn` and returns something else, `Promise.all` gets that value right away and does not wait for the tasks. See [practice 10](/region-js/practices/#map) for more.
+
+## Tasks inside tasks {/* #nested */}
+
+A task can call `spawn` itself. Such tasks are nested in it, as in Rust's `std::thread::scope`: a task answers only after all the tasks it started have finished, even those it did not wait for. So once you have waited for the outer task, nothing is running inside it anymore.
+
+`spawn.idle()` returns a promise that resolves when all tasks started by the current thread have finished. This is convenient for tasks whose result is not needed. Each thread has its own pool: the main thread's `spawn.poolSize` does not affect tasks inside workers.
+
+<Example file="23-spawn-nested.js" />
+
+## Cancellation: `abort`, `timeout`, `JoinSet` {/* #abort */}
+
+`handle.abort()` cancels a task, and its `await` and `join()` end with an `AbortError`. A task that no worker has picked up yet simply does not start, and the regions it captured go back to whoever started it. In a running task, every `await` throws this error: waiting on a channel or a lock, including the blocking `recvSync` and `writeSync`, and waiting on a plain promise, even one that will never settle. If the promise rejected with its own error, that error arrives as is. This is how tokio and asyncio cancel a task at the next `await`. Its `catch` and `finally` run before the handle finishes, and the task's regions are still available in them, but the next `await` throws again. Code that waits for nothing, such as a long loop, cannot be stopped from outside: JS does not interrupt a function in the middle of its work. Such a loop checks `spawn.aborted()` itself.
+
+`handle.timeout(ms)` cancels a task with a `TimeoutError` if it has not finished within `ms` milliseconds. The timer runs on a separate thread, so it fires even if the main thread is blocked in `join()`. `JoinSet`, like the type of the same name in tokio, yields task results in order of completion: `await set.next()` or `for await` give objects in the `Promise.allSettled` format, and leaving a `using` block cancels the tasks that are still running.
+
+<Example file="39-spawn-abort.js" />
+
+A promise that the task code is waiting for is kept alive until it settles or the task finishes. So even a promise that nothing else references is not collected by the garbage collector together with the functions waiting on it: on cancellation their `catch` and `finally` will run. Functions that the task stopped waiting for before it finished are no longer kept.
+
+Cancellation in the middle of work can leave data half-changed. With the task's regions this is visible right away: whoever cancelled it gets an `AbortError` or a `TimeoutError`. It is worse with an `RwLock` shared by several tasks: the others do not know about the cancellation. So a writer cancelled while holding a guard poisons the lock, and the next one to take it gets a `PoisonError` (see [RwLock](/region-js/channels/#rwlock)):
+
+Cleanup after cancellation often needs to wait: take a lock to restore a counter, send a “goodbye” to a channel. In a cancelled task such an `await` throws immediately. That is what `spawn.shield(fn)` is for, like a shielded cancel scope in Trio: inside `fn` the task behaves as if it was not cancelled. Its `await`s and waits on channels and locks do not fail, `spawn.aborted()` returns `false`, and tasks it starts are not cancelled together with the task. The task handle finishes only after all its `shield`s, even if nobody waited for them. In a cancelled task, `await spawn.shield(...)` itself throws the cancellation error again after `fn` ends, or `fn`'s own error if `fn` failed. Outside a task, and in a task that was not cancelled, `shield` simply calls `fn`.
+
+Cleanup that hangs holds up the task as well. So `spawn.shield(fn, { timeout: 100 })` gives it a deadline in milliseconds: if `fn` has not finished by then, it is itself cancelled with a `TimeoutError`, like a task. Its `await`s and waits on channels and locks throw, the tasks it started are cancelled, a lock it holds for writing is poisoned, and `spawn.aborted()` returns `true` inside it. From that moment every `await` in it throws, so `await spawn.shield(...)` throws a `TimeoutError` even if `fn` caught the error. The deadline also applies in a task that was not cancelled, and does not affect other `shield`s of the same task.
+
+<Example file="46-cancel.js" />
+
+A task that caught an `AbortError` and returned a value still ends as cancelled. `RwLock` guards taken with `using` are released as usual in this case. Together with the task, the tasks it started are cancelled, and their tasks too, and it can no longer start new ones: they are cancelled immediately. A cancelled task, as before, finishes only after its nested tasks.
+
+## A block of tasks: `spawn.scope` {/* #scope */}
+
+When there are several tasks connected by channels, an error in one of them is easily lost. A pipeline stage fails, the others wait for its values, and after 50 ms everything ends with a `DeadlockError`, even though the real cause is an exception on another thread. The regions that the failed tasks took away also come back with a delay.
+
+`spawn.scope(async (s) => ...)` gathers tasks into a block, like `std::thread::scope` in Rust or a nursery in Trio:
+
+- the block's tasks are started with `s.spawn(...)`, like a plain `spawn`;
+- the block ends only when its function and all its tasks have finished, so after `await spawn.scope(...)` all the regions the tasks took away are back with you;
+- the first error, from the function or a task, cancels the block's other tasks and closes its `s.channel(n)` channels so that nobody waits for values from the failed ones; the block rejects with exactly that error;
+- the block catches the task handles itself, so there are no unhandled rejections. If the block did not fail, it returns what the function returned.
+
+`s.closeAfter(channel, handles)` closes a channel when the listed tasks have finished: this way an output shared by several senders is closed by the last of them, not the first. If the block has already closed the channel because of an error, `closeAfter` does nothing.
+
+<Example file="45-scope.js" />
+
+A task cancelled through its handle (`handle.abort()`) does not bring the block down: an `AbortError` counts as intentional cancellation. A `TimeoutError` from `handle.timeout(ms)` does bring it down. `s.fail(error)` brings the block down manually. Blocks nest: a `spawn.scope` inside a task cancels its tasks together with that task. `s` itself cannot be passed into a task; only the block's function starts tasks.
+
+Cancellation does not interrupt a long loop without `await`, and the block faithfully waits for it to end. Such code checks `spawn.aborted()`.
+
+## How it works and what it costs {/* #how */}
+
+On the first call, the engine parses the function's source text, finds its outer names and looks up their values in the closure. Captured functions are analyzed the same way, down the chain. From all this the task code is assembled: declarations of the captured variables, the texts of the functions, and the function itself. The analysis is cached for that place in the code, and next time all that is left is to read the current values of the variables. The data is packed into a region and goes through the task queue to a free worker in the pool, without `postMessage`. The worker receives the task code once, and after that its number is enough.
+
+Pool workers are long-lived: they are created on the first `spawn` calls and do not exit afterward, so subsequent tasks go to threads that are already running. When there are no tasks, the pool does not keep d8 from exiting. The pool size is `spawn.poolSize`, 4 by default. This is why starting a task costs a few microseconds rather than milliseconds, as it did when every `spawn` created a new worker:
+
+<Example file="19-spawn-overhead.js" timing />
+
+Tasks started all at once cost about the same, around 4 µs each. Why starting became this cheap in the first place is explained on the [How it works](/region-js/inside/#fast-spawn) page.
+
+For tasks of a millisecond or longer this overhead is barely noticeable. For small tasks it can be larger than the work itself. How to deal with that is shown on the [Practices](/region-js/practices/#batch) page.
+
+## Freezing in tasks {/* #frozen */}
+
+A task gets a frozen region as shared, without a move. The right to thaw stays with the calling thread ([more about the right](/region-js/guide/#thaw-right)), and the task cannot thaw such a region. In return, the task holds a borrow on it, like `borrow()`, so it can read it, including typed arrays ([a frozen region is not read without a borrow](/region-js/guide/#borrow)). The borrow is issued for regions the task captured or received as an argument. A frozen object that reached the task another way, for example through `recv()` from a channel, is read under its own borrow: `using b = Region.of(x).borrow()`. If the task stashes a typed array view somewhere, for example in `globalThis`, it will be empty after the task ends. A sealed region ([`Region.share`](/region-js/guide/#share)) needs no borrows: it is read however and from wherever you like, and its views do not go empty.
+
+<p id="frozen-ticket">The borrow is taken at the moment `spawn()` is called, not when the task starts, and is returned when its answer arrives. While the task waits for a free worker, the region already cannot be thawed: the task will read exactly what was there at the call, not what someone managed to write before it started. `region.readers` counts such a task as one reader both in the queue and while it runs. To rebuild the data after the tasks, wait for them or call `await region.thawWhenFree()`.</p>
+
+<Example file="47-thaw-wait.js" />
+
+If the task froze a region itself, the right to thaw comes back to the caller together with the result. This makes it convenient to build a lookup table in a task: build it, freeze it, return it, and then hand it out to other tasks without copies.
+
+<Example file="27-spawn-freeze.js" />
+
+### Borrows in tasks: `borrowWhile` {/* #borrow */}
+
+A plain `region.borrow()` taken in a task must not outlive it. When the task has finished, the remaining borrows are returned automatically, and the worker prints a `console.warn` warning. Otherwise the calling thread could not thaw the region: the borrow would stay in the worker forever.
+
+The problem is asynchronous work. If a task took a borrow and put off the read (`setTimeout`, `await` without returning the promise), the task has already finished, the borrow has been returned, and the deferred read gets an `OwnershipError`: a frozen region cannot be read without a borrow, and it may have been thawed as well. For such work there is `region.borrowWhile(fn)`: it holds the borrow until the promise returned by `fn` settles, and returns that promise. Return it from the task or wait for it with `await`; then the task finishes only after the work.
+
+<Example file="25-spawn-borrow.js" />
+
+In the first task, the borrow is returned when the task ends, `readers` is 0, and the main thread thaws the region without trouble. The deferred read in the worker then fails. In the second task, the borrow is held until the asynchronous work ends: inside you can see `readers: 2`; one borrow is held by the task itself, the other by `borrowWhile`. If you call `borrowWhile` with an async function and do not return the promise, you get the same error as with a bare borrow. The ESLint rule [`no-floating-borrow-while`](/region-js/tooling/#no-floating-borrow-while) catches this. A borrow declared with `using` is returned at the end of the block and causes no warning.
+
+:::caution[spawn limitations]
+- Classes are not supported; `super`, `new.target` and `import` do not work in the callback.
+- If a pool worker dies in the middle of a task, that task's `join()` and `await` end with the error `spawn() worker exited without a result`. This applies only to the tasks it had already picked up: the rest are run by other workers, and if all of them died, the next `spawn` sets up a new pool. Tasks have no timeout: a task that runs forever is waited for forever.
+- Like everything else, `spawn` exists only in d8 with the `--harmony-regions` flag.
+:::
+
+:::note[If you know Go]
+`spawn` is similar to `go f()` with a channel for the result. Except that starting a goroutine costs a fraction of a microsecond, while starting a `spawn` task costs about 3 microseconds: the arguments and the result are copied into a buffer and passed to another thread, and the worker runs the task through a JS wrapper. A comparison with tokio on a thousand tasks is on the [Numbers](/region-js/numbers/#tokio) page.
+:::

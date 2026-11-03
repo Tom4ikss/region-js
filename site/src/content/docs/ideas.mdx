@@ -1,0 +1,149 @@
+---
+title: "The idea: data has an owner"
+description: "Ownership, moving, freezing, and readers' borrows explained with everyday examples. What a data race is and why regions do not allow one."
+eyebrow: "Chapter 2"
+sidebar:
+  label: "The ownership idea"
+---
+import Example from '../../components/Example.astro';
+
+<div class="lead">
+
+Regions rest on one rule: at any moment, data has one owner, and only the owner can write to it. Everything else is a way to hand ownership to another thread or to let everyone look for a while.
+
+</div>
+
+## One owner {/* #one-owner */}
+
+:::tip[Analogy: apartment keys]
+An apartment has one set of keys. Whoever has the keys gets in: lives there, moves the furniture, changes things. If you gave the keys to a friend, you can no longer get in yourself. But nobody copied or relocated the apartment: the only thing that changed is who holds the keys.
+:::
+
+A **region** is that apartment. It holds a group of related objects: for example, a tree, its arrays, and its strings. One thread owns the region. Only that thread can read and modify these objects. Any other thread that tries to access them gets an `OwnershipError`.
+
+The owner is assigned to the whole region at once, not to each object separately. That is why handing over a region of a million objects is as cheap as one of three: you hand over one set of keys, not a million.
+
+## Moving {/* #moving */}
+
+Passing a region to another thread means handing over the keys. In code this is an ordinary `postMessage`, except that the region is listed in the transfer list: `worker.postMessage(msg, [region])`. This is how `ArrayBuffer` is passed today. [`spawn`](/region-js/spawn/) and [channels](/region-js/channels/) hand over the keys on their own: a region that a task captured, or that was sent into a channel, moves without a transfer list.
+
+<figure class="diagram">
+<svg viewBox="0 0 680 200" role="img" aria-labelledby="i1t">
+<title id="i1t">A region moves: the owner is the main thread, then the region is in transit and accessible to nobody, then the owner is the worker</title>
+<rect class="d-box-a" x="10" y="20" width="190" height="120" rx="12"/>
+<text class="d-t-b" x="105" y="48" text-anchor="middle">Main thread</text>
+<text class="d-t-a" x="105" y="70" text-anchor="middle">owner</text>
+<text class="d-t-s" x="105" y="98" text-anchor="middle">reads and writes</text>
+<text class="d-t-s" x="105" y="116" text-anchor="middle">tree.value = 5</text>
+<rect class="d-box-w" x="245" y="20" width="190" height="120" rx="12"/>
+<text class="d-t-b" x="340" y="48" text-anchor="middle">In transit</text>
+<text class="d-t-w" x="340" y="70" text-anchor="middle">nobody has the keys</text>
+<text class="d-t-s" x="340" y="98" text-anchor="middle">any access throws</text>
+<text class="d-t-s" x="340" y="116" text-anchor="middle">OwnershipError</text>
+<rect class="d-box-a" x="480" y="20" width="190" height="120" rx="12"/>
+<text class="d-t-b" x="575" y="48" text-anchor="middle">Worker</text>
+<text class="d-t-a" x="575" y="70" text-anchor="middle">new owner</text>
+<text class="d-t-s" x="575" y="98" text-anchor="middle">reads and writes</text>
+<text class="d-t-s" x="575" y="116" text-anchor="middle">the very same objects</text>
+<path class="d-line" d="M200,80 L238,80"/><path class="d-arrow" d="M236,75 L245,80 L236,85 z"/>
+<path class="d-line" d="M435,80 L473,80"/><path class="d-arrow" d="M471,75 L480,80 L471,85 z"/>
+<text class="d-t-m" x="222" y="170" text-anchor="middle">postMessage(msg, \[region\])</text>
+<text class="d-t-m" x="458" y="170" text-anchor="middle">the worker got the message</text>
+<path class="d-line" d="M222,155 L222,92"/>
+<path class="d-line" d="M458,155 L458,92"/>
+</svg>
+<figcaption>Between sending and receiving, the region belongs to nobody. The objects do not go anywhere: only the record of who the owner is changes.</figcaption>
+</figure>
+
+A move can also return the region: the worker sends it to the main thread the same way. The objects stay the very same ones: `===` returns `true`.
+
+## Freezing: everyone can look {/* #freezing-everyone-can-look */}
+
+Sometimes you do not want to hand data to one thread but to let many threads read it at once. For example, a lookup table, settings, or a large tree that several workers search in parallel.
+
+:::tip[Analogy: a museum exhibit]
+An exhibit stands in a hall. Any number of visitors can look at it at the same time, and nobody gets in anyone's way. Nobody may touch it, not even the museum itself, while it is on display. To fix something, the exhibit first has to be taken off display.
+:::
+
+`region.freeze()` puts the region on display. Now every thread that has taken a ticket (more on that below) can read it, and nobody can write to it, including the owner. Such a region can be sent to several workers with an ordinary `postMessage` without a transfer list: each one gets a reference to the same objects, with no copies.
+
+`region.thaw()` takes the exhibit down: the owner can write again, and the others lose access. Only the one who put the exhibit on display can take it down. This right can be passed to another thread; the data itself does not go anywhere.
+
+### A visitor's ticket {/* #a-visitor-s-ticket */}
+
+Entry to the hall is by ticket: `region.borrow()`. Without a ticket, a frozen region can be read only by the one who put it on display. Other threads take a ticket, or else they get an `OwnershipError`. `spawn` tasks get a ticket automatically for the regions they receive.
+
+While at least one ticket is out, the exhibit will not be taken down: `thaw()` throws an error, and `thawWhenFree()` waits for the last visitor. So the data does not change in the middle of your read. When you are done reading, hand the ticket back: `release()`. With the new `using` syntax it is returned automatically when the block exits.
+
+## All region states {/* #all-region-states */}
+
+<figure class="diagram">
+<svg viewBox="0 0 680 300" role="img" aria-labelledby="i2t">
+<title id="i2t">Region states: owned by thread A; in transit; owned by thread B; frozen with n readers</title>
+<rect class="d-box-a" x="20" y="30" width="170" height="78" rx="12"/>
+<text class="d-t-b" x="105" y="58" text-anchor="middle">Owned by thread A</text>
+<text class="d-t-s" x="105" y="80" text-anchor="middle">only A reads</text>
+<text class="d-t-s" x="105" y="96" text-anchor="middle">and writes</text>
+<rect class="d-box-w" x="255" y="30" width="170" height="78" rx="12"/>
+<text class="d-t-b" x="340" y="58" text-anchor="middle">In transit</text>
+<text class="d-t-s" x="340" y="80" text-anchor="middle">accessible</text>
+<text class="d-t-s" x="340" y="96" text-anchor="middle">to nobody</text>
+<rect class="d-box-a" x="490" y="30" width="170" height="78" rx="12"/>
+<text class="d-t-b" x="575" y="58" text-anchor="middle">Owned by thread B</text>
+<text class="d-t-s" x="575" y="80" text-anchor="middle">only B reads</text>
+<text class="d-t-s" x="575" y="96" text-anchor="middle">and writes</text>
+<rect class="d-box" x="20" y="190" width="300" height="84" rx="12"/>
+<text class="d-t-b" x="170" y="218" text-anchor="middle">Frozen, n readers</text>
+<text class="d-t-s" x="170" y="240" text-anchor="middle">everyone reads with a ticket,</text>
+<text class="d-t-s" x="170" y="256" text-anchor="middle">nobody writes</text>
+<path class="d-line" d="M190,62 L248,62"/><path class="d-arrow" d="M246,57 L255,62 L246,67 z"/>
+<text class="d-t-m" x="222" y="22" text-anchor="middle">postMessage(…, \[region\])</text>
+<path class="d-line" d="M425,62 L483,62"/><path class="d-arrow" d="M481,57 L490,62 L481,67 z"/>
+<text class="d-t-s" x="458" y="22" text-anchor="middle">received</text>
+<path class="d-line" d="M80,108 L80,183"/><path class="d-arrow" d="M75,181 L80,190 L85,181 z"/>
+<text class="d-t-m" x="72" y="152" text-anchor="end">freeze()</text>
+<path class="d-line" d="M130,190 L130,115"/><path class="d-arrow" d="M125,117 L130,108 L135,117 z"/>
+<text class="d-t-m" x="140" y="146">thaw()</text>
+<text class="d-t-s" x="140" y="163">only A, and only when n = 0</text>
+<path class="d-line" d="M320,214 C380,204 380,262 320,252"/><path class="d-arrow" d="M328,247 L320,252 L328,258 z"/>
+<text class="d-t-m" x="385" y="226">borrow(): n + 1</text>
+<text class="d-t-m" x="385" y="246">release(): n − 1</text>
+</svg>
+<figcaption>From the “owned by B” state, the region can likewise move on or back to A. Only the owner can freeze a region; only the one who froze it, or a thread it passed that right to, can thaw it.</figcaption>
+</figure>
+
+There is also a final state: “freed”. After `region.free()` the region is inaccessible to everyone, forever, and its memory is released without waiting for the references to disappear ([more](/region-js/guide/#free)).
+
+And one more: “sealed”. This is freezing forever, with no right to thaw. Since the region will never change again, it can be read without borrows, and the garbage collector frees it when no references are left. This is how `Arc<T>` works in Rust ([more](/region-js/guide/#share)).
+
+## Why this rules out data races {/* #why-this-rules-out-data-races */}
+
+A data race happens when three conditions hold at once:
+
+1. two threads access the same memory,
+2. they do it at the same time,
+3. and at least one of them writes.
+
+The region rules break this combination. Only the owner can write, and there is only one owner. When a region is frozen, many threads read, but nobody writes. When a region is in transit, it cannot even be read. The situation “one thread writes while another reads or writes at the same time” simply never arises.
+
+What matters is that the engine checks this on every field access; it is not an agreement like “let's not touch this object from the worker”. You cannot make a mistake and accidentally read someone else's data: instead of a silently corrupted value, you get an exception.
+
+Here is the same counter experiment as on the previous page, but with a region. Both workers hold a reference to one object and try to increment it a million times at the same time. Only worker A is made the owner.
+
+<Example file="17-no-race.js" />
+
+Not a single write by worker B went through, while all of the owner's writes did. The total is exactly one million, no matter how many times you run this example. There are no `Atomics` or locks in the code.
+
+### What if two threads want to write? {/* #what-if-two-threads-want-to-write */}
+
+Then the region is passed back and forth: one thread does its work and hands it over. Nobody waits: if a thread tries to write to a region it does not own, it gets an exception right away instead of joining a queue. This is a deliberate decision. There are no locks that wait at all, which means there are no deadlocks, where two threads wait for each other forever.
+
+## Why a region holds only data {/* #why-a-region-holds-only-data */}
+
+A region can hold ordinary objects, arrays, typed arrays, strings, numbers, `true`/`false`, `null`, and `undefined`. Functions and instances of `Map`, `Set`, `Date`, and the like do not go in. The reason is simple: a function remembers the variables of the thread where it was created (its closure), and built-in objects like `Map` have their own internal layout inside the engine and are tied to their thread. They cannot be handed to another thread by reference without a copy. Ordinary data can: all it needs is the graph of fields itself.
+
+Two exceptions were made on purpose. A function without a closure (`Region.fn`) is essentially its source text, and each thread compiles it itself. A `LocalRef` handle (`Region.localRef`) to an object of the creating thread moves together with the region, but the object itself stays at home, and the handle can be dereferenced only there, like `SendWrapper` in Rust ([more](/region-js/guide/#functions)).
+
+:::note[If you know Rust]
+Moving is like a move, and freezing with borrows is like a shared borrow `&T`. The difference is that here everything is checked at run time, not by the compiler: you see a mistake as an exception, not as a build error.
+:::

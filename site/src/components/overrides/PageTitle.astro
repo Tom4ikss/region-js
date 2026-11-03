@@ -1,0 +1,9 @@
+---
+// The page title with the chapter label above it ("Chapter 4").
+import Default from '@astrojs/starlight/components/PageTitle.astro';
+
+const { eyebrow } = Astro.locals.starlightRoute.entry.data;
+---
+
+{eyebrow && <p class="rj-eyebrow">{eyebrow}</p>}
+<Default />

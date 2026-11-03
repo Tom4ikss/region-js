@@ -1,0 +1,25 @@
+{
+  "name": "region-js-site",
+  "private": true,
+  "type": "module",
+  "description": "Website for region-js: landing page, documentation and benchmarks.",
+  "packageManager": "pnpm@8.15.9",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "ASTRO_TELEMETRY_DISABLED=1 astro dev",
+    "build": "ASTRO_TELEMETRY_DISABLED=1 astro build",
+    "preview": "ASTRO_TELEMETRY_DISABLED=1 astro preview"
+  },
+  "dependencies": {
+    "@astrojs/markdown-remark": "^7.3.0",
+    "@astrojs/mdx": "^8.1.1",
+    "@astrojs/starlight": "^0.42.6",
+    "@fontsource-variable/golos-text": "^5.3.0",
+    "@fontsource-variable/jetbrains-mono": "^5.3.0",
+    "@fontsource-variable/unbounded": "^5.3.0",
+    "astro": "~7.3.8",
+    "unist-util-visit": "^5.1.0"
+  }
+}

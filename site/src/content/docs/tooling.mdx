@@ -1,0 +1,378 @@
+---
+title: "Editor and linters"
+description: "The playground: types for Region and spawn, Biome and ESLint rules. What each layer catches, how to set up VS Code, and what shows up only at run time."
+eyebrow: "Chapter 7"
+sidebar:
+  label: "Editor and linters"
+---
+<div class="lead">
+
+d8 reports most mistakes with regions and `spawn` only when the code runs. Some of them can be caught earlier, right in the editor. That is what the `playground/` sandbox is for: types, Biome rules and a small ESLint plugin. This page covers what each of them catches and how to set them up.
+
+</div>
+
+## What catches what {/* #layers */}
+
+There are three layers of checks, and each can do different things. Types know what may be put into a region and what methods a region has. Biome finds patterns in the code, such as a `class` inside a `spawn` callback. ESLint can follow the order of execution: that a task has started and the region is touched before it ends, or that there is an `await` between a check and a use. Everything else shows up only at run time.
+
+| Mistake | Caught by |
+| --- | --- |
+| A function, a `Map`, a class instance, a `DataView` in `region.run` or in a `spawn` argument | types |
+| A typo in a region method, a new field on a region object | types |
+| `class`, `eval` or `with` in a `spawn` callback | Biome, error |
+| An object method as the callback: `spawn(Math.max)` | Biome, error |
+| `spawn(...).join()` | Biome, warning |
+| Nobody waits for a task handle, including in a `map` callback | ESLint, [`no-floating-spawn`](#no-floating-spawn), warning |
+| A captured region is touched while the task runs; tasks in a loop want the same region; a task writes to a frozen region | ESLint, [`no-region-use-while-spawned`](#no-region-use-while-spawned) |
+| A region is touched after `send` to a channel | ESLint, [`no-use-after-send`](#no-use-after-send) |
+| A task changes a plain object or a variable of the caller, but only its copy changes | ESLint, [`no-write-to-spawn-copy`](#no-write-to-spawn-copy) |
+| `await` while holding an `RwLock` guard or a `borrow()` | ESLint, [`no-await-holding-guard`](#no-await-holding-guard), warning |
+| A reference from `guard.value` outlives the guard | ESLint, [`no-guard-value-escape`](#no-guard-value-escape) |
+| `if (region.frozen)`, then `await`, then the region | ESLint, [`no-stale-region-check`](#no-stale-region-check), warning |
+| `borrowWhile(async ...)` whose promise nobody waits for | ESLint, [`no-floating-borrow-while`](#no-floating-borrow-while) |
+| A captured variable holding a `Map` or a function, a captured `this` with methods, a capture before initialization, a region owned by another thread, a bare `borrow()` in an async task, an array on top of a `SharedArrayBuffer` | only at run time |
+
+## Setup {/* #setup */}
+
+1. Open the whole `playground` folder in VS Code (File → Open Folder). Types and rules come from its settings; a single file opened on its own will not see them.
+2. Run `npm install`: it installs Biome, ESLint and TypeScript.
+3. Install the Biome and ESLint extensions. VS Code offers them itself, since they are listed in `.vscode/extensions.json`.
+4. Set the path to your d8 in `.vscode/settings.json`, setting `regions.d8Path`. Then Cmd+Shift+B runs the open file with `d8 --harmony-regions --module --expose-gc --max-serializer-memory=4000 file.js`.
+
+The same checks can be run from a terminal in the sandbox folder:
+
+```sh
+$ npm run typecheck      # types, tsc
+$ npm run lint           # Biome rules
+$ npm run lint:regions   # ESLint rules for the examples folder
+$ npm run test:rules     # tests of the ESLint rules themselves
+```
+
+`examples/mistakes.js` collects typical mistakes, and each of them should be highlighted. If nothing is highlighted, start with this file.
+
+:::note[If you changed the plugin]
+The ESLint server in VS Code loads the plugin once. After editing files in `eslint-plugin-regions/`, restart it: Command Palette → “ESLint: Restart ESLint Server”. Otherwise the editor will show stale messages or miss new ones.
+:::
+
+## Types {/* #types */}
+
+The file `types/regions.d.ts` describes `Region`, `spawn`, `Channel` and the d8 globals (`print`, `Worker` with its `getMessage`). The TypeScript built into VS Code reads it through `jsconfig.json`; there is nothing to install. This gives autocompletion and a check of what goes into a region: the result of `run` and the arguments of `spawn` must be data (primitives, plain objects, arrays, typed arrays, functions from `Region.fn`).
+
+<div class="versus">
+
+```js bad
+region.run(() => new Map());
+region.frezee();
+const state = region.run(() => ({ count: 0 }));
+state.total = 1;
+```
+
+</div>
+
+```text wrap
+error TS2322: Type 'Map<any, any>' is not assignable to type 'RegionData'.
+error TS2551: Property 'frezee' does not exist on type 'Region'. Did you mean 'freeze'?
+error TS2339: Property 'total' does not exist on type '{ count: number; }'.
+```
+
+The last error is the same fixed shape as in d8 ([reading and writing](/region-js/guide/#rules)): the type of the `run` result knows only the fields that existed at creation.
+
+What the types do not know. A typed array on top of a `SharedArrayBuffer` looks to them like any other, but d8 rejects it. The types do not check what can be sent to a channel: a `Channel` without a type parameter has values of type `any`.
+
+## Biome {/* #biome */}
+
+The Biome rules live in `rules/*.grit` and are enabled in `biome.json`. They look for patterns in the code and do not follow the order of execution. Four rules repeat checks that `spawn` makes when it is called, only earlier, in the editor.
+
+<div class="versus">
+
+```js bad
+spawn(() => { class Local {} return Local.name; });
+spawn(() => eval('1 + 1'));
+spawn(Math.max, 1, 2);
+const value = spawn(() => 42).join();
+```
+
+</div>
+
+```text wrap
+× spawn() callbacks cannot declare classes: their methods cannot be checked and sent to the worker. Use plain objects and functions.
+× spawn() callbacks cannot use eval or with: the variables they need cannot be known in advance.
+× spawn() needs an arrow function or a function expression; methods cannot be sent to a worker. Wrap it: spawn(() => ...).
+! join() blocks this thread until the task ends; on the main thread prefer `await spawn(...)`.
+```
+
+The `join()` rule fires only on the chain `spawn(...).join()` and does not know which thread the code runs on. In a worker or in a short d8 script `join()` is fine, and the warning can be ignored. Why `await` is better on the main thread is shown in [practice 7](/region-js/practices/#await).
+
+## ESLint {/* #eslint */}
+
+The `eslint-plugin-regions/` plugin is enabled in `eslint.config.mjs` through the `recommended` config. It has eight rules. ESLint sees variable scopes and the order of expressions, so it can say “the region moved into a task on line 3, and line 4 reads it”.
+
+### `regions/no-floating-spawn` {/* #no-floating-spawn */}
+
+Nobody waits for the task handle: no `await`, no `join()`, no return from the function. The result and the error of such a task are lost (d8 still reports the error, see [“Errors are not lost”](/region-js/spawn/#unhandled)). This is a warning, not an error.
+
+<div class="versus">
+
+```js bad
+spawn(() => 1);
+
+await Promise.all([0, 1].map((i) => {
+  spawn(() => i * 2);
+  return i;
+}));
+```
+
+</div>
+
+```text wrap
+warning  The result of spawn() is neither awaited nor joined, so its value and errors are lost. Use `await spawn(...)`, `.join()`, return the handle, e.g. to Promise.all(), or start the task with `s.spawn(...)` in `spawn.scope(async (s) => ...)`, which waits for it
+warning  This callback returns `i`, not the handle of this spawn(), so whoever waits for the callback (e.g. Promise.all over map()) does not wait for the task. Return the handle: `return spawn(...)`, or `return spawn(...).then(() => i)` to keep the value
+```
+
+The second case is a `map` callback that starts a task but returns a different value. `Promise.all` then waits for that value, not for the task ([practice 10](/region-js/practices/#map)). The rule also flags tasks started inside another task without `await`, even though the outer task waits for them ([tasks inside tasks](/region-js/spawn/#nested)).
+
+### `regions/no-region-use-while-spawned` {/* #no-region-use-while-spawned */}
+
+A region captured by a task or passed to it as an argument moves to the worker and comes back when the task ends. The rule treats `s.spawn()` tasks from [`spawn.scope`](/region-js/spawn/#scope) and `set.spawn()` tasks from `JoinSet` the same way. It finds three mistakes around this. In d8 all three would end in an `OwnershipError`.
+
+<div class="versus">
+
+```js bad
+// 1. The region is touched while the task runs.
+const cart = new Region().run(() => ({ total: 0 }));
+const task = spawn(() => { cart.total += 50; });
+print(cart.total);
+await task;
+
+// 2. Tasks in a loop want the same region.
+const counter = new Region().run(() => ({ n: 0 }));
+await Promise.all([0, 1, 2].map(() => spawn(() => counter.n++)));
+
+// 3. A task writes to a frozen region.
+const cfgRegion = new Region();
+const config = cfgRegion.run(() => ({ retries: 3 }));
+cfgRegion.freeze();
+await spawn(() => { config.retries = 5; });
+```
+
+</div>
+
+```text wrap
+error  'cart' was moved into the spawn() task on line 3 and comes back only when it finishes: using it here throws OwnershipError. Wait for the task first (await it or call join())
+error  This spawn() runs repeatedly and every task wants to move 'counter': only the first one gets it, the next ones throw OwnershipError. Await each task, freeze the region to share it read-only, or give every task its own data
+error  'config' is in a frozen region: tasks can read it but writing throws OwnershipError. Thaw it first, or let one task own it instead of freezing
+```
+
+The rule understands that a task has ended if it is waited for with `await` (including inside `Promise.all`) or `join()`, and that a frozen region does not move but becomes shared. It tracks freezing through calls to `freeze()` and `thaw()` before `spawn`.
+
+The analysis is simple and has limits. The rule treats as a region a variable created with `something.run(...)`. It does not track region objects obtained any other way (a task result, a field of another object, a `#{}` literal). With the `checkAllCaptures` option it checks all captured variables, but then it also complains about plain data that is simply copied. It does not flag accesses from callbacks that run later (timers, handlers): it cannot know whether the task will have ended by then.
+
+### `regions/no-use-after-send` {/* #no-use-after-send */}
+
+`send` hands the region to the receiver, the way `spawn` hands it to a task, except that it does not come back. The sender's next access fails with `OwnershipError`, and the rule shows it right away.
+
+<div class="versus">
+
+```js bad
+const batch = new Region().run(() => ({ rows: [], total: 0 }));
+await out.send(batch);
+print('sent', batch.rows.length);
+```
+
+</div>
+
+```text wrap
+error  'batch' was sent on line 2, and its region moved to the receiver: using it here throws OwnershipError. Use it before sending, or freeze the region to share it read-only
+```
+
+A region here means the same as in the rule above: a variable from `something.run(...)`. A channel does not hand over a frozen region but shares it, and the rule knows this. Only the first access after `send` in the same function is flagged. An access in another `if` branch or after the variable is reassigned does not count. The rule does not see a send in a loop of a variable declared outside the loop: the second iteration fails only in d8.
+
+### `regions/no-write-to-spawn-copy` {/* #no-write-to-spawn-copy */}
+
+Plain objects and arrays captured by a task or passed as arguments are copied to the worker. The task changes the copy, the caller does not see the changes, and there is no error: just a wrong result. The same goes for assigning to a captured variable.
+
+<div class="versus">
+
+```js bad
+const stats = { batches: 0 };
+await Promise.all([0, 1, 2].map(() => spawn((stats) => { stats.batches++; }, stats)));
+print(stats.batches); // 0
+
+let done = 0;
+await spawn(() => { done++; });
+```
+
+```js good
+const stats = new Region().run(() => ({ batches: 0 }));
+for (let i = 0; i < 3; i++) await spawn((stats) => { stats.batches++; }, stats);
+
+const done = await spawn(() => 1);
+```
+
+</div>
+
+```text wrap
+error  'stats' is plain data, so the spawn() task works on its own copy: this change never reaches the caller. Return the result from the task, or create the object in a region (region.run(() => ...)) so that the task gets the object itself
+error  'done' is a variable of the caller, and the spawn() task has its own copy of it: this assignment never reaches the caller. Return the value from the task instead
+```
+
+The rule treats as plain data a `const` or a never-reassigned `let` initialized with a `{}` or `[]` literal, outside functions with `'use region'`. A write is a field assignment, `++`, `delete`, `push` and other mutating array methods, `Object.assign`. If the task returns the object (`return stats`), the rule stays silent: the copy is changed in order to be returned. The rule does not check a parameter of the caller's function: where it comes from is unknown.
+
+### `regions/no-await-holding-guard` {/* #no-await-holding-guard */}
+
+An `RwLock` guard held across an `await` is held for the whole wait: writers, and for a write lock everyone else too, stand in the queue. In `traps/server.js` this makes 20 requests out of 20 hit the timeout. The same is true for a `borrow()`: while the wait lasts, `thaw()` fails and `thawWhenFree()` waits. This is like `await_holding_lock` in clippy.
+
+<div class="versus">
+
+```js bad
+async function handle(req, state) {
+  using g = await state.write();
+  g.value.inFlight++;
+  await sleep(req.cost); // work under the lock
+  g.value.served++;
+}
+```
+
+```js good
+async function handle(req, state) {
+  { using g = await state.write(); g.value.inFlight++; }
+  await sleep(req.cost);
+  using g = await state.write();
+  g.value.inFlight--;
+  g.value.served++;
+}
+```
+
+</div>
+
+```text wrap
+warning  'g' holds the lock across this await: every task that wants the lock waits until the awaited work is done. Do the waiting before taking the lock or after releasing it (end the block of the guard or call release())
+warning  'b' keeps the region borrowed across this await: until the awaited work is done thaw() fails and thawWhenFree() waits. Read what you need, release the borrow, then wait
+```
+
+The rule considers a guard declared with `using` alive until the end of the block, and a plain variable alive until its `release()`. It does not track a guard with neither `using` nor `release()`. It flags the first `await` under a guard, including `for await`, but not an `await` in callbacks that run later. Sometimes holding a lock across `await` is necessary, for example so that two steps run with no other writes between them, which is why this is a warning.
+
+### `regions/no-guard-value-escape` {/* #no-guard-value-escape */}
+
+`RwLock` objects are accessible only while a guard is held. A reference taken out of `guard.value` past the block fails after the block ends with `OwnershipError: region N is in an RwLock`. The error is clear, but it comes late, usually after an `await`.
+
+<div class="versus">
+
+```js bad
+async function price(lock) {
+  let prices;
+  {
+    using r = await lock.read();
+    prices = r.value.prices;
+  }
+  await sleep(5);
+  return prices.tea;
+}
+```
+
+```js good
+async function price(lock) {
+  let tea;
+  {
+    using r = await lock.read();
+    tea = r.value.prices.tea;
+  }
+  await sleep(5);
+  return tea;
+}
+```
+
+</div>
+
+```text wrap
+error  'prices' was taken from 'r.value' on line 5, and the guard is released before this use: it throws OwnershipError. Copy the data you need while the guard is held, or do this work under the guard
+```
+
+Without types the rule does not know whether a variable holds an object or a number, so it looks at how the variable is used after the guard. A field access, a method call, `for...of` and spread mean an object, and the rule flags it. A number or a string can safely be taken out, like `tea` above. `return r.value` is flagged too: the guard is released on return from the function, and the caller gets an object it cannot use.
+
+### `regions/no-stale-region-check` {/* #no-stale-region-check */}
+
+While an `await` waits, other tasks and other code on this thread run. In that time the region can be thawed, changed and frozen again. A `region.frozen` check made before the `await` says nothing after it, yet there will be no error: the code simply reads different data.
+
+<div class="versus">
+
+```js bad
+const reader = async () => {
+  if (region.frozen) {
+    await sleep(20);
+    using b = region.borrow();
+    return cfg.limit; // already 20, though it was 10 at the check
+  }
+};
+```
+
+```js good
+const reader = async () => {
+  await sleep(20);
+  if (region.frozen) {
+    using b = region.borrow();
+    return cfg.limit;
+  }
+};
+```
+
+</div>
+
+```text wrap
+warning  'region.frozen' was checked on line 2, but this await lets other code run first: the region can be thawed, changed or frozen again, a lock poisoned or cleared, before the code below uses it. Check again after the await
+```
+
+The rule looks at an `if` whose condition contains `frozen`, `frozenHere`, `sealed`, `readers` or `poisoned`, on a variable or on `Region.of(x)`. It flags the first `await` in the branch if the same variable, or an object created in it with `run`, is used after it. Checking again after the `await` removes the warning.
+
+### `regions/no-floating-borrow-while` {/* #no-floating-borrow-while */}
+
+`borrowWhile` with an async function holds the borrow until its promise settles. If that promise is neither returned from the task nor awaited, the task ends earlier, and the borrow is released in the middle of the work ([details](/region-js/spawn/#borrow)).
+
+<div class="versus">
+
+```js bad
+await spawn(() => {
+  Region.of(config).borrowWhile(async () => {
+    await null;
+    print(config.retries);
+  });
+});
+```
+
+```js good
+await spawn(() =>
+  Region.of(config).borrowWhile(async () => {
+    await null;
+    print(config.retries);
+  }));
+```
+
+</div>
+
+```text wrap
+error  borrowWhile() returns a promise here and nobody waits for it: a spawn() task ends without waiting, and its borrow is released before this work is done. Return or await it
+```
+
+The rule does not see a bare `borrow()` with a deferred read. d8 releases such a borrow itself at the end of the task and prints a warning in the worker.
+
+## `#{}` literals in the editor {/* #literals */}
+
+The `#{...}` and `#[...]` syntax ([region literals](/region-js/guide/#literals)) does not exist in JavaScript, so the tools do not know it on their own. For VS Code there is an extension in `playground/vscode-region-literals`. It highlights `#` as an operator and adds a TypeScript plugin that replaces a `#` before `{` and `[` with a space before the file is parsed. The length of the text does not change, so errors, hints and autocompletion stay in their places, and the literal gets the type of the same plain literal. It is installed with a symbolic link (the command is in the extension's README), after which you need “Developer: Reload Window”.
+
+One quirk comes from TypeScript itself: an empty `#[]` is an empty `[]` to it, that is `never[]`, and a `push` into it is highlighted as an error. Give it a type: `/** @type {Order[]} */ (#[])`.
+
+Biome and ESLint do not parse literals. In `playground/`, files with literals live in `experimental/`, which both skip and TypeScript checks. Run them in d8 with the `--harmony-regions` flag.
+
+The `'use region'` directive ([details](/region-js/guide/#use-region)) needs none of this: with it, plain `{}` and `[]` in a function are created as `#{}` and `#[]`, and for the tools it is ordinary JavaScript with a directive string.
+
+## What shows up only at run time {/* #runtime */}
+
+Some mistakes cannot be found without running the code:
+
+- a captured variable holding a `Map`, a function or a class instance: the types check the arguments of `spawn`, but not captures. This includes a captured `this` with methods ([this and arguments](/region-js/spawn/#this));
+- a variable captured before initialization, and one name with different values in different functions ([what spawn rejects right away](/region-js/spawn/#errors));
+- an access to a region currently owned by another thread, if the region did not come from `run` in the same function;
+- a read of a frozen region without a borrow, for example of an object that arrived through `postMessage` or a channel;
+- a bare `borrow()` that outlives the task, and a typed array view read before a move or a freeze.
+
+The linter only helps here. What protects against data races is the engine itself: it checks the owner on every access, whether a rule fired in the editor or not.

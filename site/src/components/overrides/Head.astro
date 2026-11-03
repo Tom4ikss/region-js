@@ -1,0 +1,15 @@
+---
+// Starlight's head, plus a flag for motion. Animations start from their final state; the
+// `rj-motion` class lets them reset to the start only when JavaScript runs and the reader has not
+// asked for reduced motion, so nothing flashes before the first paint.
+import Default from '@astrojs/starlight/components/Head.astro';
+---
+
+<Default />
+<script is:inline>
+	try {
+		if (!matchMedia('(prefers-reduced-motion: reduce)').matches && 'IntersectionObserver' in window) {
+			document.documentElement.classList.add('rj-motion');
+		}
+	} catch (e) {}
+</script>

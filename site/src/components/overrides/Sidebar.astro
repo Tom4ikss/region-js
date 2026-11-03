@@ -1,0 +1,10 @@
+---
+// Starlight's sidebar with the old site's note under the page list.
+import Default from '@astrojs/starlight/components/Sidebar.astro';
+import { ui } from '../../lib/i18n';
+
+const { t } = ui(Astro.url);
+---
+
+<Default />
+<p class="rj-side-note">{t.sideNote}</p>

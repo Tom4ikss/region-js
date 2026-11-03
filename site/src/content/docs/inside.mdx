@@ -1,0 +1,327 @@
+---
+title: "How it works inside V8"
+description: "A simplified look at how regions work inside V8: the shared heap, the owner table, inline caches, access in Maglev and Turbofan, how arrays grow, how data is copied into a region, #{} literals, passing by reference, why spawn is cheap, garbage collection."
+eyebrow: "Chapter 8"
+sidebar:
+  label: "How it works"
+---
+<div class="lead">
+
+This page is for readers curious about what happens under the hood. Everything is simplified, and where the first version cuts corners, the page says so plainly. You do not need any of this to use the API.
+
+</div>
+
+## Threads, isolates and the shared heap {/* #isolates */}
+
+In V8, every thread that runs JS is a separate **isolate**: its own engine instance with its own heap, its own global objects and its own garbage collector. The main thread is one isolate, and each worker is another. That is why one thread simply cannot see another thread's ordinary objects.
+
+But V8 already has a **shared heap**: a memory area that all isolates of the process can see. It is used, for example, for shared strings and shared WebAssembly GC objects. Regions live there too. The `--harmony-regions` flag turns on `--shared-heap` and `--shared-strings` by itself.
+
+<figure class="diagram">
+<svg viewBox="0 0 680 330" role="img" aria-labelledby="x1t">
+<title id="x1t">Two thread-local heaps, the shared heap with region objects, and the owner table</title>
+<rect class="d-box" x="10" y="10" width="200" height="104" rx="12"/>
+<text class="d-t-b" x="110" y="36" text-anchor="middle">Isolate 0</text>
+<text class="d-t-s" x="110" y="54" text-anchor="middle">main thread</text>
+<text class="d-t-s" x="110" y="80" text-anchor="middle">own heap: functions,</text>
+<text class="d-t-s" x="110" y="96" text-anchor="middle">Map, ordinary objects</text>
+<rect class="d-box" x="250" y="10" width="200" height="104" rx="12"/>
+<text class="d-t-b" x="350" y="36" text-anchor="middle">Isolate 1</text>
+<text class="d-t-s" x="350" y="54" text-anchor="middle">worker</text>
+<text class="d-t-s" x="350" y="80" text-anchor="middle">own heap: functions,</text>
+<text class="d-t-s" x="350" y="96" text-anchor="middle">Map, ordinary objects</text>
+<rect class="d-box-g" x="10" y="160" width="440" height="160" rx="12"/>
+<rect class="d-box-a" x="26" y="180" width="128" height="46" rx="8"/>
+<text class="d-t-m" x="90" y="200" text-anchor="middle">\{ value, left \}</text>
+<text class="d-t-s" x="90" y="217" text-anchor="middle">region 0</text>
+<rect class="d-box-a" x="166" y="180" width="128" height="46" rx="8"/>
+<text class="d-t-m" x="230" y="200" text-anchor="middle">\[1, 2, 3\]</text>
+<text class="d-t-s" x="230" y="217" text-anchor="middle">region 0</text>
+<rect class="d-box" x="306" y="180" width="128" height="46" rx="8"/>
+<text class="d-t-m" x="370" y="200" text-anchor="middle">\{ name, api \}</text>
+<text class="d-t-s" x="370" y="217" text-anchor="middle">region 1</text>
+<rect class="d-box" x="306" y="250" width="128" height="46" rx="8"/>
+<text class="d-t-m" x="370" y="270" text-anchor="middle">"hello"</text>
+<text class="d-t-s" x="370" y="287" text-anchor="middle">shared string</text>
+<text class="d-t-b" x="26" y="268">Shared heap (shared space)</text>
+<text class="d-t-s" x="26" y="290">each object stores its region number</text>
+<path class="d-line" d="M110,114 L92,172"/><path class="d-arrow" d="M87,170 L90,180 L97,172 z"/>
+<path class="d-line" d="M350,114 L237,174"/><path class="d-arrow" d="M233,170 L230,180 L239,177 z"/>
+<path class="d-line" d="M370,114 L370,172"/><path class="d-arrow" d="M365,171 L370,180 L375,171 z"/>
+<rect class="d-box" x="480" y="10" width="190" height="310" rx="12"/>
+<text class="d-t-b" x="575" y="36" text-anchor="middle">Region table</text>
+<text class="d-t-s" x="575" y="54" text-anchor="middle">one per process</text>
+<line class="d-line" x1="496" y1="70" x2="654" y2="70"/>
+<text class="d-t-s" x="500" y="90">#</text><text class="d-t-s" x="530" y="90">owner</text>
+<text class="d-t-m" x="500" y="118">0</text><text class="d-t" x="530" y="118">isolate 1</text>
+<text class="d-t-m" x="500" y="146">1</text><text class="d-t" x="530" y="146">frozen</text>
+<text class="d-t-s" x="530" y="163">readers: 3</text>
+<text class="d-t-m" x="500" y="191">2</text><text class="d-t" x="530" y="191">in transit</text>
+<text class="d-t-m" x="500" y="219">3</text><text class="d-t" x="530" y="219">isolate 0</text>
+<text class="d-t-m" x="500" y="247">…</text>
+<text class="d-t-s" x="575" y="280" text-anchor="middle">up to 1,048,576 live</text>
+<text class="d-t-s" x="575" y="298" text-anchor="middle">numbers are reused</text>
+</svg>
+<figcaption>Both threads can hold references to objects in the shared heap. Whether a thread may access an object is decided by the entry in the region table.</figcaption>
+</figure>
+
+## The owner table {/* #table */}
+
+The whole process has one region table with 2<sup>20</sup> (1,048,576) entries. This is the limit on regions alive at the same time: the numbers of freed regions are handed out again (how exactly is described [below](#gc)). An entry records the region's state: owned by a given isolate, in transit, frozen (and how many readers it has), or freed with `free()`. All changes are made with atomic CPU operations, so two threads cannot become owners at the same time.
+
+A move is two operations on one entry. The sender changes “owned by isolate 0” to “in transit”, and the receiver changes “in transit” to “owned by isolate 1”. The size of the region plays no part. That is why moving a tree of a million nodes costs the same as moving a tree of three.
+
+## The region object {/* #objects */}
+
+Region objects have their own internal type, `JS_REGION_OBJECT_TYPE`. The object stores the region number, an array of field names and an array of values. Objects with the same set of fields in the same order share one “shape” (in V8 this is called a map, or hidden class) and one names array. This matters below, for fast access.
+
+<p id="arrays">A region array has no names, only a values array and a separate length field, `array_length`. The values array can be longer: at its end it keeps spare room for new elements. When the spare room runs out, the engine allocates a new values array about one and a half times larger and moves the elements there, as an ordinary JS array does. So a series of `push` calls does not copy the array on every step, and the total time is linear. A write by index and a `push` of one element take the fast path: the store inline cache and the `push` builtin check ownership and the value and write straight into the values array, and when appending at the end, they also increase the length. A million `push` calls take about 25 ms, and a write by index about 20 ns per element. What needs real work goes to the runtime: a value that has to be copied into the region or rejected (an ordinary object, a string from the local heap, a floating-point number), a write more than one element past the end, growing the values array when the spare room runs out, a `push` of several elements, and also `pop`, `splice` and `length = n`. Reads go through the inline cache (described below): `arr.length` comes from the length field, and the index is checked against it, so the spare room is not visible from outside. The index is also checked against the size of the values array: this is a second guard against reading past the end of the array ([below](#frozen-arrays)).</p>
+
+<p id="proto-methods">Array and object methods such as `push`, `map` and `hasOwnProperty` come, for region objects, from the `Array.prototype` and `Object.prototype` of the current context: a region's shared map does not know its own prototype. The inline cache records such a method as a constant, just as for an ordinary array. It is protected by the validity cell of the prototype chain, so replacing `Array.prototype.push` invalidates the cache. The handler also requires an access check, which verifies the context and the right to read the region. So another thread's region, a freed region, and a frozen region without a borrow give the same error as before, and a call from another realm gets that realm's own `push`.</p>
+
+The type was chosen from V8's group of “special” objects. Builtins and the engine's generic paths do not read such objects directly; they take the slow path with checks. This closes hundreds of places that would otherwise read the object bypassing the ownership check. Property lookup (`LookupIterator`) got a separate state for region objects: it checks the owner and, if the field is missing, looks it up in the `Array.prototype` or `Object.prototype` of the reading thread.
+
+Builtins that enumerate keys their own way had to be taught separately: `Object.keys`, `for...in`, `JSON.stringify`, `Array.isArray`, `flat`, object spread. In the first version they saw a region object as empty. Now they take the keys from the region's names array and check the owner first, like an ordinary read.
+
+Methods that walk an array through an iterator or through the builtins' generic path (`for...of`, `Array.from`, array spread, `map`, `filter`) at first read every element through the runtime and were tens of times slower than an indexed `for` loop. How this was fixed is described [below](#methods).
+
+## The fast path: inline caches {/* #ic */}
+
+Every time code runs `obj.x`, V8 stores a hint at that site: “last time an object of such-and-such shape came in, and the field was at position 3.” This is the inline cache (IC). Next time the engine checks the shape and takes the value right away, without a lookup by name.
+
+The first version of regions took the slow path on every access, and reads were 26 times slower than ordinary ones. Then the IC was taught about region objects: the owner check is built right into the fast path.
+
+<figure class="diagram">
+<svg viewBox="0 0 680 230" role="img" aria-labelledby="x2t">
+<title id="x2t">The inline cache fast path for reading a field of a region object</title>
+<rect class="d-box" x="10" y="20" width="120" height="60" rx="10"/>
+<text class="d-t-m" x="70" y="47" text-anchor="middle">obj.x</text>
+<text class="d-t-s" x="70" y="66" text-anchor="middle">known shape</text>
+<rect class="d-box" x="165" y="20" width="150" height="60" rx="10"/>
+<text class="d-t" x="240" y="44" text-anchor="middle">read the region</text>
+<text class="d-t" x="240" y="62" text-anchor="middle">number from obj</text>
+<rect class="d-box" x="350" y="10" width="170" height="80" rx="10"/>
+<text class="d-t" x="435" y="38" text-anchor="middle">owner in the table</text>
+<text class="d-t" x="435" y="56" text-anchor="middle">is me? (for reads: or</text>
+<text class="d-t" x="435" y="74" text-anchor="middle">frozen and allowed)</text>
+<rect class="d-box-a" x="555" y="20" width="115" height="60" rx="10"/>
+<text class="d-t-b" x="612" y="44" text-anchor="middle">values\[3\]</text>
+<text class="d-t-s" x="612" y="64" text-anchor="middle">fast</text>
+<rect class="d-box-w" x="350" y="140" width="320" height="70" rx="10"/>
+<text class="d-t-b" x="510" y="166" text-anchor="middle">slow path in the runtime</text>
+<text class="d-t-s" x="510" y="188" text-anchor="middle">checked again there, then OwnershipError</text>
+<path class="d-line" d="M130,50 L158,50"/><path class="d-arrow" d="M156,45 L165,50 L156,55 z"/>
+<path class="d-line" d="M315,50 L343,50"/><path class="d-arrow" d="M341,45 L350,50 L341,55 z"/>
+<path class="d-line" d="M520,50 L548,50"/><path class="d-arrow" d="M546,45 L555,50 L546,55 z"/>
+<text class="d-t-a" x="537" y="40" text-anchor="middle">yes</text>
+<path class="d-line" d="M435,90 L435,133"/><path class="d-arrow" d="M430,131 L435,140 L440,131 z"/>
+<text class="d-t-w" x="445" y="118">no</text>
+</svg>
+<figcaption>The check is one load from the table and one comparison. For a frozen region, a read adds one more load, from the current thread's read table (<a href="#frozen">below</a>). A write is checked the same way, except that “frozen” no longer qualifies.</figcaption>
+</figure>
+
+After that, reading tree fields matched ordinary objects (19.4 ms versus 22.0). But V8's optimizing compilers (Maglev and Turbofan) did not yet inline region object access into their machine code and called the IC on every access. They read and write ordinary objects much more cheaply, so writes and indexed access in hot loops were 6–11 times slower than with ordinary objects. How this was fixed is described next.
+
+### Access in optimized code {/* #jit */}
+
+An optimizing compiler builds code from the feedback the IC collected while the function ran in the interpreter. For an ordinary object, the feedback “shape such-and-such, field at position 3” becomes a shape comparison and one memory load, with no call. Now Maglev and Turbofan do the same for region objects:
+
+- Field reads and writes. The compiler takes the field's position in the values array from the IC handler. A region shape means one set of keys in one order, so the field is at the same position in every object with that shape. If the IC saw several shapes, the access is inlined when the field is at the same position in all of them.
+- Indexed reads and writes of region array elements, including appending at the end (`a[a.length] = v`) while the values array has spare room. `push` appends the same way.
+
+The checks are the same as in the IC fast path, only now they are in the function's own machine code:
+
+- Owner: the region number from the object, the entry in the owner table, and a comparison with the address of the current isolate. Reading a frozen region adds one more load, from the current isolate's read table ([below](#frozen)).
+- Index: it is checked against both the array length and the size of the values array. The second bound is a guard against a race with `thaw()` ([below](#frozen-arrays)).
+- Value on write: a small integer, a value from the read-only part of the heap (`undefined`, `null`, `true`), a primitive that already lives in the shared heap, or an object of the same region.
+
+If the fast path cannot perform the access, the code calls the ordinary IC as before. This happens when the region is inaccessible (owned by another thread, frozen without a borrow, freed), when the value has to be copied into the shared heap (a string from the local heap, a floating-point number) or rejected (an ordinary object), when the field is a region typed array (it has to be read as a new local view), when the index is out of bounds, and when the element is looked up on the prototype. There is no deoptimization, so a function that often hits such cases is not recompiled over and over. `OwnershipError` and other exceptions are thrown by this generic path, and `try`/`catch` works as usual.
+
+In Turbofan these are four new operations: field load and store, element load and store. An operation runs the fast path and reports whether it succeeded. If not, control goes to a copy of the original access, which kept its IC feedback. In Maglev these are nodes with the same names; for now their fast path is generated only on arm64. On other CPUs Maglev still calls the IC, while Turbofan inlines access everywhere.
+
+Some sites see both ordinary objects and region objects: for example, one helper function used for both. Turbofan splits such a site with a shape comparison: region objects take the region path, and the rest take the ordinary specialization, as if regions did not exist. In the tree benchmark on the [Numbers](/region-js/numbers/#access) page, one `sum` function walks both trees. Before, this made even the ordinary tree go through the IC, at about 21.7 ms. Now the ordinary tree is summed in 6.3 ms, and the region tree in 7.3 instead of 23.6.
+
+In Turbofan, a loop step with a field read from a region object costs about 2.1 ns instead of 4.2 through an IC call, and about 1.5 ns with an ordinary object. A step with an indexed write costs about 2.2 ns instead of 5.4. Writing to every tree node is now 1.7 times slower than with ordinary objects rather than 6 times, and summing an array by index is 2.3 times slower rather than 11 times. The `--no-inline-region-access` flag turns inlining off, so the two variants can be compared on the same build. The test `tests/jit.js` checks that optimized code prints exactly the same output as a run with `--jitless`, where there are no compilers at all.
+
+In a loop, Turbofan checks the owner once rather than on every access. Only the thread itself can take away its own access to a region, and only through a runtime call: giving the region away, freezing, thawing, freeing, returning a borrow. So the check stays valid until the code reaches a call. The fallback IC call gets in the way: it sits next to every access, and after it the check would have to be repeated. So in a loop the access is built differently: it is preceded by a separate `CheckRegionAccess` operation, and if the fast path does not apply, the code deoptimizes instead of calling the IC. Then nothing inside a loop without calls can take access away, and the generic graph pass (`RedundancyElimination`) leaves one check per object: the first one, either before the loop or in the first iteration if the compiler peeled it off from the rest. A write check also stands in for a read check. A region object references only objects of its own region, and an object's region never changes, so a check on an array also covers its elements, and a check on the first node of a list covers every node the loop reaches through references. If the loop contains a call, the checks after it remain in every iteration.
+
+The deoptimization here does not loop. It marks the feedback of the loop (the backward jump in the bytecode) as forbidding this speculation, and the next compilation of the loop calls the IC in place again, as it does outside a loop. This happens if the array contains a floating-point number, a string has to be copied into the shared heap, or the index goes past the end of the array. The `--no-region-loop-speculation` flag turns this behavior off. The test `tests/loop-access.js` covers calls inside a loop that freeze the region, give it to another thread or return a borrow, as well as nested loops, `try` inside a loop, and every case that leads to deoptimization; the output must match `--jitless`. Summing a region array by index now takes a quarter less time. The remaining difference is the checks that stay on every access: shape, index and, for writes, the value.
+
+### Array methods {/* #methods */}
+
+Array methods do not read by index themselves. `map`, `filter`, `forEach`, `reduce`, `some`, `every`, `find`, `findLast`, `at`, `slice` and similar methods call the generic builtins `HasProperty` (“is the index there”) and `GetProperty` (“read it”) for every element. A region object is “special”, so both used to go to the runtime for every element. Now they have a fast path for a region array: if the thread can read the region (owns it, or holds a borrow of the frozen region), the value is taken straight from the values array. Region arrays have no holes, so any index below the length is present.
+
+The same fast paths exist in three more places:
+
+- The array iterator: `for...of`, `entries()`, `keys()`, `values()`.
+- The copy in `Array.from(arr)` and `[...arr]`: if iteration has not been overridden (the array iterator protector is intact), this is a single loop over the values array into a new ordinary array, without an iterator.
+- `includes` and `indexOf`: a direct loop over the values array in the runtime, with a separate, tighter loop for small integers (Smi).
+
+An element that is itself a typed array is still read through the generic path: each read creates a new local view. An overridden `Array.prototype[Symbol.iterator]` is respected. The access rules have not changed: a freed region and a region that moved to another thread give `OwnershipError`, and a frozen one can be read only with a borrow. The test `tests/array-methods.js` compares the result of every method with an ordinary array holding the same values.
+
+On 100,000 numbers, `map` on a region array now takes 1.46 ms instead of 21.5, `for...of` 1.36 instead of 15.4, spread 0.28 instead of 17.0, and `indexOf` 0.09 instead of 4.03. This is close to an ordinary array (see the table on the [Numbers](/region-js/numbers/#methods) page).
+
+## The write check {/* #writes */}
+
+Each thread's garbage collector tracks only its own heap. If an object in the shared heap referenced a thread's local object, that collector could delete or move it, and the reference would be left dangling. So every write to a region object checks the value:
+
+- small integers, objects of the same region, shared primitives, and strings and numbers that already live in this region's memory are written right away, on the fast path;
+- strings and floating-point numbers created in the thread or belonging to another region are copied into this region's memory and then written;
+- a typed array is copied into the region ([details](/region-js/guide/#typed));
+- any other object is an error, “cannot reference objects outside its region”, with a hint to create it in the region with `run()` or a `#{}` literal.
+
+## Why data is copied into a region {/* #run */}
+
+Objects that ordinary code creates inside `region.run(fn)` appear in the thread's local heap. V8's compilers allocate new objects right in their machine code, in the “young generation” of that heap, and other optimizations rely on this. Redirecting ordinary literals into a region is not possible without rewriting the compilers.
+
+So `fn` runs as usual, and on exit the graph reachable from the result is copied into the shared heap. Cycles and shared parts are preserved (the engine remembers which objects have already been copied), strings and floating-point numbers move into the region's memory, and objects that already live in this region stay as they are. This costs O(n) once, at creation, while a move stays O(1).
+
+### How copying got faster {/* #fast-copy */}
+
+Before, the copy read every field the way ordinary code reads a property by name: first the object's list of keys, then a lookup for each key. Now, for an object in fast mode (all fields are described by its map, with no property dictionary, getters or indexed elements), fields are read straight from the map's descriptors: the engine knows where each field is. It works out once which region shape fits objects with this map and then takes the answer from a cache, so thousands of objects of the same kind do not compare keys again. A dense array is read straight from its elements store, without a lookup per index. Everything else is copied the old way.
+
+On 200,000 objects `{ id, name, tags, price }` the copy got cheaper from about 269 to 165 ms, and on a tree of a million nodes from about 1,160 to 598 ms ([measurements](/region-js/numbers/#create)). This is still several times more expensive than creating the same ordinary objects: every object and every string is allocated anew in the shared heap.
+
+The engine keeps region shapes in one cache per thread: by the set of keys it finds the names array and the map. Both `run()` and `#{}` literals use this cache. So objects with the same keys created by one thread share one map, no matter how or in which region they were created, and the inline cache sees one shape when reading their fields. Before, each copy call had its own cache, and 200,000 objects copied into a region one at a time got 200,000 different shapes: a pass over them took about 68 ms instead of 2–3.
+
+### The `#{}` and `#[]` literals {/* #literals */}
+
+The `#{...}` and `#[...]` literals are a different path, with no copy. There is no intermediate object in the thread's heap: the object is created directly in the shared heap, in the current region. The values inside are checked the same way as on a field write, except that an ordinary object or array inside is an immediate error rather than a copy: nested objects are written as `#{}`, and arrays as `#[]`.
+
+A literal is a call to a builtin that the bytecode takes from the context, so the interpreter, Sparkplug, Maglev and Turbofan all call it the same way. The builtin is written in CodeStubAssembler and in the common case does not need the runtime:
+
+- It reads the current region from a field of the isolate and checks the owner against the same table the inline cache uses.
+- It finds the shape of a `#{}` in a cache on the context: by a hash of the keys, and then it compares the keys themselves by pointer. A literal's keys live in the constant pool and are always the same strings.
+- The object and its values array are allocated as one chunk directly in the shared heap allocation buffer, which each thread has its own copy of. This is the same technique used to allocate ordinary objects in the thread's heap: bump a pointer and check the limit. V8 keeps the main thread's shared heap buffer inside the allocator; here it is moved into the isolate so that machine code can reach it. Once a region has accumulated 64 KB, allocation goes to a second buffer, on the region's own pages ([below](#gc)). When a buffer runs out, the runtime hands out a new one.
+- Values that can be stored as they are (small integers, shared strings, and objects, strings and numbers of the same region) are written right away. The builtin copies a short string or a floating-point number into the region's memory itself. Anything else, such as a typed array, it hands to the runtime one value at a time: the runtime copies it or rejects it with the same error as before.
+- A write barrier is needed only during marking: both the object and everything it holds live in the shared heap or in the read-only heap. Along the way, V8 got a fix for a needless call to the barrier's C function when a shared object points to a shared object.
+
+The first literal of each shape and everything unusual (no current region, the region belongs to another thread or is frozen, more than 32 values) take the old path through C++, which also puts the shape in the cache. The literal itself costs about 15–20 ns: a `#[]` of two numbers is almost as cheap as an ordinary literal. In a hot loop, shared heap collections add to that. In our V8 build with checks enabled they are noticeably more expensive than in a regular build, so measurements of the same loop range from 20 to 60 ns per literal.
+
+## Passing through postMessage {/* #postmessage */}
+
+Normally `postMessage` serializes an object into bytes. For region objects the serializer writes a reference instead of the contents, using the same mechanism V8 already has for shared WebAssembly objects. The receiver sees the same pointer to the same object. That is why, in the ping-pong example, the object is still `===` to the original after a thousand round trips.
+
+<figure class="diagram">
+<svg viewBox="0 0 680 200" role="img" aria-labelledby="x3t">
+<title id="x3t">A region move: the sender writes a reference and gives up the region, the receiver takes it</title>
+<rect class="d-box" x="10" y="20" width="200" height="160" rx="12"/>
+<text class="d-t-b" x="110" y="46" text-anchor="middle">Sender</text>
+<text class="d-t-s" x="110" y="76" text-anchor="middle">1. write a reference to</text>
+<text class="d-t-s" x="110" y="93" text-anchor="middle">the object into the message</text>
+<text class="d-t-s" x="110" y="123" text-anchor="middle">2. table entry:</text>
+<text class="d-t-m" x="110" y="141" text-anchor="middle">isolate 0 → in transit</text>
+<rect class="d-box-a" x="245" y="60" width="190" height="80" rx="12"/>
+<text class="d-t-b" x="340" y="88" text-anchor="middle">Message</text>
+<text class="d-t-s" x="340" y="108" text-anchor="middle">a few bytes:</text>
+<text class="d-t-s" x="340" y="124" text-anchor="middle">a pointer, not the data</text>
+<rect class="d-box" x="470" y="20" width="200" height="160" rx="12"/>
+<text class="d-t-b" x="570" y="46" text-anchor="middle">Receiver</text>
+<text class="d-t-s" x="570" y="76" text-anchor="middle">3. table entry:</text>
+<text class="d-t-m" x="570" y="94" text-anchor="middle">in transit → isolate 1</text>
+<text class="d-t-s" x="570" y="123" text-anchor="middle">4. read the reference:</text>
+<text class="d-t-s" x="570" y="140" text-anchor="middle">the same object</text>
+<path class="d-line" d="M210,100 L238,100"/><path class="d-arrow" d="M236,95 L245,100 L236,105 z"/>
+<path class="d-line" d="M435,100 L463,100"/><path class="d-arrow" d="M461,95 L470,100 L461,105 z"/>
+</svg>
+<figcaption>However many objects the region holds, only references go into the message, and only one entry changes in the table.</figcaption>
+</figure>
+
+## Why spawn became cheap {/* #fast-spawn */}
+
+Not long ago `spawn(...).join()` cost about 40 microseconds; now it costs about 3.5. A message to a worker and its reply got cheaper from about 10 to 3 microseconds, and a round trip through two channels from 10 to 5. There were five changes.
+
+### A thread does not go to sleep right away {/* #a-thread-does-not-go-to-sleep-right-away */}
+
+When a thread has nothing to do, it goes to sleep, and the operating system takes it off the core. Waking it costs about 5 microseconds: the system has to receive the signal, find a core for the thread and start it again. When threads exchange messages, they sleep and wake on every step, and these microseconds add up.
+
+Now a thread with nothing to do first spins in a loop for up to 50 microseconds, checking whether work has arrived, and only then goes to sleep. If work arrives quickly, nobody has to be woken. This is how waiting works for pool workers and `await` (in d8's shared task loop), for `getMessage`, which `join()` is built on, and for blocking channel operations.
+
+The spin time is set by the d8 flag `--spin-wait-us`: 50 by default, and `0` turns this waiting off. The cost is a CPU core kept busy for nothing for up to 50 microseconds every time a thread runs out of work. A program that has nothing at all to do does not occupy the CPU: after 50 microseconds all its threads are asleep. With `--spin-wait-us=0` the `spawn` example shows about 12 µs per task instead of 3.5, and a message to a worker and its reply about 11 µs instead of 3.
+
+Along the way a bug turned up. A thread that had stopped spinning and was about to sleep could miss a “work available” signal that arrived at exactly that moment, and sleep forever with a task in the queue. This is the classic lost wake-up bug. V8's own test suite caught it.
+
+### The function is analyzed once {/* #the-function-is-analyzed-once */}
+
+Before running a task, `spawn` analyzes the function: which outer variables it uses, and whether it contains classes or `eval`. Before, this was done on every call: the function was compiled again and its bytecode was scanned in full, which took about 6 microseconds. Now the result is cached by the function's position in the source text. Later calls only have to read the current values of the variables, which takes about 0.9 microseconds.
+
+### Task code travels once {/* #task-code-travels-once */}
+
+Task code lives in the pool's port: the main thread puts it there once for each kind of task, and the task itself carries only a number. A worker that takes a task of an unfamiliar kind fetches the code from the port and compiles it; later tasks of that kind find the code already compiled.
+
+### Messages got simpler {/* #messages-got-simpler */}
+
+First, messages between the main thread and the workers became flat arrays instead of nested objects: the serializer handles these much faster. Numbers, strings and other primitives travel without a region. The promise for a task handle is created only if someone waits on it with `await`.
+
+A bug turned up at this step too: integers in task arguments started arriving in the worker as floating-point numbers, and arithmetic with them in the task ran twice as slowly. It was noticed in the benchmark from [practice 3](/region-js/practices/#batch) and fixed.
+
+### A dedicated queue instead of postMessage {/* #a-dedicated-queue-instead-of-postmessage */}
+
+Even a simple message through `postMessage` was expensive. The time went into the serializer, which turns a value into bytes and back, and into d8's message machinery around it. So `spawn` tasks and replies now go through a separate queue, the task port. A message in it is an array of numbers, strings, region objects and channels. It is copied into a C++ buffer without the serializer, and regions from the transfer list move along with it.
+
+The pool has one queue, and all workers serve it, like the global task queue in tokio. A new task wakes a worker that is not currently draining the queue; a worker that has finished the synchronous part of a task takes the next one itself. So a task waits only while all workers are busy, rather than sitting behind a neighbor's long task. A worker whose tasks are waiting in `await` counts as free and takes new ones: this way one thread runs many async tasks. The port remembers which tasks each worker has taken, and if a worker dies, it replies with an error only for those tasks.
+
+A worker takes tasks from the queue in its event loop. Replies are awaited on the same queue: `join()` waits by blocking the thread (spinning first, then sleeping), and `await` receives the reply in the event loop. Channels use the same path for numbers, strings, region objects and channels. Ordinary objects are still copied by the serializer, as with structured clone.
+
+While a message is in transit, the reference to a region object is held only by the C++ buffer, which the garbage collector does not know about, so it could delete or move the object. So for the duration of the trip the object is held by a persistent handle owned by the shared heap isolate. V8 keeps shared objects alive in ordinary messages the same way. A separate stress test, `tests/port-stress.js`, checks this: many tasks with region objects in transit under GC pressure, including with the `--stress-compaction` flag, which makes the collector move objects on every collection.
+
+### Why this is still not Go {/* #why-this-is-still-not-go */}
+
+A goroutine in Go starts in well under a microsecond. Here starting a task costs about 3 microseconds, and a round trip through a channel about 3.5. A channel operation takes the shared channel mutex once: a value caught while spinning is taken by the thread without the mutex, because the sending side itself deregisters the waiter, and waiters are linked into a list through their own fields and allocate nothing. The remaining time goes into copying messages back and forth, into the JS wrapper that runs the task in the worker, and, for channels, into the promise and the `{ value, done }` result. What can be done about this next is described in the [plans](/region-js/limits/#roadmap).
+
+## Freezing from the inside {/* #frozen */}
+
+A frozen region has a special “frozen” mark in the table. Nobody is allowed to write to it. A `borrow()` atomically increments the reader count, and `thaw()` succeeds only if the count is zero and the caller is the one who froze the region.
+
+Not everyone is allowed to read. Each isolate has its own read table, also indexed by region number, that says whether this thread may read the frozen region. The mark in it is set on `freeze()`, on `borrow()`, and when the thread receives the right to thaw. It is cleared on `thaw()`, when the thread returns its last borrow, passes the right to thaw on, or frees the region with `free()`. When a region number is released, the marks are erased in all tables at once, at a global safepoint where all threads are stopped. If the region is frozen, the inline cache does one extra load, from this table. The parallel read benchmark did not change after this: 147 ms on one thread and 25.5 ms on eight workers, ×5.8.
+
+The table entry also records which isolate froze the region. Only that isolate can thaw it. If you put a frozen region in a transfer list, the mark simply changes to the receiver: the data stays shared, and only the right to thaw moves.
+
+Since every reader other than the one who froze the region holds a borrow, and `thaw()` does not succeed until the borrows are returned, thawing never happens in the middle of a read. So a reader never sees stale values. Before, a thread could read a frozen region without a borrow and notice the thaw late; now there is no such reader.
+
+<p id="frozen-arrays">Arrays that grow have one more guard. After thawing, the owner can replace an array's values storage with a longer one. So the inline cache and the runtime check the index against two bounds: the array length and the size of the storage they actually read. This is a safety margin in case of a bug in borrow accounting: even then a reader would see at most a stale value, never memory past the end of the array. The test `tests/thaw-race.js` runs three readers over a frozen array while the owner thaws it, appends to it with `push` and freezes it again. The owner spends a lot of time waiting there: `thaw()` succeeds only once the readers have returned their borrows.</p>
+
+## Typed arrays {/* #typed */}
+
+A typed array is not stored in a region as a region object. The region holds a reference to a memory block (in V8 this is a `BackingStore`) and knows the element type, offset and length. When the owner reads the field, the engine creates an ordinary local typed array over this block. From then on the compilers treat it like any other typed array, without an owner check on every element. That is why it is fast.
+
+Since there is no check on every element, protection comes from elsewhere. When a region moves or is frozen, the engine detaches all of the owner's views, the way it detaches an `ArrayBuffer` after a transfer. Readers of a frozen region get views over an immutable buffer, and the engine does not allow writes to it. A `SharedArrayBuffer` cannot be put in a region: all threads already see its memory, so it cannot have a single owner. A thread cannot detach a view in another reader's heap, so each thread detaches its own views itself: when it returns its last borrow of the region, thaws it, or gives away the right to thaw. The engine tracks each thread's borrow count and hands out views of a frozen region only to a thread that holds a borrow or the right to thaw. And `thaw()` succeeds only when no borrows are outstanding, so by the time a region is thawed, readers have no live views left.
+
+## Garbage collection {/* #gc */}
+
+V8 collects the shared heap by stopping all threads at once. Regions change nothing here, but they do not help either: the more data in regions, the longer the pause for every thread.
+
+Region objects are ordinary shared heap objects, and the collector deletes them when nothing references them. A region number is released when two conditions hold:
+
+- no objects of this region remain in the heap. This is checked at the end of a shared heap collection, when all threads are stopped, so no thread can be left with a pointer the collector does not know about;
+- no thread has a live JS `Region` object for this number.
+
+A region that has accumulated 64 KB gets its own shared heap pages: they hold nothing but its objects, and the region number is written in the page header. The first 64 KB stay on common pages, so that a small region does not take up a whole 256 KB page. Each thread allocates on region pages through its own buffer. When a thread switches to another region or gives this one away, the rest of the buffer is saved with the region, and the next owner continues from the same place. A region page is not moved during heap compaction and is released as a whole as soon as no live objects remain on it. This does not change collection yet. It is the first step toward letting the owner collect a region without stopping the other threads ([plan](https://github.com/Tom4ikss/region-js/blob/main/research/region-gc.md)).
+
+The second step: a region knows which threads may hold pointers to its objects. A thread is added to this list when it creates the region, takes it, reads the frozen region, or receives its objects in a message. A thread leaves the list only through its own full garbage collection: that collection already walks all of the thread's pointers into the shared heap and sees which regions it no longer points to. A move does not remove a thread from the list: it still has pointers to the objects, even though it cannot use them. The owner and the thread that froze the region also stay in the list, even without pointers.
+
+The third step: if the list contains only the owner and the owner's collection found no pointers to the region, the owner collects the region itself, without stopping the other threads. The region's pages go to a common pool, and new regions take pages from there. To find all objects of a region, a small region and the first 64 KB of a large one are not allocated intermixed with other objects but in their own chunks of common pages, from 1 to 32 KB. The region keeps a list of objects that the shared collection found alive on common pages. During collection, the chunks and such objects go straight back to the common free list.
+
+The owner also collects garbage inside a live region itself. If the list contains only the owner, and since last time the region has allocated at least as much as was live then, and at least 1 MB, the owner marks the region's objects starting from its own pointers and sweeps the region's pages. Dead objects become free memory of this region, and the region allocates from it before taking new pages. Empty pages go to the pool. This is done by a minor collection that the thread requests for itself once it has taken 16 MB of memory for regions. In our test, a table of 2,000 rows rewritten 150 times stays at 10 pages instead of 217. On the main thread there is no gain: in V8 any collection on the main thread stops all threads.
+
+A region in transit, inside a message not yet read, also counts as in use. Each number has a generation counter: if the number has already been given to a new region, a stale message with the old generation notices this and does not get someone else's region.
+
+The fourth step: if other threads in the list prevent the region from being collected, the owner asks them to check whether they still have pointers to it. The request arrives as a task, and the thread runs it between tasks, when it returns to its message loop, without interrupting running code. A thread with no pointers leaves the list, and the last one to leave wakes the owner if the owner is waiting on this region. Other threads are not disturbed for regions smaller than 1 MB. This way a region passed from worker to worker through the main thread is collected by its new owner, even though the previous holders did not call anything for it.
+
+<p id="strings">The fifth step: strings and floating-point numbers that a region stores live in its memory, on its pages or in its chunks, and die with it. Before, they were copied to common pages, and even a region collected by its owner left behind strings that waited for a shared collection. A write copies a string from another region once more, so that one region does not point into another. Shape keys stay shared: shapes outlive regions. A string has no region number, so the region is taken from the page, and for chunks on common pages from an address index. A live string keeps its region alive the same way an object of that region does. With this step, our test showed no pauses at all with `'use region'`, down from 200–380 ms over 3 seconds. The cost is slightly worse locality: strings sit between objects, and a pass over a field of each of thousands of objects is about 10% slower.</p>
+
+The rest is done by the shared collection, which stops all threads: regions that several threads still look at, small live regions without their own pages, and strings that no region stores. It frees objects that became unreachable inside such a region the same way as any other shared heap objects. In our test a field was replaced 3,200 times in a row with a new array of 50,000 numbers, and process memory leveled off at ≈190 MB, while when the old arrays were kept alive it grew by about 1 MB per step. If no shared heap collection happens, region numbers are not released either. For example, a million empty `new Region()` calls in a row, without a single object inside, hit “Too many regions”, because empty regions put no pressure on the heap and do not trigger a collection. A million regions with data inside work fine.
+
+`region.free()` does not wait for references to go away. It immediately moves the table entry to the “freed” state, and the owner check closes the region to all threads. Typed array memory is released at the moment of the call, and region objects are emptied at the next shared heap collection, even if they are still referenced. After that, the region number is released by the same two rules ([how to use free](/region-js/guide/#free)).
+
+## Where a hole could be {/* #safety */}
+
+The main risk of this design is a missed fast path. If some builtin reads a region object bypassing the check, the result is exactly the data race the design is meant to prevent. So confidence in this prototype rests on three things: the special object type (it closes most paths by itself), a full run of the V8 test suite, and a homemade fuzzer that hits regions from several threads under GC pressure. The results are on the [Numbers](/region-js/numbers/#safety) page. This is not proof that there are no holes, only evidence that none have been found so far.
+
+## Size of the changes {/* #size */}
+
+About 45 files in the engine were changed (about 1,750 lines added), and 4 new files were added with the region object and the table. `Region`, `spawn` and channels are implemented in d8, the test shell. `Region`, the task port (`d8-port.cc`) and channels (`d8-channel.cc`) are written in C++. `spawn` is mostly JS on top of `Region`, `Worker` and the task port, with help from C++ for analyzing captures.
+
+:::note[Simplifications in the first version]
+In the original design, the region number is stored in the memory page header, and each region has its own pages and its own hidden classes. The first version is simpler: objects are mixed together in the ordinary shared heap, the region number is written in each object, and fields are stored in arrays of names and values.
+:::

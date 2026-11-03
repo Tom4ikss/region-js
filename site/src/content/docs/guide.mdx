@@ -1,0 +1,313 @@
+---
+title: "Data in regions"
+description: "Regions, the #{} literals and 'use region', read and write rules, arrays, typed arrays, Region.share, freeze and borrow, free, workers directly via postMessage and Region.of. Every step comes with an example that was actually run."
+eyebrow: "Chapter 4"
+sidebar:
+  label: "Data in regions"
+---
+import Example from '../../components/Example.astro';
+
+<div class="lead">
+
+[`spawn`](/region-js/spawn/) and [channels](/region-js/channels/) move regions between threads. This page is about how data gets into a region and what you can do with it: literals and `'use region'`, read and write rules, shared read-only data, freeing memory. At the end comes the low level everything is built on: moving a region to a worker with `postMessage`. Every example is a file from the `examples/` folder, run in a built d8. Below the code is its real output.
+
+</div>
+
+:::note[How to read the examples]
+The examples are run like this: `d8 --harmony-regions file.js` (the full command is on the [“Limits and plans”](/region-js/limits/#run) page). d8 uses `print` instead of `console.log`. We removed the warning line “V8 is running with experimental features enabled”, which d8 prints first, from the output.
+
+Some examples run with the `--module` flag so they can use `await` directly at the top level of the file. Such files start with the line `// d8-flags: --module`.
+
+One more d8 specific: `worker.getMessage()` blocks the thread until the worker replies. This keeps the examples short. In a browser you do the same with `worker.onmessage` or a promise you `await`.
+:::
+
+## Create a region {/* #region */}
+
+`new Region()` creates an empty region owned by the current thread. You can put data into it with `region.run(fn)`: the function runs as usual, and whatever it returns is copied into the region together with everything it references. `run` returns the copy that lives in the region. The fastest way is to create objects directly in the region: with the `#{}` and `#[]` literals or in code with the `'use region'` directive ([next section](#literals)).
+
+<Example file="01-first-region.js" />
+
+Copying in happens once, at creation. After that the objects can be passed around any number of times without copies. `region.id` is the region number, `region.owner` is the number of the owner thread (in V8 terms, the isolate; the main thread is number 0). The engine reuses the numbers of freed regions, so `id` is unique only among live regions.
+
+:::caution[Important]
+The objects you created inside `fn` and the objects in the region are different objects. If inside the function you stored a reference to your object somewhere outside, it points to the ordinary object, not to the copy in the region. Work with what `run` returned.
+:::
+
+## The `#{}` and `#[]` literals {/* #literals */}
+
+`run` copies into the region what ordinary code created. The `#{...}` and `#[...]` literals create an object or array directly in the current region, with no intermediate object on the thread's heap and no copy. They are enabled together with `--harmony-regions`.
+
+<Example file="37-literals.js" />
+
+A literal creates an object in the current region, so it works inside `using _ = region.enter()` or `run()`. A `spawn` task has no current region; you enter one explicitly: `using _ = Region.of(x).enter()`.
+
+- **Keys**: names, quoted strings and the shorthand `#{ id }`.
+- **Values**: primitives, objects of the same region (including other `#{}` and `#[]`) and typed arrays, which are copied. A literal copies nothing for you, so a plain `{}` or `[]` inside it is an error: nested objects are written as `#{}` too, arrays as `#[]`. An object from another region inside gives `OwnershipError`, as when writing a field.
+- **Not allowed:** spread, holes in arrays, methods and computed keys. These are a syntax error.
+- The shape of the object is fixed, as with any region object. An array grows with `push`.
+
+A literal allocates the object directly in machine code, without a copy and without the runtime, and costs about 15–20 ns ([how](/region-js/inside/#literals)). This is the fastest way to fill a region: 200,000 products are created in 74 ms with literals and `push`, in 165 ms with one `run`, and in 377 ms with one `run` per product. `push` into a region array also skips the runtime, about 25 ns per element. The measurement is on the [“Numbers”](/region-js/numbers/#create) page.
+
+In VS Code, types in files with literals work through the extension from `playground/`; Biome and ESLint do not understand the `#{}` syntax yet ([details](/region-js/tooling/#literals)).
+
+### The `'use region'` directive {/* #use-region */}
+
+If almost all objects of a function belong in a region, you can skip the hash before every `{` and `[`. The `'use region'` directive at the start of a function or file, like `'use strict'`, turns every `{}` in that code into a `#{}` literal and every `[]` into `#[]`. It is ordinary JavaScript syntax, so TypeScript, ESLint, Biome and Prettier understand such code without extensions. The directive works with the `--harmony-regions` flag; without it, it is just a string.
+
+<Example file="42-use-region.js" />
+
+- **Scope.** The directive applies to the function body and to all functions inside it, including callbacks like `rows.map((r) => ({ ... }))`, even if they are called later. The parameters of the function itself are parsed before the directive and stay ordinary. Code in `eval` does not inherit the directive.
+- **A current region** is needed just as for `#{}`: `using _ = region.enter()` or `run`.
+- **Destructuring** does not change: `const { a } = x`, `[a, b] = [b, a]`, `({ name }) => name`. These are patterns, not literals.
+- **Not allowed** is the same as in `#{}`: spread, holes, methods, getters and setters, `__proto__`, computed and numeric keys. This is a syntax error with the text “In 'use region' code \{\} and \[\] are #\{\} and #\[\], …”. In patterns all of this is still allowed.
+
+## Write directly into a region {/* #direct */}
+
+`region.run(fn)` is convenient when the data already exists or is easier to build with ordinary code: everything `fn` returns is copied into the region in one go. To add data to a region as you work, literals are more convenient: enter the region with `using _ = region.enter()` and create `#{}` objects and `#[]` arrays in it, without a copy.
+
+<Example file="35-direct.js" />
+
+`enter()` returns a scope: declared with `using`, it ends with the block, and the previous region becomes current again. Inside `run(fn)` the region is current too. A `spawn` task has no current region, since several regions can arrive in it at once, so you enter a region explicitly by taking it from an object that arrived: `using _ = Region.of(obj).enter()`. If an object is easier to build with ordinary code, `region.run(() => ({ ... }))` copies just that object into the region; no current region is needed for this.
+
+A plain object still cannot be stored in a field of a region object: a region holds only its own objects. The error suggests creating it in the region with `run()` or `#{}`. `run` does not copy objects that are already in the region again: if the nested values are already in the region, only what `fn` itself created is copied.
+
+For large volumes, one `run` per object is the slowest way: every call is a separate copy, and 200,000 objects added one at a time take 2.3 times longer to create than with one `run` (377 ms versus 165) and 5 times longer than with literals. They are read just as fast afterwards, because objects with the same keys get the same shape no matter how they were created ([practice 12](/region-js/practices/#build)). So `run` for a single object is good for occasionally adding something ordinary code built. A large set is faster to build with literals, or with ordinary objects copied in with one `run`.
+
+## Reading and writing {/* #rules */}
+
+The owner reads and writes fields as usual. But there are three rules:
+
+- a field can hold a number, a string, `true`/`false`, `null`, `undefined` or an object *from the same region*;
+- an ordinary object from your own thread cannot be written: it lives outside the region, and another thread could not read it. The exception is a typed array: it is copied into the region ([typed arrays](#typed));
+- the set of fields of an object is fixed: you cannot add a new property. A missing field reads as `undefined`. Arrays, however, grow and shrink ([arrays and methods](#arrays)).
+
+<Example file="03-read-write.js" />
+
+Cycles and shared parts of the graph survive copying: if two fields pointed to one object, in the region they also point to one copy.
+
+:::tip[Why the shape is fixed]
+A region is like an apartment with the furniture already in place. You can rearrange things inside (change field values), but you cannot build on a new room (add a property). Thanks to this, another thread that receives the region sees objects of exactly the shape they were created with, and the engine does not need to coordinate structure changes between threads.
+:::
+
+## Arrays and methods {/* #arrays */}
+
+Region objects have no prototype of their own. When you access a field the object itself does not have, the engine looks it up in the `Array.prototype` or `Object.prototype` of the thread that is currently reading. That is why `for...of`, spread, `map`, `filter`, `slice`, `includes` and other array methods work. Region arrays grow and shrink: `push`, `pop`, `splice`, writing past the end and `length = n` work. An array keeps spare room for elements, like an ordinary JS array, so a series of `push` calls does not copy it every time. The shape of objects, on the other hand, is fixed: you cannot add a new field to a region object.
+
+<Example file="04-arrays.js" />
+
+Key enumeration also works as with ordinary objects: `Object.keys`, `Object.values`, `Object.entries`, `for...in`, `JSON.stringify` (a region array becomes a JSON array), `Array.isArray`, `flat`, object spread `{ ...obj }` and destructuring. Spread gives an ordinary object, to which you can add fields. The copy is shallow: nested objects stay in the region.
+
+For a thread that does not own the region, all of this throws `OwnershipError`, just like an ordinary field read (example in the [“Moving to a worker”](#move) section).
+
+:::caution[On speed]
+The `Array.prototype` methods (`map`, `filter`, `reduce`, `includes`), `for...of`, `Array.from` and array spread read a region array directly and cost almost the same as on an ordinary array. Indexed access in a `for` loop is about 2 times slower than usual: the optimized loop checks the owner once, but the shape and index are checked on every access. Numbers are on the [“Numbers”](/region-js/numbers/#methods) and [“Practices”](/region-js/practices/#methods) pages.
+:::
+
+## What cannot go into a region {/* #not-allowed */}
+
+Only plain objects (whose prototype is `Object.prototype` or `null`), ordinary arrays, typed arrays, primitives, functions from `Region.fn` ([below](#functions)) and `Region.localRef` handles to objects of your own thread ([further below](#local-ref)) go into a region. Other functions, `Map`, `Set`, `Date`, `BigInt`, `Symbol`, a bare `ArrayBuffer`, `DataView`, class instances, `Array` subclasses and objects from another region cause an error. Typed arrays have [their own section](#typed).
+
+<Example file="05-not-allowed.js" />
+
+A class instance used to be silently copied as a plain object and lose its class. Now it is an error: an object in a region has no prototype of its own, so the class methods would not reach it anyway. If you need the data from an instance, move it into a plain object: `region.run(() => ({ x: point.x }))`.
+
+## Functions in a region: `Region.fn` {/* #functions */}
+
+An ordinary function cannot go into a region: its code and closure live on one thread's heap. `Region.fn(f)` turns a function into one that region objects can hold in fields and arrays. The region keeps only its source text and its location in the file, and every thread that reads it compiles the text itself, once, and gets the same function after that: `a.f === b.f` for any regions it is in. It is called like an ordinary function, `this` is the object it was called on, and an error stack shows the line where it was written.
+
+Since the closure does not move with the function, it can use only its own arguments, `this`, built-in globals (`Math`, `JSON` and so on) and its own name, to call itself. A captured variable, the outer function's `this` in an arrow function, `eval`, classes and object methods give a `TypeError` right in `Region.fn`, with a hint on what to pass as an argument. The check is done by the same analysis as in `spawn` ([captures](/region-js/spawn/#captures)).
+
+<Example file="48-region-fn.js" />
+
+Every region the function gets into keeps its own small record of it, about 48 bytes. No matter how many objects of one `run` refer to the function, there is one record; writing the same function into a field again creates nothing.
+
+## A reference to an object of your own thread: `Region.localRef` {/* #local-ref */}
+
+Sometimes a region object needs to know about something that cannot go into a region: a `Map` with a cache, a handler, a window object. `Region.localRef(obj)` makes a `LocalRef` handle for such an object, which the region stores as an ordinary value. The object itself stays in the thread where it was created. In that thread `ref.deref()` returns it; in any other thread it throws `OwnershipError` with the reason `other-thread`. This is how `SendWrapper` works in Rust: the handle can be sent anywhere, but dereferenced only at home. `ref.local` tells whether the handle can be dereferenced here.
+
+<Example file="49-local-ref.js" />
+
+Every thread reads the handle from the region as its own `LocalRef` object, and it is the same object on every read: `a.ref === b.ref`, and in the creating thread it is the very handle that `Region.localRef` returned. The arguments and captured variables of `spawn` travel in a region, so you can also pass a handle to a task directly. `postMessage` and a channel's `send` copy ordinary objects, and a copy of a handle would refer to nothing, so a bare handle there is an error, “a LocalRef cannot be copied to another thread”: put it in a region object and send that.
+
+The object lives as long as a handle is alive in some thread or a region object holds it. Handles in regions are seen only by the shared heap GC, so an object that is referenced only from an abandoned region is released not immediately but after the next shared GC. A freed region (`free()`) no longer holds its handles. A cycle where a thread object refers to a region and the region refers back to the object through a handle is not collected on its own, like an `Rc` cycle in Rust: break it by freeing the region or overwriting the field.
+
+## Typed arrays {/* #typed */}
+
+You can put `Uint8Array`, `Float64Array` and the other typed arrays, including `BigInt64Array` and `Float16Array`, into a region. They work differently from region objects: the region stores the memory block itself, and when you read the field you get an ordinary local typed array that looks at that memory (a view). So working with it runs at full speed, like with any typed array, without an owner check on every element.
+
+<Example file="20-typed-arrays.js" timing />
+
+- **By default the array is copied** into the region; the original stays yours and is not connected to the region. If the array was part of a larger buffer (`subarray`), only its bytes are copied.
+- **Without a copy**: through the second argument of `run`, `region.run(fn, [buffer])`. The memory of arrays whose `ArrayBuffer` is in this list moves into the region, and the original buffer is detached, as after a transfer in `postMessage`: its length becomes 0.
+- **Directly in the region**: `region.typedArray(Float64Array, n)` gives an array of `n` zeros whose bytes belong to the region from the start. It is a view, as when reading a field; fill it and put it into `#{}`, `run` or a field, and there is no copy. A view read from a field, and its `subarray`, also go back into their own region without a copy. Like any region view, it is detached when the region moves or is frozen.
+- **Every read of the field gives a new view**: `state.pixels === state.pixels` is `false`, but the bytes are the same. You can and should save the view to a variable before a loop.
+- **You can write** a new typed array to the field, even of a different length: it is copied, as in `run`.
+- **Not allowed:** arrays over `SharedArrayBuffer` and resizable buffers, a bare `ArrayBuffer` and `DataView`.
+
+### When views are detached {/* #typed-detach */}
+
+While the region is yours, views over its memory work as usual. When the region leaves for another thread or is frozen, all of the owner's views are detached: the length becomes 0, elements read as `undefined`. An `ArrayBuffer` behaves the same way after a transfer. There is no `OwnershipError` here, because there is no owner check on every element. After the region comes back, the old views stay empty: read the field again to get a new one.
+
+Readers of a frozen region get read-only views. Writing to one outside strict mode silently fails; in strict mode, and in methods like `fill` and `set`, it throws `TypeError`.
+
+<p id="typed-borrow">Views of a frozen region are available to the same threads that can read its fields: the one that froze it and the ones that hold a `borrow()`. But views have a rule of their own. An ordinary field is checked on every read, while a view reads memory directly. If a view outlived the right to read, the thread would see the region even after it is thawed, when a new owner is already writing to it. So when a thread releases its last borrow, its views are detached. The views of the thread that froze the region are detached on `thaw()` or when it hands over the right to thaw. Inside `spawn` a task takes the borrow on frozen regions itself, for the whole time it runs ([details](/region-js/spawn/#frozen)).</p>
+
+<Example file="21-typed-views.js" />
+
+Hence the rule: do not hold a view longer than needed. Read the field, do the work, let it go. After an `await` on a task, a move or a `freeze`, read the field again. Why this is also faster for large number arrays is shown in [practice 9](/region-js/practices/#typed).
+
+## Shared data: `Region.share` {/* #share */}
+
+If the data is shared for the whole run (a config, a lookup table, a table of weights) and nobody will change it, use `Region.share`. `region.seal()` freezes a region forever: it cannot be thawed, freed or moved, so all threads read it without borrows, like `Arc<T>` in Rust. `Region.share(data)` does it all at once: it copies the data into a new region, seals it and returns the copy. As the second argument, as with `run`, you can pass a list of typed array buffers that move without a copy.
+
+<Example file="41-seal.js" />
+
+A region can be sealed by its owner or by the thread that froze it, including while the region is read under borrows: the borrows already given out are released as usual, but the right to thaw is gone. A repeated `seal()` does nothing. Typed array views of a sealed region are read-only and are never detached, since the region will not change again. The owner's views, as with `freeze()`, are detached at the moment of sealing.
+
+The memory of a sealed region is freed by the garbage collector when no thread has references to its objects. `free()` and `using` do not free it. A sealed region is sent without a transfer list; it is passed to `spawn` tasks and into channels the same way as a frozen one: by reference.
+
+:::note[How it works]
+The read check in machine code did not change: the region is frozen, and the thread has its bit set in the read table. For a sealed region the bit is set on the first read in the thread, on the slow path, and is never cleared: there will be no thaw that would require clearing it. When the collector frees the region number, the bit is cleared in all tables, so a new region with the same number requires a borrow again.
+:::
+
+## Freezing and broadcasting {/* #freeze */}
+
+A sealed region can no longer change. If the data needs to be handed out for reading and then written again, the region is frozen for a while. `region.freeze()` makes the region read-only, and readable by all threads, but they read it under a `borrow()` ([borrows](#borrow)). A frozen region is sent without a transfer list: every receiver sees the same objects. Without a borrow, reading on the receiver throws `OwnershipError`, as the output of worker 0 shows. `region.frozen` tells whether the region is frozen. `region.thaw()` gives the owner back the right to write.
+
+<Example file="08-freeze-broadcast.js" />
+
+### Who can thaw {/* #thaw-right */}
+
+Only the thread that froze a region can thaw it. Others get the error “Region is not frozen by this isolate”, even if they read the region. `region.frozenHere` shows whether the current thread has this right.
+
+The right can be handed over. If you put a frozen region in the transfer list, the data goes nowhere (it is shared already), and the receiver gets the right to thaw. The sender loses it and from then on reads the region like everyone else, under a borrow.
+
+<Example file="22-freeze-handover.js" />
+
+Only the thread that has the right can hand it over: if another thread puts the region in a transfer list, the error is “Region was frozen by another isolate”. A `spawn` task that froze a region returns the right to the caller together with the result ([example on the spawn page](/region-js/spawn/#frozen)).
+
+## Reader's borrows: `borrow` {/* #borrow */}
+
+`region.borrow()` issues a borrow and increments the `region.readers` counter. While there is at least one borrow, `thaw()` fails. `ticket.release()` releases the borrow. If you declare the borrow with `using`, it is released automatically when the block exits, even if an exception was thrown inside.
+
+<Example file="09-borrow.js" />
+
+A borrow can be taken in any thread, including a worker: `Region.of(obj).borrow()`. Without a borrow, a frozen region can be read only by the thread that froze it (or received the right to thaw), and by `spawn` tasks that captured the region or received it as an argument: they get a borrow automatically, for the whole task ([details](/region-js/spawn/#frozen)). Everyone else gets `OwnershipError: region N is frozen; borrow it to read it`, on ordinary fields and on typed arrays alike. This also applies to an object that arrived through `postMessage` or a channel.
+
+In return, while you hold a borrow, `thaw()` does not go through: it throws “Region is still borrowed by N reader(s)”. So a reader never sees a thaw in the middle of a read and never reads a stale value.
+
+You do not need a retry loop to wait for the borrows to be released: `await region.thawWhenFree()` thaws the region as soon as the last reader releases its borrow, and resolves. If there are no readers, the region is thawed immediately. If the borrow is held by the same thread and nobody can release it, the promise rejects with `DeadlockError`, and in a cancelled task with that task's `AbortError`. When several `thawWhenFree()` calls wait on one region, the first one thaws it, and the rest reject, like `thaw()` on a region that is already thawed.
+
+`region.borrowWhile(fn)` takes a borrow, calls `fn` and releases the borrow when `fn` has finished. If `fn` returned a promise, the borrow is released when the promise resolves or rejects. `borrowWhile` returns what `fn` returned (for an async function, a promise of its result). Inside `spawn` tasks this is the one to use for async work, because an ordinary borrow lives no longer than the task ([details on the spawn page](/region-js/spawn/#borrow)).
+
+## Free a region: `free` {/* #free */}
+
+Usually the memory of regions, like that of any JS objects, is freed by the garbage collector: when no references to the objects remain, they disappear. But sometimes references remain where you do not expect them: in a cache, in a closure, in a forgotten variable. Then large data hangs in memory as long as something looks at it.
+
+`region.free()` releases the region immediately, without waiting for the references to go away. After that any access to its objects throws `OwnershipError: region N was freed`, from any thread and from any code, including code that is already compiled. The memory of typed arrays is freed at the moment of the call, and the owner's views are detached. The objects themselves are emptied at the next shared heap GC: everything they held goes away, even if there are still references to them. In C such an operation would leave a dangling pointer, but here it is safe: access to a region is checked on every access anyway, and a freed region is just one more of its states.
+
+You can free only your own region. A frozen region is freed by the thread that froze it, and only when no borrows remain, as with `thaw()`. A region in transit or someone else's region cannot be freed. Declared with `using`, a region is freed at the end of the block. If by then it has moved to another thread, `using` does nothing: a moved-out value is not freed, as in Rust.
+
+<Example file="34-free.js" />
+
+`region.byteSize` shows how many bytes the region got when copying: objects, their arrays, strings and typed array memory. It is an approximate figure: the `#{}` and `#[]` literals and array growth are included, but strings written to fields later are not. `Region.stats()` shows how many regions are alive, how many are freed but not yet collected, and how many bytes the live ones hold.
+
+## Moving to a worker {/* #move */}
+
+[`spawn`](/region-js/spawn/) and [channels](/region-js/channels/) move regions for you. If you need your own worker, you pass the region to it directly, with `postMessage` and a transfer list: send the region's objects with `postMessage` and put the region itself in the transfer list. The worker gets the same objects, not a copy, and becomes their owner. The main thread loses access.
+
+<Example file="06-move.js" />
+
+A move does not depend on the size of the data: the engine changes the region's owner, and the objects stay where they are. A copy through `postMessage` walks every object. Here is the same tree of 131,071 nodes sent both ways:
+
+<Example file="02-before-after.js" timing />
+
+There are two different error texts. Right after sending, the region is still in transit: “was sent to another thread and has not been received yet”. Once the worker has received the message, it is the owner: “belongs to another thread”. Both errors end with the place where the region was sent. `Object.keys`, `JSON.stringify` and other key enumeration check the owner the same way as a field read.
+
+You do not need to put the `region` object itself into the message data; its objects are enough. Region objects are always passed by reference. If you send them without a transfer list, the worker gets a reference but cannot read anything through it until the region moves to it: the owner stays the same.
+
+The transfer list can also hold a region object itself; it stands for its region: `worker.postMessage(order, [order])` works the same as `[region]` or `[Region.of(order)]`.
+
+`postMessage` with a transfer list is the lowest level. `spawn` does the same without a transfer list and bypasses `postMessage`, using its own queue, so it is cheaper.
+
+## Getting a region back: `Region.of` {/* #of */}
+
+A worker has no `region` variable, only the objects it received. `Region.of(obj)` finds the region from any of its objects. With it the worker can send the data back the same way. For the transfer list the object itself is enough ([moving](#move)), and `Region.of` is needed to call region methods: `borrow()`, `freeze()`, `free()`. To check whether a value is in a region without catching an error, use `Region.isRegionObject(value)`. A region has one handle per thread: `Region.of(a) === Region.of(b)` if `a` and `b` are from the same region, and `Region.of(obj) === region` for the `region` the object was created in.
+
+<Example file="07-ping-pong.js" timing />
+
+A thousand round trips, and at the end you hold the very same object: `current === state`. One round trip, two moves and two message sends, takes about 10–11 microseconds, varying from run to run.
+
+## The whole API on one page {/* #reference */}
+
+| What | What it does |
+| --- | --- |
+| `new Region()` | An empty region owned by the current thread. |
+| `region.run(fn)` | Calls `fn`, copies the result into the region and returns the copy. |
+| `region.run(fn, [buffer])` | The same, but the memory of typed arrays with these `ArrayBuffer`s moves without a copy, and the original buffers are detached. |
+| `region.id`, `region.owner` | The region number and the number of the owner thread. |
+| `Region.of(obj)` | The region `obj` is in. For an ordinary object, an error. |
+| `Region.fn(f)` | A function that can be stored in a region. Every thread compiles it itself and gets the same function. It has no closure. |
+| `Region.localRef(obj)` | A `LocalRef` handle to an object of your own thread that can be stored in a region. `ref.deref()` returns the object in that thread and throws in others; `ref.local` tells whether this is that thread. |
+| `Region.isRegionObject(value)` | Whether the value is in some region. Throws no errors. |
+| `worker.postMessage(msg, [region])` | Move: the receiver becomes the owner, the sender loses access. Instead of `region` you can pass any of its objects. |
+| `worker.postMessage(msg)` | For objects of a frozen region, broadcasting without a copy. |
+| `worker.postMessage(msg, [frozenRegion])` | For a frozen region, hand over the right to thaw. |
+| `region.freeze()`, `region.thaw()` | Freeze (everyone reads under a borrow, nobody writes) and thaw (only the thread that froze it or received the right, and only with no readers). |
+| `region.thawWhenFree()` | A promise: thaw once all borrows are released. |
+| `region.frozen`, `region.readers` | Whether the region is frozen and how many borrows are currently out. |
+| `region.frozenHere` | Whether the current thread has the right to thaw the region. |
+| `region.borrow()` | A reader's borrow: without it a frozen region is read only by the thread that froze it and by the `spawn` tasks that got it. A borrow has `release()` and can be declared with `using`. |
+| `region.seal()`, `region.sealed` | Freeze forever: all threads read without borrows; it cannot be thawed, freed or moved, and the collector frees the memory. Whether the region is sealed. |
+| `Region.share(data)` | Copy the data into a new sealed region and return the copy, like `Arc::new`. |
+| `region.borrowWhile(fn)` | Holds a borrow while `fn` runs or until its promise settles. Returns the result of `fn`. |
+| `using _ = region.enter()` | Make the region current until the end of the block. |
+| `#{ key: value }`, `#[a, b]` | An object or array directly in the current region, without a copy. |
+| `'use region'` | A directive at the start of a function or file: every `{}` and `[]` in that code and in nested functions is `#{}` and `#[]`. |
+| `region.free()`, `using region = new Region()` | Free the region: access to it is forbidden forever, typed array memory is released immediately, objects are emptied at GC. |
+| `region.freed`, `region.byteSize`, `Region.stats()` | Whether the region is freed, how many bytes were copied into it, and a summary of all regions in the process. |
+| `spawn(fn, ...args)` | Run a function on a separate thread. See the [next page](/region-js/spawn/). |
+| `spawn.scope(async (s) => ...)` | A block of `s.spawn(...)` tasks: waits for all of them; the first error cancels the rest. See [spawn.scope](/region-js/spawn/#scope). |
+| `spawn.shield(fn, { timeout })` | Cleanup that task cancellation does not interrupt: its `await`s do not throw. `timeout` in milliseconds is a deadline after which `shield` is cancelled with `TimeoutError`. See [cancellation](/region-js/spawn/#abort). |
+| `spawn.poolSize` | How many workers are in the `spawn` pool, 4 by default. |
+| `spawn.idle()` | A promise that resolves when all tasks started by this thread have finished. |
+| `new Channel(capacity)` | A channel between threads: `send`, `recv`, `close`, `Channel.select` and blocking versions. See the [channels page](/region-js/channels/). |
+
+### Errors {/* #errors */}
+
+Ownership violations throw `OwnershipError`. It is a subclass of `TypeError`, so code that caught `TypeError` works as before. The error has two fields: `region`, the region number, and `reason`, the cause in one word, convenient to branch on instead of parsing the text.
+
+At the end of its text, the error says where the thing that caused it happened to the region: where it was sent, thawed, frozen, sealed, freed or put into an `RwLock`. For example, `(sent at main.js:12:5)`. Code in a `spawn` task keeps the lines of its file, so a send from a task also shows the place in the file. If the code has no file, for example a worker created from a string, you get the thread number: `(sent by isolate 2)`. Recording the place costs about 60 ns per event; the d8 flag `--no-region-history` turns it off.
+
+<Example file="44-errors.js" />
+
+| Text | `reason` | When it happens |
+| --- | --- | --- |
+| `region N belongs to another thread (isolate X, this is isolate Y)` | `not-owner` | Access to a region owned by another thread. |
+| `region N was sent to another thread and has not been received yet` | `in-transit` | The region was sent but not yet received: it sits in a channel, in the task queue or in a message. |
+| `region N was freed` | `freed` | Access to a freed region. `Region was already freed` is a repeated `free()`. |
+| `region N is frozen; thaw it before writing` | `frozen` | A write to a frozen region, including by the owner. `Region is already frozen` is a repeated `freeze()`. |
+| `region N is frozen; borrow it to read it` | `not-borrowed` | Reading a frozen region without a borrow by a thread that did not freeze it: fields, typed arrays, `Object.keys` and so on. |
+| `region N is sealed and cannot change` | `sealed` | A write to a sealed region. |
+| `Region is sealed and cannot be thawed`, `Region is sealed; the GC frees it once nothing refers to it` | `sealed` | `thaw()` and `free()` of a sealed region. |
+| `Region is sealed: its objects are shared, send them without a transfer list` | `sealed` | A sealed region in a transfer list. |
+| `region N is in an RwLock; use it through lock.read() or lock.write()` | `locked` | Access to a region that is in an `RwLock`, bypassing the guard. `free()`, `freeze()`, a transfer list and a second `RwLock` on the same region have their own texts. |
+| `region N is locked for reading; use lock.write() to change it` | `read-locked` | A write under `lock.read()`. |
+| `Region is still borrowed by N reader(s)` | `borrowed` | `thaw()` and `free()` while borrows are not released, including the borrows of `spawn` tasks still waiting in the queue. To wait for them, use `thawWhenFree()`. |
+| `Region is not frozen by this isolate` | `not-frozen` | `thaw()` in a thread that does not have the right to thaw. |
+| `Region must be frozen to borrow it` | `not-frozen` | `borrow()` on a region that is not frozen. |
+| `a region object cannot reference objects outside its region; create them in it with region.run() or #{}` | `outside-reference` | Writing an ordinary object or an object from another region to a field. |
+| `this LocalRef refers to an object of another thread (isolate X, this is isolate Y); only that thread can deref() it` | `other-thread` | `deref()` of a `Region.localRef` handle outside the thread where it was made. The `region` field of this error is −1. |
+
+Tasks and shared data throw their own classes, subclasses of `Error`: `AbortError` (the task was cancelled), `TimeoutError` (a subclass of `AbortError`; the task did not finish within `timeout(ms)`), `DeadlockError` (all threads are waiting for each other) and `PoisonError` (the `RwLock` was poisoned by a writer that did not finish its work, see [RwLock](/region-js/channels/#rwlock)).
+
+Data shape errors are ordinary `TypeError`s, without `region` and `reason`:
+
+| Text | When it happens |
+| --- | --- |
+| `Cannot add property X, region objects have a fixed shape` | A new property on a region object. |
+| `… cannot be moved into a region` | `run` got a function, `Map`, `Date`, `DataView`, an array over `SharedArrayBuffer`, a class instance, an `Array` subclass and so on. |
+| `#{} and #[] need a current region: use region.enter() or region.run()` | A literal outside `enter()` and `run()`. |
+| `#{} and #[] hold primitives and objects of their region; write nested objects as #{} and arrays as #[]` | An ordinary object or array inside a literal. |
+| `In 'use region' code {} and [] are #{} and #[], which allow no spread, holes, methods, accessors, __proto__, computed or numeric keys` | A syntax error: in code with `'use region'`, a literal that cannot be `#{}` or `#[]`. |
+| `Region.of() expects an object from a region` | `Region.of` for an ordinary object. |

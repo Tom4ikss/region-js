@@ -1,0 +1,81 @@
+---
+// A runnable example: its code and the real d8 output saved next to it in site/examples.
+//
+//   <Example file="43-orders.js" timing />
+//
+// Flags: `timing` (timings differ between machines), `varies` (numbers change between runs),
+// `collapsed` (folded under a summary line, used for benchmark code).
+import { highlight } from '../lib/highlight.mjs';
+import { loadExample } from '../lib/examples';
+import { ui } from '../lib/i18n';
+import { typograph } from '../lib/typograph.mjs';
+import { BASE } from '../lib/site.mjs';
+
+interface Props {
+	file: string;
+	timing?: boolean;
+	varies?: boolean;
+	collapsed?: boolean;
+}
+
+const { file, timing = false, varies = false, collapsed = false } = Astro.props;
+const { lang, t } = ui(Astro.url);
+const { src, out, flags, exitCode } = loadExample(lang, file);
+const href = `${BASE}${lang === 'ru' ? '/ru' : ''}/examples/${file}`;
+
+let hint = t.real(flags.map((f) => ' ' + f).join(''));
+if (timing) hint += t.timing;
+else if (varies) hint += t.varies;
+if (exitCode) hint += t.exit(exitCode);
+const text = (s: string) => (lang === 'ru' ? typograph(s) : s);
+
+// Lines that mention an Error are highlighted in the output.
+const escapeHtml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+const outHtml = out
+	.replace(/\n+$/, '')
+	.split('\n')
+	.map((line) => (line.includes('Error') ? `<span class="err">${escapeHtml(line)}</span>` : escapeHtml(line)))
+	.join('\n');
+const Wrapper = collapsed ? 'details' : Fragment;
+---
+
+<Wrapper {...(collapsed ? { class: 'ex-details' } : {})}>
+	{
+		collapsed && (
+			<summary>
+				{text(t.collapsed)} <span class="file">examples/{file}</span>
+			</summary>
+		)
+	}
+	<figure class="example" data-example={file}>
+		<div class="ex-head">
+			<span class="file"><a href={href}>examples/{file}</a></span>
+			<button class="copy" type="button" data-done={t.copied}>{t.copy}</button>
+		</div>
+		<pre class="code"><code set:html={highlight(src)} /></pre>
+		<div class="out-head"><span>{t.output}</span><span class="hint">{text(hint)}</span></div>
+		<pre class="out" set:html={outHtml} />
+	</figure>
+</Wrapper>
+
+<script>
+	import { copyText } from '../scripts/copy';
+
+	for (const button of document.querySelectorAll<HTMLButtonElement>('.example .copy')) {
+		if (button.dataset.ready) continue;
+		button.dataset.ready = '1';
+		const label = button.textContent ?? '';
+		button.addEventListener('click', () => {
+			const code = button.closest('.example')?.querySelector('pre.code');
+			if (!code) return;
+			copyText(code.textContent ?? '').then(() => {
+				button.textContent = button.dataset.done || label;
+				button.classList.add('done');
+				setTimeout(() => {
+					button.textContent = label;
+					button.classList.remove('done');
+				}, 1600);
+			});
+		});
+	}
+</script>

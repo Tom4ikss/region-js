@@ -1,0 +1,11 @@
+---
+// Starlight's footer (previous and next page) followed by the prototype notice of every page.
+import Default from '@astrojs/starlight/components/Footer.astro';
+import { ui } from '../../lib/i18n';
+
+const { t } = ui(Astro.url);
+const isLanding = Boolean(Astro.locals.starlightRoute.entry.data.hero);
+---
+
+{!isLanding && <Default />}
+<p class="rj-footer-note">{t.footer}</p>

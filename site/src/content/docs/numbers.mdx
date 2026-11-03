@@ -1,0 +1,193 @@
+---
+title: "Numbers"
+description: "Prototype measurements: three scenarios against tokio and plain workers, a move against structured clone, region creation, read and write speed, parallel reads, spawn, safety checks."
+eyebrow: "Chapter 9"
+sidebar:
+  label: "Numbers"
+---
+import Example from '../../components/Example.astro';
+import Chart from '../../components/Chart.astro';
+
+<div class="lead">
+
+What turned out faster, what slower, and by how much. The good results are here along with the bad ones: finding out the cost is exactly what the prototype is for.
+
+</div>
+
+:::caution[Measurement setup]
+A V8 build with internal checks enabled (`dcheck_always_on`, without debug info). Apple Silicon: 6 performance and 6 efficiency cores. In a build without checks and on another machine the absolute values will differ. What matters is the ratios: how many times faster one thing is than another.
+
+The checks also slow down memory allocation. For example, when the collector starts marking, it additionally verifies page counters (`VerifyCountersAfterSweeping`). So measurements that create many objects take longer in this build than they would in a regular one. All measurements use the same build, so this does not get in the way of comparing the variants with each other.
+
+The benchmark scripts are in `tests/`: `bench.js`, `bench-writes.js`, `bench-frozen.js`, `bench-plain-js.js`, `ping-pong.js`, `spawn.js`, `bench-real.js`, `fuzz.js`, and the region creation benchmark is in `site/examples/en/36-create.js`. The charts on this page are medians of five runs on the current build. Measurements of individual techniques are on the [Practices](/region-js/practices/) page.
+:::
+
+## Three scenarios: regions, workers and tokio {/* #real */}
+
+Scenarios from the life of an application with orders. An order is an object with a customer, an array of three line items and a total, that is, six objects and four strings. Each scenario is done three ways: `spawn` with regions, plain workers with `postMessage` as JS does it today, and Rust with tokio. All use four worker threads. This is the only measurement on the page taken on a V8 build without internal checks; otherwise the comparison with tokio in release would be unfair. The time is the best of five runs.
+
+| Scenario | `spawn` + regions | workers + `postMessage` | tokio |
+| --- | --- | --- | --- |
+| Build 200,000 orders on four threads and read them on the main one | 38 ms | 220 ms | 16.5 ms |
+| 200 batches of 1000 orders: hand them to threads, compute a discount, return them | 13 ms | 309 ms | 0.7 ms |
+| A catalog of 100,000 products: share it with four threads, a million reads on each | 17 ms | 59 ms | 1.6 ms |
+
+- **Building orders.** The `spawn` tasks create orders with the `'use region'` directive, directly in shared memory, and return the array together with its region. Workers build orders just as fast, but `postMessage` copies all 1.2 million objects back to the main thread. This is where regions come closest to tokio: allocating objects and strings is expensive in Rust too. The spread for `spawn` is large, with a median around 80 ms: four threads allocate in one shared heap, and runs that hit a garbage collection take noticeably longer.
+- **Batches.** Each batch is its own region; it moves into a task and comes back with the discount computed: 400 moves and 200 tasks in 13 ms. Workers copy each batch twice, there and back, hence the 23× gap. A tokio task gets a pointer to a vector, and computing the discount is a few instructions per line item. Here every field read and write checks the owner, and a task is a message to another V8 isolate.
+- **Catalog.** About 10 ms of the 17 goes to `Region.share`: the catalog is copied into a region. In tokio the catalog is already in memory, and `Arc::new` does not copy it. The remaining 6–7 ms are a million reads on each thread: a product by index, then its price. Over a plain array the same loop takes 3.3 ms. Each read hits a different product, so the shape and the owner have to be checked for each one ([why](#access)). Workers copy the catalog to four threads every time.
+
+Bottom line: against today's workers regions win by 3.5–23×, and they are still 2–19× behind tokio. Checking the owner once per loop ([how](/region-js/inside/#jit)) sped up loops over region arrays by about a quarter, but barely changed the gap with tokio: the catalog went to 19 ms from 21, and is now 17 ms. The gap is mostly elsewhere: a task is a message to another isolate, `Region.share` copies the data, and every new object in a loop gets its shape and owner checked. To repeat the measurement:
+
+```sh
+$ v8-src/v8/out/fast/d8 --harmony-regions --module --max-serializer-memory=4000 tests/bench-real.js
+$ cd tests/tokio-bench && cargo run --release -- real
+```
+
+## A move instead of a copy {/* #move */}
+
+The main test of the idea: how much it costs to hand a tree of objects to a worker. The tree is made of plain objects `{ value, left, right }`.
+
+<Chart id="move-1m" />
+
+A structured clone copy grows with the size: 0.9 ms for a thousand nodes and 928 ms for a million. A move barely depends on the size: 0.02 ms and 0.12 ms. The tree grew a thousand times, and the move time only about five times, and that is already the overhead of sending the message itself, not work on the data.
+
+Creating a region from a ready tree costs less than one structured clone copy: 598 ms for a million nodes. `run` also copies the graph inside, but now on the fast path ([how](/region-js/inside/#fast-copy)). Before that, creation took about 1,160 ms. But you pay this once. After that the tree can travel between threads as often as you like. If the data is sent to a worker once and forgotten, there is no gain. It appears when data goes back and forth or is needed by several threads.
+
+### There and back {/* #there-and-back */}
+
+An object that travels between the main thread and a worker (two moves and two messages per round trip) completes a round trip in about 11 microseconds (10 to 11 across runs). Most of this time is sending the two messages; it does not depend on the size of the region. And at the end it is the very same object: `===` returns `true`.
+
+## Creating a region {/* #create */}
+
+Before a region can move, the data has to be put into it, and that is still a copy ([why](/region-js/inside/#run)). The benchmark: 200,000 products `{ id, name, tags, price }`, built in four ways, and one pass over the prices of each.
+
+<Chart id="create" />
+
+Plain objects are created in 27 ms. `#{}` literals put data into a region the fastest: 74 ms. They copy nothing, and after the first literal of each shape they do not call the runtime either: the object is allocated right in machine code ([how](/region-js/inside/#literals)). Almost all the remaining time is the strings `'item ' + i`: they have to be copied into the shared heap. A single `run` takes 165 ms: the same plain objects plus their copy into the region, six times more expensive than creating them.
+
+`run` per object is the most expensive: a copy on every call, 377 ms, 2.3 times longer than one `run` for the whole set. `push` adds almost nothing to that: while the array has spare capacity, the element is appended right in machine code, about 25 ns per element ([how](/region-js/inside/#arrays)). Reading is then almost equally fast for all variants; the pass over the prices takes about 1 ms (before access was inlined into the compilers it was about 2 ms): objects with the same keys share one shape, however they were created ([why](/region-js/inside/#fast-copy)). What this means in practice is covered in [practice 12](/region-js/practices/#build).
+
+<Example file="36-create.js" timing collapsed />
+
+## Reading and writing {/* #access */}
+
+Maglev and Turbofan inline access to region objects into machine code. In a loop without calls Turbofan checks the owner once; the other checks happen on every access (more on the [How it works](/region-js/inside/#jit) page). The measurements below were taken on the `out/release/d8` build with the same settings as the rest.
+
+<Chart id="access-ratio" />
+
+Reading fields across a tree is 1.2 times slower than usual. In the very first version it was 26 times slower, until the owner check was built into inline caches. Writing to every node is 1.7 times slower, summing an array by index 2.3 times. Before the compilers learned to inline region access, these were 6 and 11 times: every access in optimized code went through an inline cache call. While the owner was checked on every access, in loops too, the sum by index was 3.3 times slower. Writing across the tree uses recursion, not a loop, so the once-per-loop check does not apply to it. The remaining difference is the per-access checks: shape, index and, for writes, the value, plus the owner outside loops.
+
+Reading across the tree used to come out even (×1.1) for a different reason: the `sum` function in the benchmark sees both plain nodes and region nodes, and the plain ones also went through the inline cache, about 21.7 ms. Now the compiler separates such sites by object shape, and the plain tree is summed in 6.3 ms, the region tree in 7.3 instead of 23.6.
+
+Individual accesses in Turbofan, in a loop of 10 million steps, nanoseconds per step including the loop itself (`tests/bench-access.js`, best of seven). The last column is with the `--no-inline-region-access` flag, that is, through an inline cache call:
+
+| Access | Plain object | Region object | Region without inlining |
+| --- | ---: | ---: | ---: |
+| Field read | 1.5 ns | 2.1 ns | 4.2 ns |
+| Field write | 1.4 ns | 1.6 ns | 4.8 ns |
+| Indexed read | 1.5 ns | 2.5 ns | 5.7 ns |
+| Indexed write | 1.7 ns | 2.2 ns | 5.4 ns |
+
+Maglev only (`--no-turbofan`), region, inline cache call → inlined access: field read 3.6 → 2.2 ns, field write 3.7 → 2.8 ns, indexed read 6.9 → 4.8 ns, indexed write 6.7 → 4.5 ns. The Maglev fast path exists only on arm64 for now.
+
+Typed arrays in a region do not have this lag. When a field is read, the thread gets a regular typed array over the region's memory, and summing a million numbers over it takes the same 0.68 ms as over a plain `Float64Array`. Over an array of numbers in a region it takes 1.4 ms (measured in [practice 9](/region-js/practices/#typed)).
+
+### Array methods, 100,000 elements {/* #methods */}
+
+Array methods, `for...of`, `Array.from` and spread used to read every element of a region array through the runtime. Now they take values directly from the region array ([how](/region-js/inside/#methods)). The `out/release/d8` build, an array of 100,000 numbers, milliseconds per call.
+
+| Operation | Plain array | Region, before | Region, now |
+| --- | ---: | ---: | ---: |
+| `for` loop by index | 0.22 | 0.79 | 0.79 |
+| `for...of` | 1.07 | 15.4 | 1.36 |
+| `forEach` | 0.99 | 21.3 | 1.17 |
+| `map` | 0.92 | 21.5 | 1.46 |
+| `filter` | 1.06 | 24.9 | 1.44 |
+| `reduce` | 0.84 | 21.8 | 0.97 |
+| `indexOf` | 0.01 | 4.03 | 0.09 |
+| `includes` | 0.01 | 3.43 | 0.09 |
+| `join` | 3.30 | 9.84 | 3.29 |
+| spread `[...a]` | 0.04 | 17.0 | 0.28 |
+| `Array.from` | 0.09 | 16.6 | 0.25 |
+| `at()` in a loop | 0.20 | 15.4 | 1.74 |
+
+Callback methods and `for...of` got 11–22 times faster and are now 1.2–1.6 times slower than on a plain array. `indexOf`, `includes`, spread and `Array.from` got 38–66 times faster. On a plain array they are faster still, so their ratio is larger, but the difference is fractions of a millisecond. `join` is now on par with a plain array. The slowest is `at()` in a loop, about 9 times slower than on a plain array: for a plain array the compiler inlines `at` into the code, while for a region array it calls the builtin every time. This work did not affect the `for` loop.
+
+## Parallel reads {/* #parallel */}
+
+A frozen tree of a million nodes is sent to the workers once, and each takes a borrow on it. Then 8 full traversals are split evenly between them.
+
+<Chart id="frozen-scaling" />
+
+Up to four workers the speedup is almost ideal: ×1.9 and ×3.8. On eight it is ×5.9 instead of ×8. Most likely we hit the hardware limit: this machine has six fast cores, and the rest are noticeably slower. There is not a single copy of the tree: all eight workers read the same objects.
+
+## spawn {/* #spawn */}
+
+<Chart id="spawn-parallel" />
+
+Four identical heavy tasks: 738 ms one after another, 201 ms all at once, that is, 3.7 times faster.
+
+`spawn` tasks go to a pool of long-lived workers (four by default, `spawn.poolSize`). Starting a task costs about 3 microseconds: 100,000 tasks one after another through `join()` took about 0.3 seconds, and 20,000 tasks started at once and waited for with `await` took about 65 ms (example on the [spawn](/region-js/spawn/#how) page). Not long ago a start cost about 40 microseconds, and before the pool, when every `spawn` created a new worker, about 2.5 ms. Where the difference came from is explained on the [How it works](/region-js/inside/#fast-spawn) page.
+
+A message to a worker and its reply (`postMessage` and `getMessage`, one number per message) take about 3 microseconds; a round trip through two unbuffered channels takes about 3.5 (example on the [channels](/region-js/channels/#cost) page).
+
+### A thousand tasks against tokio {/* #tokio */}
+
+Five scenarios on d8 (`tests/bench-tasks.js`) and the same five in Rust with tokio (`tests/tokio-bench`). Here, unlike the other measurements on the page, V8 is built without internal checks (`dcheck_always_on = false`): tokio is built as a regular release, and comparing it with a checked build would be unfair. In the checked build the d8 numbers are 2–3 times larger. Both have four worker threads, and the driving code is outside the pool: in d8 it is the main thread, in tokio it is `block_on`. Best of five runs.
+
+| A thousand tasks | `spawn` | tokio | Difference |
+| --- | --- | --- | --- |
+| Start empty tasks and wait for them | 1.1 ms | 0.55 ms | ×2 |
+| 50 µs of computation in each | 12.6 ms | 12.6 ms | none |
+| Each sends a number to one channel, the main thread reads | 1.5 ms | 0.4 ms | ×4 |
+| All wait in `recv`, then get woken up | 2.0 ms | 0.7 ms | ×3 |
+| A thousand ping-pong round trips between the main thread and a task | 1.6 ms | 5.7 ms | 3.5 times faster |
+| `RwLock`: take for writing and release, uncontended | 0.18 ms | 0.01 ms | ×15 |
+| `RwLock`: four tasks with 250 writes each | 0.7 ms | 0.07 ms | ×10 |
+
+A tokio task lives in the memory of the same process as its creator: starting it means allocating memory for a state machine and putting it in a queue. A `spawn` task goes to another isolate: the arguments are packed into a message, pass through a port, the worker turns them back into JS values and calls the function, and the reply comes back the same way. On the main thread this is about a microsecond per task, and the main thread is the bottleneck here: with twelve workers a thousand empty tasks take the same 1.1 ms, while tokio speeds up to 0.33 ms. When the tasks compute, the difference disappears: 1000 tasks of 50 µs on twelve threads take 4.8 ms with `spawn` and 4.4 ms with tokio.
+
+In ping-pong the d8 main thread beats `block_on`: an idle d8 thread first spins and catches the reply without going to sleep ([details](/region-js/inside/#fast-spawn)), while `block_on` sleeps and wakes up on every step. But between two tasks inside the runtime, tokio does a thousand round trips in 0.2 ms, 8 times faster than us: both tasks run on one thread, and a round trip is just a switch between two state machines. Go goroutines work the same way as tokio tasks, and their numbers are of the same order; they were not measured here.
+
+A thousand or a hundred thousand tasks waiting on a channel at the same time cost the same, about 3 µs per task.
+
+An `RwLock` in tokio is a counter and a queue in memory. Here each acquisition also changes the owner of the region, and the release detaches the typed arrays obtained through the guard, so one acquire-and-release pair costs about 0.2 µs. When the lock passes to another thread, that thread has to be woken up, and with four writers the difference grows to ×11.
+
+## Safety and impact on plain JS {/* #safety */}
+
+<div class="stats">
+<div class="stat"><span class="label">mjsunit, the main V8 test suite</span><span class="value">9,255 tests</span><span class="detail">0 failures on the current build, same as unmodified V8</span></div>
+<div class="stat"><span class="label">Plain JS in optimized code</span><span class="value">±3%</span><span class="detail">within measurement noise</span></div>
+<div class="stat"><span class="label">Interpreter only</span><span class="value">≈+1%</span><span class="detail">slower than unmodified V8</span></div>
+<div class="stat"><span class="label">Fuzzer: 4 workers, GC pressure</span><span class="value">0</span><span class="detail">successful illegal accesses, no crashes</span></div>
+</div>
+
+Code that does not use regions did not change in speed: the difference in optimized code is within ±3%, that is, within noise. In interpreter-only mode it is about +1%. This was checked with a separate set of benchmarks (`bench-plain-js.js`: reading and writing fields with one shape, with different shapes, classes, arrays).
+
+On the current build mjsunit passes in full, 9,255 of 9,255. The speed comparison with unmodified V8 was made on an earlier build, before the worker pool and the reuse of region numbers: a new comparison also needs a fresh build of unmodified V8. The fuzzer was rerun on the current build (300 rounds each with five different seeds), and the result is the same.
+
+The fuzzer (`fuzz.js`) passes a region to a random worker in a loop while the others try to read and write it. It also freezes the region and tries to thaw it while others read it under borrows, and it triggers garbage collection at random moments. Not a single access by a non-owner got through, and the process never crashed. But the fuzzing is short and homemade. It is not the round-the-clock testing on a cluster that real V8 goes through.
+
+## Comparison with the SharedArrayBuffer prototype {/* #prototype */}
+
+Before the engine fork there was a pure-JS version for Node (the `prototype/js-ownership/` folder): tree nodes were laid out in a `SharedArrayBuffer` by hand, and fields were read through wrappers. A move was just as cheap, but everything else came at a price.
+
+| What | SharedArrayBuffer prototype | V8 fork |
+| --- | ---: | ---: |
+| Move vs. copy | 0.029 ms vs. 351 ms | 0.12 ms vs. 928 ms |
+| Field reads relative to plain objects | 6.4 times slower | 1.2 times slower |
+| 8 workers reading in parallel | ×3.5 | ×5.9 |
+| What data | structures declared in advance | plain objects and arrays |
+
+The tree has a million nodes in both cases, but the conditions differ: that prototype ran in Node, not in d8 with checks enabled, and in the parallel benchmark each worker read its own tree rather than one shared tree. So the absolute numbers should not be compared across columns, only the ratios within each.
+
+## Results against the goals {/* #criteria */}
+
+Criteria were written down at the start of the work. The experiment counts as a success if at least half of them are met:
+
+| Goal | Result |
+| --- | --- |
+| An O(1) move: time does not depend on size | Met: 0.02 ms for a thousand nodes, 0.12 ms for a million. |
+| Field access in optimized code at most 1.5 times slower | Met for reads (×1.2). Nearly met for writes (×1.7), not met for indexed access (×2.3). Before access was inlined into Maglev and Turbofan it was ×6.0 and ×11. |
+| Nearly linear speedup of parallel reads | Yes up to 4 workers (×3.8). On 8 it is ×5.9, most likely limited by the 6 fast cores. |
+| Plain JS does not slow down, races produce exceptions, not crashes | Met: ±3%, 0 failures in mjsunit and in the fuzzer. |

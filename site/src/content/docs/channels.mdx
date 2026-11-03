@@ -1,0 +1,109 @@
+---
+title: "Channels: threads that talk"
+description: "Channel: a queue between threads, as in Go. send and recv, the buffer, close, for await, select, blocking versions for workers, moving regions through a channel, and what it costs."
+eyebrow: "Chapter 5"
+sidebar:
+  label: "Channels"
+---
+import Example from '../../components/Example.astro';
+
+<div class="lead">
+
+`spawn` works well when a task gets its data, computes, and returns a result. But threads often need to exchange data while they work: one produces, others process, a third collects. Channels are for this. The idea comes from Go: a channel is a queue where one thread puts values and another takes them.
+
+</div>
+
+## Send and receive {/* #basics */}
+
+`new Channel(capacity)` creates a channel. `await ch.send(value)` puts a value in, and `await ch.recv()` takes the oldest one and returns `{ value, done }`, like an iterator. A channel is closed with `ch.close()`: after that, new `send` calls throw an error, but what was already sent can still be received. When a closed channel is empty, `recv` returns `done: true`. The most convenient way to read a channel is `for await`: the loop ends on its own once the channel is closed and drained.
+
+<Example file="28-channel-basics.js" />
+
+### The buffer {/* #capacity */}
+
+`capacity` is how many values the channel holds while nobody has taken them. While the buffer has room, `send` completes immediately. When there is no room, `send` waits until someone reads. This way a fast producer cannot run far ahead of a slow consumer and eat all the memory.
+
+A channel without a buffer (`new Channel()`, capacity 0) is a rendezvous: `send` completes only when the receiver has taken the value. The sender knows for certain that its value is already in someone else's hands.
+
+## What happens to the value {/* #move */}
+
+A channel follows the same rules as `postMessage` and `spawn`:
+
+- **A region object moves.** Its whole region goes into the channel, without a copy, and the sender loses access. You do not need to put the region in a transfer list: the channel does it for the regions the value refers to directly (the value itself or its top-level fields).
+- **A frozen region becomes shared.** The receiver reads the same object under a `borrow()`, and so does the sender (if the sender froze the region itself, it does not need a borrow).
+- **Ordinary data is copied**, as with `postMessage`.
+
+<Example file="29-channel-move.js" />
+
+A channel can be captured in `spawn`, passed with `postMessage`, and even sent through another channel: at every end it is the same channel. A channel cannot be put inside a region; a region holds only data.
+
+## A pipeline {/* #pipeline */}
+
+The most common pattern: one task produces work, several tasks take it apart, and the results flow into a shared channel. The worker tasks read the same `orders` channel, so each order goes to exactly one of them. When the producer closes the channel, their `for await` loops end on their own.
+
+<Example file="30-channel-pipeline.js" />
+
+How many orders each task gets is not known in advance: whoever is free first takes the next one. If you need an order, carry it in the data, as `id` does here.
+
+## Waiting on several channels: `select` {/* #select */}
+
+`await Channel.select([a, b, c])` waits for the first channel that has a value and returns `{ channel, value, done }`. A closed channel also counts as ready: it yields `done: true`. If several are ready at once, any one of them is chosen, so that no channel starves.
+
+<Example file="31-channel-select.js" />
+
+## Blocking versions {/* #blocking */}
+
+Every operation has a version that stops the thread until the result is ready: `sendSync`, `recvSync`, `Channel.selectSync`, and `for (const value of ch)` reads a channel without `await`. This is convenient in a worker: the code is straightforward, as in Go, and the whole call chain does not have to be `async`. Do not block on the main thread, for the same reason as with `join()`: while the thread waits, it does nothing else.
+
+<Example file="32-channel-blocking.js" />
+
+A thread waiting on a channel does not hold up garbage collection in other threads. If a worker is terminated with `terminate()` while it waits, the wait is interrupted, and a value that was already handed to it but not yet read goes back to the channel for the next receiver.
+
+## Shared data: `RwLock` {/* #rwlock */}
+
+A channel passes data from hand to hand. Sometimes it is more convenient for the data to stay in place and for threads to come to it in turn: a shared counter, a cache, game state. For this there is `RwLock`, like `tokio::sync::RwLock` in Rust or `sync.RWMutex` in Go. The lock holds one region. A writer temporarily gets ownership of it, and then nobody else sees it. There can be any number of readers, and while they read, the region is frozen.
+
+<Example file="38-rwlock.js" />
+
+The data is guarded by the same ownership as everything else. While nobody holds the lock, its region belongs to nobody. That is why a reference saved from a guard after release does not work: accessing it is an error, not a data race of the kind Go's race detector looks for. For the same reason, the lock's region cannot be freed, frozen, sent to a channel or with `postMessage`, and you cannot take a `borrow()` on it: all of that would bypass the lock.
+
+Waiters get the lock in the order they arrive. A reader that arrives after a waiting writer waits for that writer, so writers do not starve. This is why you cannot take `write()` while holding `read()` on the same lock: the writer waits until all readers release, including this same thread.
+
+`read()` and `write()` wait through a promise, `readSync()` and `writeSync()` block the thread (this is for workers), and `tryRead()` and `tryWrite()` return `null` immediately if the lock is taken. A guard is released with `using` or `release()`. A guard that a `spawn` task forgot to release is released when the task ends, and if the thread terminates, together with the thread.
+
+A writer that did not finish its work poisons the lock, the way a panic poisons a `Mutex` in Rust: the data may have been left half-changed. This happens if a write guard is released by a cancelled task, if a task failed without releasing it, or if the thread that held it terminated. Readers do not poison the lock. For a poisoned lock, `lock.poisoned` is `true`, and `read()`, `write()` and the other ways to take it fail with `PoisonError`. The error message says where the guard was released. Once the data has been checked or fixed, `lock.clearPoison()` removes the mark. There is an example [in the section on cancellation](/region-js/spawn/#abort).
+
+Taking the lock for writing and releasing it costs about 0.2 µs; for `RwLock` in tokio it is about 0.01 µs: here every acquisition also changes the region's owner. Handing the lock to another thread costs as much as waking that thread ([measurements](/region-js/numbers/#tokio)).
+
+Between threads, a lock travels like a channel: it can be captured in `spawn`, sent to a channel, and passed with `postMessage`. `new RwLock(data)` copies ordinary data into a new region, and takes a region object owned by the thread without a copy.
+
+## How this differs from Go {/* #vs-go */}
+
+|  | Go | Here |
+| --- | --- | --- |
+| What can be sent | anything, shared memory | data: regions move, everything else is copied |
+| Data races | possible, caught by the race detector | none: a region always has one owner |
+| Waiting without blocking | not needed, goroutines are cheap | `await`; blocking is allowed in workers |
+| send to a closed channel | panic | `TypeError` |
+| Senders waiting at close | panic | their values stay in the channel |
+| End of the program | when `main` returns | d8 waits for tasks and channel operations |
+
+The last row means that a receiver keeps the program alive as long as another thread can wake it.
+
+## Deadlocks {/* #deadlock */}
+
+If all threads are waiting and none of them can wake the others, that is a deadlock. In this situation Go terminates the program with the error "all goroutines are asleep". Here every wait on channels and locks ends with a `DeadlockError`, and the program can catch it:
+
+<Example file="40-deadlock.js" />
+
+A thread is asleep when it has nothing to do in its event loop or when it is in a blocking wait: `recvSync`, `writeSync`, `join()`. A thread that is computing may still send something, so while it works there is no deadlock. The same goes for a `timeout()` timer: until it fires, it can cancel a task. The error comes if all threads have been asleep like this for 50 ms in a row.
+
+The check looks only at channels and locks. A task waiting on an ordinary promise that nobody will ever resolve keeps d8 running forever, as before.
+
+## What it costs {/* #cost */}
+
+Numbers, strings, region objects and channels themselves go through a channel directly, without the serializer. Ordinary objects are copied by the same serializer that `postMessage` uses. A waiting thread is woken directly, and it takes the value it waited for without the shared channel mutex. A round trip through two unbuffered channels costs almost as much as exchanging messages with a worker, even though each round trip is two rendezvous between sender and receiver, and for each one the receiver builds a `{ value, done }` result.
+
+<Example file="33-channel-overhead.js" timing />
+
+That is a few microseconds, while goroutines in Go take a fraction of a microsecond. If you pass one number at a time through a channel, you will not get more than 200,000 values per second, and in a hot loop the transfer can easily take longer than the work itself. Channels are good for passing chunks of work: an order, a piece of a file, a batch of lines. Group small values into batches, just as with `spawn` ([more](/region-js/practices/#batch)).

@@ -1,0 +1,136 @@
+---
+// A horizontal bar chart from src/data/charts.ts, drawn at build time as inline SVG.
+//
+//   <Chart id="move-1m" />
+//
+// Each bar has a direct value label, a tooltip with the exact value and a note, and an aria label;
+// "Show as a table" opens the same numbers as a table. The bars grow in once when the chart
+// scrolls into view (src/scripts/motion.ts); without JavaScript, or with reduced motion, the chart
+// is shown in its final state right away.
+import { CHARTS } from '../data/charts';
+import { ui } from '../lib/i18n';
+import { typograph } from '../lib/typograph.mjs';
+
+interface Props {
+	id: string;
+}
+
+const spec = CHARTS[Astro.props.id];
+if (!spec) throw new Error(`Unknown chart ${Astro.props.id}`);
+const { lang, t } = ui(Astro.url);
+const text = spec[lang];
+const typo = (s: string) => (lang === 'ru' ? typograph(s) : s);
+
+const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+const f1 = (n: number) => n.toFixed(1);
+
+/** Axis label: Russian uses a decimal comma and a thin space between thousands, English a point and a comma. */
+function number(value: number, digits: number) {
+	const s = value.toFixed(digits);
+	let [whole, frac] = s.split('.');
+	if (whole.length > 4) whole = Number(whole).toLocaleString('en-US').replace(/,/g, lang === 'ru' ? '\u2009' : ',');
+	return whole + (frac ? (lang === 'en' ? '.' : ',') + frac : '');
+}
+
+function niceStep(span: number, ticks = 5) {
+	const raw = span / ticks;
+	const mag = 10 ** Math.floor(Math.log10(raw));
+	for (const m of [1, 2, 2.5, 5, 10]) if (raw <= m * mag) return m * mag;
+	return 10 * mag;
+}
+
+function barPath(x0: number, y: number, w: number, h: number, r = 4) {
+	if (w < 2 * r) {
+		w = Math.max(w, 2);
+		return `<rect x="${f1(x0)}" y="${f1(y)}" width="${f1(w)}" height="${f1(h)}" rx="1"`;
+	}
+	return `<path d="M${f1(x0)},${f1(y)} h${f1(w - r)} a${r},${r} 0 0 1 ${r},${r} v${f1(h - 2 * r)} a${r},${r} 0 0 1 -${r},${r} h-${f1(w - r)} z"`;
+}
+
+const W = 700;
+const L = 200;
+const R = 96;
+const P = W - L - R;
+const barH = 22;
+const pitch = 50;
+const top = 8;
+const rows = spec.rows.map((r, i) => ({ ...r, ...text.rows[i] }));
+let vmax = Math.max(...rows.map((r) => Math.max(r.value, r.ideal ?? 0)));
+if (spec.ref !== undefined) vmax = Math.max(vmax, spec.ref);
+const step = niceStep(vmax, spec.ticks ?? 5);
+const axisMax = Math.ceil(vmax / step) * step;
+const x = (v: number) => L + (P * v) / axisMax;
+// Axis labels show at least as many decimals as the step has, so a 0.5 step never prints as 0, 0, 1.
+const stepDigits = (String(+step.toPrecision(12)).split('.')[1] ?? '').length;
+const tickDigits = Math.max(spec.tickDigits ?? 0, stepDigits);
+const plotH = top + pitch * rows.length;
+const H = plotH + 44;
+
+const parts: string[] = [];
+parts.push(`<svg viewBox="0 0 ${W} ${H}" role="img" aria-labelledby="${spec.id}-t">`);
+parts.push(`<title id="${spec.id}-t">${esc(text.title)}</title>`);
+for (let v = 0; v <= axisMax + 1e-9; v += step) {
+	const xx = x(v);
+	parts.push(`<line class="c-grid" x1="${f1(xx)}" x2="${f1(xx)}" y1="0" y2="${plotH}"/>`);
+	parts.push(`<text class="c-tick" x="${f1(xx)}" y="${plotH + 16}" text-anchor="middle">${number(v, tickDigits)}</text>`);
+}
+parts.push(`<line class="c-base" x1="${L}" x2="${L}" y1="0" y2="${plotH}"/>`);
+parts.push(`<text class="c-axis" x="${f1(L + P / 2)}" y="${plotH + 38}" text-anchor="middle">${esc(text.axis)}</text>`);
+if (spec.ref !== undefined) {
+	parts.push(`<line class="c-ref" x1="${f1(x(spec.ref))}" x2="${f1(x(spec.ref))}" y1="0" y2="${plotH}"/>`);
+}
+rows.forEach((r, i) => {
+	const y = top + i * pitch + (pitch - barH) / 2 - 4;
+	const cy = y + barH / 2;
+	const fullLabel = r.label + (r.sub ? `, ${r.sub}` : '');
+	const aria = `${r.label}${r.sub ? ` (${r.sub})` : ''}: ${r.text}`;
+	parts.push(
+		`<g class="bar" tabindex="0" role="img" aria-label="${esc(aria)}" data-value="${esc(r.text)}" data-label="${esc(fullLabel)}" data-note="${esc(r.note ?? '')}" style="--i:${i}">`,
+	);
+	parts.push(`<rect class="c-hit" x="0" y="${f1(y - 10)}" width="${W}" height="${barH + 20}" rx="6"/>`);
+	parts.push(`<text class="c-cat" x="${L - 12}" y="${f1(cy + (r.sub ? -2 : 4.5))}" text-anchor="end">${esc(r.label)}</text>`);
+	if (r.sub) parts.push(`<text class="c-cat-s" x="${L - 12}" y="${f1(cy + 13)}" text-anchor="end">${esc(r.sub)}</text>`);
+	const w = x(r.value) - L;
+	parts.push(`${barPath(L, y, w, barH)} class="c-bar c-s${r.series ?? 1}"/>`);
+	if (r.ideal) {
+		parts.push(`<rect class="c-ideal" x="${f1(x(r.ideal) - 1.5)}" y="${f1(y - 4)}" width="3" height="${barH + 8}" rx="1"/>`);
+	}
+	const labelX = Math.max(L + Math.max(w, 2), r.ideal ? x(r.ideal) + 2 : 0) + 7;
+	parts.push(`<text class="c-val" x="${f1(labelX)}" y="${f1(cy + 4.5)}" style="--dx:${f1(-Math.max(w, 2))}">${esc(r.text)}</text>`);
+	parts.push('</g>');
+});
+parts.push('</svg>');
+const svg = parts.join('');
+---
+
+<figure class="chart" data-lang={lang} data-chart={Astro.props.id}>
+	<h4>{typo(text.title)}</h4>
+	<p class="sub">{typo(text.sub)}</p>
+	{
+		spec.legend && text.legend && (
+			<ul class="legend">
+				{spec.legend.map((cls, i) => (
+					<li>
+						<span class={`sw ${cls}`} />
+						{typo(text.legend![i])}
+					</li>
+				))}
+			</ul>
+		)
+	}
+	<div class="chart-plot" set:html={svg} />
+	<details class="table-view">
+		<summary>{typo(t.table)}</summary>
+		<div class="table-wrap">
+			<table>
+				<thead>
+					<tr>{text.tableHead.map((c, i) => <th class={i ? 'num' : undefined}>{typo(c)}</th>)}</tr>
+				</thead>
+				<tbody>
+					{text.table.map((row) => <tr>{row.map((c, i) => <td class={i ? 'num' : undefined}>{typo(c)}</td>)}</tr>)}
+				</tbody>
+			</table>
+		</div>
+	</details>
+	{text.caption && <figcaption>{typo(text.caption)}</figcaption>}
+</figure>

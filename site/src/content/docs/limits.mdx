@@ -1,0 +1,126 @@
+---
+title: "Limits, plans, and how to try it"
+description: "What the prototype lacks, what is planned, and how to run the examples yourself."
+eyebrow: "Chapter 10"
+sidebar:
+  label: "Limits and plans"
+---
+<div class="lead">
+
+This is an experiment, and it has many limits. Some simplify the first version; others are open questions that have no good answer yet. Below is everything that is known.
+
+</div>
+
+## How to run it {/* #run */}
+
+You need a d8 built from the fork. The `scripts/setup.sh` script downloads V8 at the right commit, applies the `v8/regions.patch` patch, and builds d8. The examples from this site are in `site/examples/en/`, and each one runs with a single command:
+
+```sh
+$ v8-src/v8/out/release/d8 --harmony-regions site/examples/en/01-first-region.js
+```
+
+On the first line, d8 prints a warning:
+
+```text
+V8 is running with experimental features enabled. Stability and security will suffer.
+```
+
+This is expected: d8 reports any experimental flag this way. After it comes the example's output, the same as on the site's pages.
+
+Useful flags:
+
+- `--harmony-regions` enables `Region`, `spawn`, `Channel`, and the `#{...}` and `#[...]` literals ([more](/region-js/guide/#literals)). Without it they simply do not exist, and `#{` is a syntax error. The old flag `--harmony-region-literals` means the same thing;
+- `--module` runs the file as a module, so you can use top-level `await`. Examples that need it start with the line `// d8-flags: --module`;
+- `--max-serializer-memory=4000` raises the memory limit that d8 gives the `postMessage` serializer (in megabytes). Without it, copying a large tree in the measurements hits the limit. The site's examples were run with this flag;
+- `--spin-wait-us=50` sets how many microseconds an idle thread keeps checking for incoming work before it goes to sleep. The default is 50; `0` turns the spinning off. With it, starting `spawn` tasks and exchanging messages is about three times faster ([why](/region-js/inside/#fast-spawn));
+- `--verify-heap` and `--expose-gc` enable heap verification and the `gc()` function. The tests in `tests/` use them.
+
+The examples are rerun with `node site/scripts/run-examples.mjs`: it runs all of them in d8 and saves their fresh output next to them, and the site shows that output when it is built (`pnpm build` in `site/`).
+
+To write examples with hints and checks in the editor, open the `playground/` folder in VS Code ([Editor and linters](/region-js/tooling/)).
+
+## Limits {/* #limits */}
+
+### Where it works {/* #where-it-works */}
+
+:::caution[d8 only]
+`Region`, `spawn`, and channels exist only in d8, the V8 test shell. They are not available in Chrome, Node, Deno, or Electron. For them to appear there, each environment would have to teach its own `postMessage` to pass regions and implement what d8 has as separate code: the worker pool, the task port for `spawn`, and channels. Nobody has done this in other environments.
+:::
+
+### Memory {/* #memory */}
+
+- **Region IDs are freed only by a shared-heap GC.** An ID is handed out again once the heap has no objects of the region left and no thread has its JS `Region` object. The check runs at the end of a shared-heap GC. The table is sized for 2<sup>20</sup>, about a million regions alive at the same time. If there is no GC for a long time, the limit can be exhausted: a million empty `new Region()` calls in a row fail with “Too many regions”. With data inside the regions, GCs happen on their own, and 1.2 million regions in a row are created without errors.
+- **The owner collects garbage inside a region by itself only if it alone holds the region.** Threads that have no pointers into the region left release it at the owner's request. A region that other threads still reference, and a small region without its own pages, are collected by the shared GC, like any objects in the shared heap (more on the [How it works](/region-js/inside/#gc) page).
+- **The shared GC stops all threads at once.** Regions that a thread created and dropped do not trigger it: in the `tests/bench-pauses.js` measurement, one thread throws away 60 million region objects per second, and the other threads do not get a single pause of 5 ms or more. But the regions from the previous item, regions freed with `free()`, and strings that no region holds are collected only by the shared GC, and the more such data there is, the longer the pause.
+- **`free()` does not release all memory at once.** Typed array memory is released at the moment of the call, and object memory at the next shared-heap GC ([more](/region-js/guide/#free)).
+
+### What can be stored {/* #what-can-be-stored */}
+
+- Only plain objects (with the prototype `Object.prototype` or `null`), ordinary arrays, typed arrays, strings, numbers, `true`/`false`, `null`, `undefined`.
+- No `Map`, `Set`, `Date`, `BigInt`, `Symbol`, or bare `ArrayBuffer` and `DataView`. Functions only from `Region.fn`, without a closure. A region holds an object of its own thread only through a `LocalRef` handle (`Region.localRef`), and the handle can be dereferenced only on that thread ([more](/region-js/guide/#functions)).
+- Typed arrays backed by a `SharedArrayBuffer` or a resizable buffer cannot be put in. Ordinary ones are copied, or moved without a copy through `region.run(fn, [buffer])`. Views over region memory are detached when the region moves or is frozen, and after that they read as empty ([more](/region-js/guide/#typed)).
+- Class instances and subclasses of `Array` cannot be put in: the error is “cannot be moved into a region”.
+- Object shapes are fixed: you cannot add a new field. Arrays grow and shrink (`push`, `pop`, `splice`, `length`). Indexed writes and `push` take the fast path while the array has spare capacity; `pop`, `splice`, `length = n`, and growing the capacity go through the runtime.
+- `Object.keys`, `Object.values`, `Object.entries`, `for...in`, `JSON.stringify`, `Array.isArray`, `flat`, and spread work. On a thread that does not own the region, they throw `OwnershipError`.
+
+### Performance {/* #performance */}
+
+- Maglev and Turbofan inline region access, but they check the shape, the index, and the value being written on every access, and Turbofan checks the owner once only in a loop without calls. As a result, reading fields is about 1.2 times slower than usual, writing 1.7 times, and indexed access 2.3 times ([measurement](/region-js/numbers/#access)). The Maglev fast path exists only on arm64; on other processors Maglev calls the inline cache on every access, while Turbofan inlines everywhere. Typed arrays are not affected: they work at normal speed.
+- Array methods, `for...of`, `Array.from`, and spread read a region array directly, but still a bit slower than an ordinary array: `map` over 100,000 numbers takes 1.46 ms versus 0.92 ([measurement](/region-js/numbers/#methods)). Elements that are themselves typed arrays are read through the generic path, which is slower.
+- `run` copies the whole graph into the region (O(n), although only once). The copy has become faster, but it still costs about six times more than simply creating the same ordinary objects ([measurement](/region-js/numbers/#create)).
+- The `#{}` and `#[]` literals are the fastest way to fill a region. TypeScript understands them only through a plugin from the VS Code extension; Biome and ESLint do not understand them at all ([more](/region-js/tooling/#literals)). The `'use region'` directive does the same with ordinary syntax, and tools understand it, but inside it literals cannot use spread, methods, or computed keys. A literal's strings and fractional numbers are copied into region memory: short strings and numbers in machine code, strings longer than 256 characters through the runtime.
+
+### Freezing {/* #freezing */}
+
+- A frozen region is read under a `borrow()`. Without a borrow, it can be read only by the thread that froze it (or received the right to thaw it) and by `spawn` tasks that captured the region or received it as an argument. An object that arrived through `postMessage` or a channel is read under the receiver's own borrow.
+- Readers that hold borrows almost without a break can keep the owner from thawing the region: `thaw()` gets “Region is still borrowed” again and again, and `thawWhenFree()` waits for a moment when there are zero borrows, which can take a long time. This is like a reader-writer lock without writer priority. `tests/thaw-race.js` shows the owner waiting. Release borrows when you are done reading.
+
+### spawn {/* #spawn */}
+
+- A pool of `spawn.poolSize` long-lived workers (4 by default). Starting a task costs about 3 µs, and about 4 µs per task if you start thousands of tasks at once. Tasks shorter than a few tenths of a millisecond are better combined.
+- While a pool thread waits for work, it spins on its core for up to 50 µs and only then goes to sleep (the `--spin-wait-us` flag). A program with nothing to do does not occupy the CPU.
+- Ordinary data that is captured or passed as an argument is copied into every task. Large read-only data is better put into `Region.share` once.
+- Classes are not supported. `super`, `new.target`, and `import` do not work in callbacks.
+- If a pool worker dies in the middle of a task (pool workers do not exit on their own; running out of memory, for example, can kill one), the tasks it had already taken end with the error `spawn() worker exited without a result`. The other workers run the rest. The pool does not start a new worker in its place while the others are alive; if all of them have died, the next `spawn` starts a new pool.
+- If nobody awaits a failed task, d8 reports an unhandled promise rejection and exits with code 1. The stack in this message points inside `spawn`, not to the call site.
+- A plain `borrow()` taken in a task is released at the end of the task. Async work needs `borrowWhile`.
+
+### Channels {/* #channels */}
+
+- Cancellation of a task reaches nested tasks through the thread of each one, so a deep chain is cancelled not instantly but over several thread wake-ups.
+- Deadlock detection sees only channels and locks. If a task waits for an ordinary promise that nobody will resolve, d8 waits forever, until the task is cancelled with `abort()` or `timeout()`.
+- Deadlock detection does not see an `Atomics.waitAsync` timeout and may mistake for a deadlock a wait that this timeout would have woken up.
+- Only numbers, strings, region objects, and channels themselves go through a channel without the serializer. Ordinary objects are copied, as with `postMessage`.
+
+### Security review {/* #security-review */}
+
+The V8 tests pass, and the fuzzer found nothing. But the fuzzing is short and was written specifically for this project, and it does not cover typed arrays, `spawn`, or channels. Real V8 is tested by fuzzer clusters for months; there has been no such testing here. Treat the prototype as not reviewed for security, and do not run untrusted code in it.
+
+<p id="thaw-views">One such hole has already been found while writing the documentation: a view of a frozen region survived `thaw()` and saw the new owner's writes. Now a view of a frozen region lives only under a `borrow()` or with the thread that froze it ([how it works](/region-js/guide/#typed-borrow)).</p>
+
+## What comes next {/* #roadmap */}
+
+These are directions, not promises with deadlines.
+
+- **Inlining access in the optimizing compilers.** Most of it is done: Maglev and Turbofan inline reads and writes of fields and elements, the checks run in machine code, and when the fast path does not apply, the code calls the inline cache without deoptimizing ([how](/region-js/inside/#jit)). Writes got cheaper, from ×6 to ×1.7 relative to ordinary JS, and indexed access from ×11 to ×2.3. In a loop without calls, Turbofan checks the owner once, and instead of falling back to an inline cache call it deoptimizes ([how](/region-js/inside/#jit)). This gained about a quarter on indexed loops, but the gap with tokio barely changed: it lies mostly elsewhere ([measurement](/region-js/numbers/#real)). What remains is a Maglev fast path for processors other than arm64 and the same per-loop check in Maglev.
+- **Cheap task startup.** Most of it is done. Starting a `spawn` task got cheaper from about 40 to 3 µs, and a round trip through a channel from 10 to 3.5 µs ([how](/region-js/inside/#fast-spawn)). A task queue without the serializer for `spawn` already exists, and it is shared by all pool workers: a free worker takes the next task, so tasks do not get stuck behind a long one. A goroutine in Go still starts much faster than a microsecond.
+- **Faster receiving from a channel.** Most of it is done: a round trip through a channel costs about 3.5 µs in a build with checks and 1.1 µs without them, the same as exchanging messages with a worker. With `await` the round trip is more expensive, 1.7 µs: almost all of the remaining time goes to the promise and the `{ value, done }` result.
+- **Garbage collection without stopping all threads.** Region IDs are already freed, but that requires a shared-heap GC, and it stops all threads. We cannot yet collect a region without touching the others: that requires knowing every reference to its objects from every thread. How to do this, what V8 already has, and what the literature says are in a [research note](https://github.com/Tom4ikss/region-js/blob/main/research/region-gc.md). Five steps are done: large regions have their own pages; a region knows which threads may reference it; the owner, without stopping the others, collects a dropped region and the garbage inside a live one; threads that no longer hold a region release it at its request; and a region's strings and numbers live in its memory and die with it ([how](/region-js/inside/#gc)). A region that several threads still hold is collected by the shared GC.
+- **A fast path for literals and array growth.** Most of it is done: the `#{}` and `#[]` literals are allocated directly in machine code from the thread's buffer in the shared heap or on the region's pages, and indexed writes and `push` run without the runtime ([how](/region-js/inside/#literals)). Maglev and Turbofan now also inline access to existing region objects. What remains is copying strings and fractional numbers on field writes without the runtime too, and growing an array's spare capacity in machine code.
+- **Going beyond d8.** Teach `postMessage` in Node and Chromium to pass regions. Not even started yet.
+- **Ideas from the design that are not done yet:** a `Map` that lives in a region. Of the syntax, the `#{}` and `#[]` literals and the `'use region'` directive are done; permanently shared data is `Region.share`, “pure” functions in a region are `Region.fn` ([more](/region-js/guide/#functions)), and the bridge to an object of the current thread is `Region.localRef` ([more](/region-js/guide/#local-ref)). The rest is postponed.
+- **A very vague idea: `region.alloc(type, ...values)`.** One function that allocates anything in a region: `Map`, `Set`, `Date`, your own types. How to do it is unclear for now: each such object has its own internal layout, and for each one we would have to decide where its data lives, how other threads read it, and what to do with its methods. Postponed until a clear scheme appears.
+
+## The short version {/* #faq */}
+
+### Can I use this in a project? {/* #can-i-use-this-in-a-project */}
+
+No. This is a research prototype that works only in the engine's test shell. Its purpose is to find out whether such a model is possible in JS and what it costs.
+
+### What did the experiment show? {/* #what-did-the-experiment-show */}
+
+That ordinary objects can be passed between threads without a copy, and that the engine can itself make sure two threads do not touch them at the same time. Moving really costs O(1), reading fields is nearly on par with ordinary objects (×1.2), and parallel reading scales. The price is checks on every access: writes are 1.7 times slower than usual, indexed access 2.3 times. And a lot of rules about what can be stored.
+
+### Where is the code? {/* #where-is-the-code */}
+
+The engine changes are the `v8/regions.patch` patch; after `scripts/setup.sh` they are in `v8-src/v8`: the region object in `src/objects/js-region.*`, the API in `src/d8/d8.cc`, the task port and channels in `src/d8/d8-port.cc` and `src/d8/d8-channel.cc`. Decisions and risks are described in `DESIGN.md`, what went into the release in `CHANGELOG.md`, tests and measurements are in `tests/`, and types and linter rules are in `playground/`.
