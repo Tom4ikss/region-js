@@ -1,0 +1,77 @@
+---
+// "How it works" in three steps on the landing page. The code is cut from
+// examples/*/43-orders.js and the error line is real output of examples/*/06-move.js.
+import { highlight } from '../../lib/highlight.mjs';
+import { ui } from '../../lib/i18n';
+import { typograph, typographHtml } from '../../lib/typograph.mjs';
+
+const { lang } = ui(Astro.url);
+const text = {
+	en: {
+		kicker: 'How it works',
+		title: 'Three steps, no copies',
+		steps: [
+			{
+				title: 'Create data in a region',
+				text: "<code>'use region'</code> at the top of a function makes every <code>{}</code> and <code>[]</code> in it a region object, created right in shared memory.",
+				code: "const build = (from, to) => {\n  'use region';\n  using _ = new Region().enter();\n  const orders = [];\n  // ... orders.push({ id: i, customer: { ... }, items: [ ... ] })\n  return orders; // moves to the caller together with the region\n};",
+			},
+			{
+				title: 'Hand it to another thread',
+				text: '<code>spawn</code> runs the function on another thread. The result comes back with its region: only the owner changes, nothing is copied.',
+				code: 'const parts = await Promise.all(Array.from({ length: TASKS }, (_, t) =>\n  spawn(build, t * ORDERS / TASKS, (t + 1) * ORDERS / TASKS)));',
+				out: 'in a region: true | owner is now the main thread: 0',
+			},
+			{
+				title: 'One owner, checked on every access',
+				text: 'A region has exactly one owner. Touching it from another thread throws instead of racing; a frozen region can be read by everyone.',
+				out: 'main thread writes: OwnershipError: region 0 belongs to another thread (isolate 1, this is isolate 0)',
+				err: true,
+			},
+		],
+	},
+	ru: {
+		kicker: 'Как это работает',
+		title: 'Три шага, ни одной копии',
+		steps: [
+			{
+				title: 'Данные сразу в регионе',
+				text: "<code>'use region'</code> в начале функции делает каждый <code>{}</code> и <code>[]</code> в ней объектом региона: он создаётся прямо в общей памяти.",
+				code: "const build = (from, to) => {\n  'use region';\n  using _ = new Region().enter();\n  const orders = [];\n  // ... orders.push({ id: i, customer: { ... }, items: [ ... ] })\n  return orders; // уезжает к вызывающему вместе с регионом\n};",
+			},
+			{
+				title: 'Отдать другому потоку',
+				text: '<code>spawn</code> запускает функцию в другом потоке. Результат возвращается вместе с регионом: меняется только хозяин, ничего не копируется.',
+				code: 'const parts = await Promise.all(Array.from({ length: TASKS }, (_, t) =>\n  spawn(build, t * ORDERS / TASKS, (t + 1) * ORDERS / TASKS)));',
+				out: 'лежат в регионе: true | владелец теперь главный поток: 0',
+			},
+			{
+				title: 'Один хозяин, проверка при каждом обращении',
+				text: 'У региона ровно один хозяин. Обращение из другого потока бросает ошибку, а не устраивает гонку; замороженный регион читают все.',
+				out: 'главный поток пишет: OwnershipError: region 0 belongs to another thread (isolate 1, this is isolate 0)',
+				err: true,
+			},
+		],
+	},
+}[lang];
+const typo = (s: string) => (lang === 'ru' ? typograph(s) : s);
+const escapeHtml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+---
+
+<section class="rj-steps not-content" aria-labelledby="rj-steps-title">
+	<p class="rj-kicker">{text.kicker}</p>
+	<h2 id="rj-steps-title" class="rj-section-title">{typo(text.title)}</h2>
+	<ol>
+		{
+			text.steps.map((step, i) => (
+				<li class={`step step-${i + 1}`}>
+					<span class="num" aria-hidden="true">{i + 1}</span>
+					<h3>{typo(step.title)}</h3>
+					<p set:html={lang === 'ru' ? typographHtml(step.text) : step.text} />
+					{step.code && <pre class="code"><code set:html={highlight(step.code)} /></pre>}
+					{step.out && <pre class:list={['out', { err: step.err }]} set:html={escapeHtml(step.out)} />}
+				</li>
+			))
+		}
+	</ol>
+</section>

@@ -43,8 +43,9 @@ export function pageHref(lang, slug, hash = '') {
 	return prefix + (slug === 'index' ? '' : `${slug}/`) + hash;
 }
 
-/** The same page in the other language. */
+/** The same page in the other language (the home page for the "not found" page). */
 export function otherLangHref(pathname) {
+	if (/\/404(?:\/|\.html)?$/.test(pathname)) return pageHref(langOf(pathname) === 'ru' ? 'en' : 'ru', 'index');
 	if (langOf(pathname) === 'ru') return pathname.replace(`${BASE}/ru`, BASE) || `${BASE}/`;
 	return pathname.replace(BASE, `${BASE}/ru`);
 }

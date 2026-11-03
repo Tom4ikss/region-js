@@ -54,3 +54,17 @@ export function loadExample(lang: Lang, name: string) {
 	const out = file(lang, name.replace(/\.js$/, '.out.txt'));
 	return { src, out, ...exampleOptions(src) };
 }
+
+/** Every example file of a language (sources and outputs), for the raw-file routes. */
+export function exampleFiles(lang: Lang): string[] {
+	return exampleNames(lang).flatMap((name) => [name, name.replace(/\.js$/, '.out.txt')]);
+}
+
+/**
+ * A raw example file, served at the same URL as on the old site (/region-js/examples/<file> and
+ * /region-js/ru/examples/<file>); the file label above each example links here.
+ */
+export function rawExample(lang: Lang, name: string): Response {
+	const type = name.endsWith('.js') ? 'text/javascript' : 'text/plain';
+	return new Response(exampleFile(lang, name), { headers: { 'Content-Type': `${type}; charset=utf-8` } });
+}

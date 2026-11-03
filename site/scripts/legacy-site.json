@@ -1,0 +1,656 @@
+{
+ "en": {
+  "channels": {
+   "ids": [
+    "basics",
+    "capacity",
+    "move",
+    "pipeline",
+    "select",
+    "blocking",
+    "rwlock",
+    "vs-go",
+    "deadlock",
+    "cost"
+   ],
+   "examples": [
+    "28-channel-basics.js",
+    "29-channel-move.js",
+    "30-channel-pipeline.js",
+    "31-channel-select.js",
+    "32-channel-blocking.js",
+    "38-rwlock.js",
+    "40-deadlock.js",
+    "33-channel-overhead.js"
+   ],
+   "charts": []
+  },
+  "guide": {
+   "ids": [
+    "region",
+    "literals",
+    "use-region",
+    "direct",
+    "rules",
+    "arrays",
+    "not-allowed",
+    "functions",
+    "local-ref",
+    "typed",
+    "typed-detach",
+    "typed-borrow",
+    "share",
+    "freeze",
+    "thaw-right",
+    "borrow",
+    "free",
+    "move",
+    "of",
+    "reference",
+    "errors"
+   ],
+   "examples": [
+    "01-first-region.js",
+    "37-literals.js",
+    "42-use-region.js",
+    "35-direct.js",
+    "03-read-write.js",
+    "04-arrays.js",
+    "05-not-allowed.js",
+    "48-region-fn.js",
+    "49-local-ref.js",
+    "20-typed-arrays.js",
+    "21-typed-views.js",
+    "41-seal.js",
+    "08-freeze-broadcast.js",
+    "22-freeze-handover.js",
+    "09-borrow.js",
+    "34-free.js",
+    "06-move.js",
+    "02-before-after.js",
+    "07-ping-pong.js",
+    "44-errors.js"
+   ],
+   "charts": []
+  },
+  "ideas": {
+   "ids": [
+    "one-owner",
+    "moving",
+    "i1t",
+    "freezing-everyone-can-look",
+    "a-visitor-s-ticket",
+    "all-region-states",
+    "i2t",
+    "why-this-rules-out-data-races",
+    "what-if-two-threads-want-to-write",
+    "why-a-region-holds-only-data"
+   ],
+   "examples": [
+    "17-no-race.js"
+   ],
+   "charts": []
+  },
+  "index": {
+   "ids": [
+    "example-orders-on-four-threads",
+    "tokio",
+    "key-numbers",
+    "what-the-prototype-can-do",
+    "where-to-start"
+   ],
+   "examples": [
+    "43-orders.js"
+   ],
+   "charts": []
+  },
+  "inside": {
+   "ids": [
+    "isolates",
+    "x1t",
+    "table",
+    "objects",
+    "arrays",
+    "proto-methods",
+    "ic",
+    "x2t",
+    "jit",
+    "methods",
+    "writes",
+    "run",
+    "fast-copy",
+    "literals",
+    "postmessage",
+    "x3t",
+    "fast-spawn",
+    "a-thread-does-not-go-to-sleep-right-away",
+    "the-function-is-analyzed-once",
+    "task-code-travels-once",
+    "messages-got-simpler",
+    "a-dedicated-queue-instead-of-postmessage",
+    "why-this-is-still-not-go",
+    "frozen",
+    "frozen-arrays",
+    "typed",
+    "gc",
+    "strings",
+    "safety",
+    "size"
+   ],
+   "examples": [],
+   "charts": []
+  },
+  "limits": {
+   "ids": [
+    "run",
+    "limits",
+    "where-it-works",
+    "memory",
+    "what-can-be-stored",
+    "performance",
+    "freezing",
+    "spawn",
+    "channels",
+    "security-review",
+    "thaw-views",
+    "roadmap",
+    "faq",
+    "can-i-use-this-in-a-project",
+    "what-did-the-experiment-show",
+    "where-is-the-code"
+   ],
+   "examples": [],
+   "charts": []
+  },
+  "numbers": {
+   "ids": [
+    "real",
+    "move",
+    "ch-move-t",
+    "there-and-back",
+    "create",
+    "ch-create-t",
+    "access",
+    "ch-access-t",
+    "methods",
+    "parallel",
+    "ch-scale-t",
+    "spawn",
+    "ch-spawn-t",
+    "tokio",
+    "safety",
+    "prototype",
+    "criteria"
+   ],
+   "examples": [
+    "36-create.js"
+   ],
+   "charts": [
+    "move-1m",
+    "create",
+    "access-ratio",
+    "frozen-scaling",
+    "spawn-parallel"
+   ]
+  },
+  "practices": {
+   "ids": [
+    "cheatsheet",
+    "frozen",
+    "ch-p1-t",
+    "move",
+    "ch-p2-t",
+    "batch",
+    "ch-p3-t",
+    "local",
+    "local-write",
+    "ch-p4a-t",
+    "local-read",
+    "ch-p4b-t",
+    "methods",
+    "ch-p5-t",
+    "shapes",
+    "ch-p6-t",
+    "await",
+    "ch-p7-t",
+    "after-move",
+    "typed",
+    "ch-p9-t",
+    "map",
+    "borrow-while",
+    "build",
+    "ch-p12-t"
+   ],
+   "examples": [
+    "practice-01-frozen-shared.js",
+    "practice-02-move-not-rebuild.js",
+    "practice-03-batch.js",
+    "practice-04-local-then-write.js",
+    "practice-05-methods.js",
+    "practice-06-shapes.js",
+    "practice-07-await-not-join.js",
+    "practice-08-after-move.js",
+    "practice-09-typed-arrays.js",
+    "practice-10-map-handles.js",
+    "36-create.js"
+   ],
+   "charts": [
+    "p-frozen",
+    "p-move",
+    "p-batch",
+    "p-write",
+    "p-read",
+    "p-methods",
+    "p-shapes",
+    "p-await",
+    "p-typed",
+    "p-build"
+   ]
+  },
+  "problem": {
+   "ids": [
+    "one-thread-and-a-task-queue",
+    "p1t",
+    "web-workers-a-second-thread-but-a-world-of-its-o",
+    "postmessage-copies",
+    "p2t",
+    "transferable-no-copy-but-only-bytes",
+    "sharedarraybuffer-shared-memory-and-races",
+    "what-we-have-today"
+   ],
+   "examples": [
+    "16-race-sab.js"
+   ],
+   "charts": []
+  },
+  "spawn": {
+   "ids": [
+    "basic",
+    "await",
+    "module",
+    "captures",
+    "returning-regions-is-like-a-loan",
+    "this",
+    "gotchas",
+    "errors",
+    "unhandled",
+    "parallel",
+    "nested",
+    "abort",
+    "scope",
+    "how",
+    "frozen",
+    "frozen-ticket",
+    "borrow"
+   ],
+   "examples": [
+    "10-spawn-basic.js",
+    "11-spawn-await.js",
+    "26-module-await.js",
+    "12-spawn-captures.js",
+    "13-spawn-this.js",
+    "18-spawn-gotchas.js",
+    "14-spawn-errors.js",
+    "24-spawn-unhandled.js",
+    "15-spawn-parallel.js",
+    "23-spawn-nested.js",
+    "39-spawn-abort.js",
+    "46-cancel.js",
+    "45-scope.js",
+    "19-spawn-overhead.js",
+    "47-thaw-wait.js",
+    "27-spawn-freeze.js",
+    "25-spawn-borrow.js"
+   ],
+   "charts": []
+  },
+  "tooling": {
+   "ids": [
+    "layers",
+    "setup",
+    "types",
+    "biome",
+    "eslint",
+    "no-floating-spawn",
+    "no-region-use-while-spawned",
+    "no-use-after-send",
+    "no-write-to-spawn-copy",
+    "no-await-holding-guard",
+    "no-guard-value-escape",
+    "no-stale-region-check",
+    "no-floating-borrow-while",
+    "literals",
+    "runtime"
+   ],
+   "examples": [],
+   "charts": []
+  }
+ },
+ "ru": {
+  "channels": {
+   "ids": [
+    "basics",
+    "capacity",
+    "move",
+    "pipeline",
+    "select",
+    "blocking",
+    "rwlock",
+    "vs-go",
+    "deadlock",
+    "cost"
+   ],
+   "examples": [
+    "28-channel-basics.js",
+    "29-channel-move.js",
+    "30-channel-pipeline.js",
+    "31-channel-select.js",
+    "32-channel-blocking.js",
+    "38-rwlock.js",
+    "40-deadlock.js",
+    "33-channel-overhead.js"
+   ],
+   "charts": []
+  },
+  "guide": {
+   "ids": [
+    "region",
+    "literals",
+    "use-region",
+    "direct",
+    "rules",
+    "arrays",
+    "not-allowed",
+    "functions",
+    "local-ref",
+    "typed",
+    "typed-detach",
+    "typed-borrow",
+    "share",
+    "freeze",
+    "thaw-right",
+    "borrow",
+    "free",
+    "move",
+    "of",
+    "reference",
+    "errors"
+   ],
+   "examples": [
+    "01-first-region.js",
+    "37-literals.js",
+    "42-use-region.js",
+    "35-direct.js",
+    "03-read-write.js",
+    "04-arrays.js",
+    "05-not-allowed.js",
+    "48-region-fn.js",
+    "49-local-ref.js",
+    "20-typed-arrays.js",
+    "21-typed-views.js",
+    "41-seal.js",
+    "08-freeze-broadcast.js",
+    "22-freeze-handover.js",
+    "09-borrow.js",
+    "34-free.js",
+    "06-move.js",
+    "02-before-after.js",
+    "07-ping-pong.js",
+    "44-errors.js"
+   ],
+   "charts": []
+  },
+  "ideas": {
+   "ids": [
+    "one-owner",
+    "moving",
+    "i1t",
+    "freezing-everyone-can-look",
+    "a-visitor-s-ticket",
+    "all-region-states",
+    "i2t",
+    "why-this-rules-out-data-races",
+    "what-if-two-threads-want-to-write",
+    "why-a-region-holds-only-data"
+   ],
+   "examples": [
+    "17-no-race.js"
+   ],
+   "charts": []
+  },
+  "index": {
+   "ids": [
+    "example-orders-on-four-threads",
+    "tokio",
+    "key-numbers",
+    "what-the-prototype-can-do",
+    "where-to-start"
+   ],
+   "examples": [
+    "43-orders.js"
+   ],
+   "charts": []
+  },
+  "inside": {
+   "ids": [
+    "isolates",
+    "x1t",
+    "table",
+    "objects",
+    "arrays",
+    "proto-methods",
+    "ic",
+    "x2t",
+    "jit",
+    "methods",
+    "writes",
+    "run",
+    "fast-copy",
+    "literals",
+    "postmessage",
+    "x3t",
+    "fast-spawn",
+    "a-thread-does-not-go-to-sleep-right-away",
+    "the-function-is-analyzed-once",
+    "task-code-travels-once",
+    "messages-got-simpler",
+    "a-dedicated-queue-instead-of-postmessage",
+    "why-this-is-still-not-go",
+    "frozen",
+    "frozen-arrays",
+    "typed",
+    "gc",
+    "strings",
+    "safety",
+    "size"
+   ],
+   "examples": [],
+   "charts": []
+  },
+  "limits": {
+   "ids": [
+    "run",
+    "limits",
+    "where-it-works",
+    "memory",
+    "what-can-be-stored",
+    "performance",
+    "freezing",
+    "spawn",
+    "channels",
+    "security-review",
+    "thaw-views",
+    "roadmap",
+    "faq",
+    "can-i-use-this-in-a-project",
+    "what-did-the-experiment-show",
+    "where-is-the-code"
+   ],
+   "examples": [],
+   "charts": []
+  },
+  "numbers": {
+   "ids": [
+    "real",
+    "move",
+    "ch-move-t",
+    "there-and-back",
+    "create",
+    "ch-create-t",
+    "access",
+    "ch-access-t",
+    "methods",
+    "parallel",
+    "ch-scale-t",
+    "spawn",
+    "ch-spawn-t",
+    "tokio",
+    "safety",
+    "prototype",
+    "criteria"
+   ],
+   "examples": [
+    "36-create.js"
+   ],
+   "charts": [
+    "move-1m",
+    "create",
+    "access-ratio",
+    "frozen-scaling",
+    "spawn-parallel"
+   ]
+  },
+  "practices": {
+   "ids": [
+    "cheatsheet",
+    "frozen",
+    "ch-p1-t",
+    "move",
+    "ch-p2-t",
+    "batch",
+    "ch-p3-t",
+    "local",
+    "local-write",
+    "ch-p4a-t",
+    "local-read",
+    "ch-p4b-t",
+    "methods",
+    "ch-p5-t",
+    "shapes",
+    "ch-p6-t",
+    "await",
+    "ch-p7-t",
+    "after-move",
+    "typed",
+    "ch-p9-t",
+    "map",
+    "borrow-while",
+    "build",
+    "ch-p12-t"
+   ],
+   "examples": [
+    "practice-01-frozen-shared.js",
+    "practice-02-move-not-rebuild.js",
+    "practice-03-batch.js",
+    "practice-04-local-then-write.js",
+    "practice-05-methods.js",
+    "practice-06-shapes.js",
+    "practice-07-await-not-join.js",
+    "practice-08-after-move.js",
+    "practice-09-typed-arrays.js",
+    "practice-10-map-handles.js",
+    "36-create.js"
+   ],
+   "charts": [
+    "p-frozen",
+    "p-move",
+    "p-batch",
+    "p-write",
+    "p-read",
+    "p-methods",
+    "p-shapes",
+    "p-await",
+    "p-typed",
+    "p-build"
+   ]
+  },
+  "problem": {
+   "ids": [
+    "one-thread-and-a-task-queue",
+    "p1t",
+    "web-workers-a-second-thread-but-a-world-of-its-o",
+    "postmessage-copies",
+    "p2t",
+    "transferable-no-copy-but-only-bytes",
+    "sharedarraybuffer-shared-memory-and-races",
+    "what-we-have-today"
+   ],
+   "examples": [
+    "16-race-sab.js"
+   ],
+   "charts": []
+  },
+  "spawn": {
+   "ids": [
+    "basic",
+    "await",
+    "module",
+    "captures",
+    "returning-regions-is-like-a-loan",
+    "this",
+    "gotchas",
+    "errors",
+    "unhandled",
+    "parallel",
+    "nested",
+    "abort",
+    "scope",
+    "how",
+    "frozen",
+    "frozen-ticket",
+    "borrow"
+   ],
+   "examples": [
+    "10-spawn-basic.js",
+    "11-spawn-await.js",
+    "26-module-await.js",
+    "12-spawn-captures.js",
+    "13-spawn-this.js",
+    "18-spawn-gotchas.js",
+    "14-spawn-errors.js",
+    "24-spawn-unhandled.js",
+    "15-spawn-parallel.js",
+    "23-spawn-nested.js",
+    "39-spawn-abort.js",
+    "46-cancel.js",
+    "45-scope.js",
+    "19-spawn-overhead.js",
+    "47-thaw-wait.js",
+    "27-spawn-freeze.js",
+    "25-spawn-borrow.js"
+   ],
+   "charts": []
+  },
+  "tooling": {
+   "ids": [
+    "layers",
+    "setup",
+    "types",
+    "biome",
+    "eslint",
+    "no-floating-spawn",
+    "no-region-use-while-spawned",
+    "no-use-after-send",
+    "no-write-to-spawn-copy",
+    "no-await-holding-guard",
+    "no-guard-value-escape",
+    "no-stale-region-check",
+    "no-floating-borrow-while",
+    "literals",
+    "runtime"
+   ],
+   "examples": [],
+   "charts": []
+  }
+ }
+}

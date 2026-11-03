@@ -1,0 +1,403 @@
+---
+// The hero picture: three threads as lanes, regions as coloured boxes.
+//
+// - the violet region moves from the main thread to thread 1 and back (a move, no copy);
+// - the coral region comes from thread 2 to the main thread and goes home again;
+// - the mint region freezes: it turns icy and the other threads read it holding tickets;
+// - the main thread pokes at the violet region while thread 1 owns it and bounces off.
+//
+// Pure SVG and CSS. The static picture (no animation, reduced motion) is the middle of the story:
+// one region moved, one frozen with readers, one access refused.
+import { ui } from '../../lib/i18n';
+
+const { lang } = ui(Astro.url);
+const T =
+	lang === 'ru'
+		? {
+				title: 'Три потока и регионы между ними: регион переезжает в другой поток без копии, замороженный регион читают все, обращение к чужому региону отскакивает',
+				lanes: ['главный поток', 'поток 1', 'поток 2'],
+				ticket: 'чтение',
+				error: 'OwnershipError',
+				legend: ['переезд без копии', 'заморозка: читают все', 'чужое не трогать'],
+			}
+		: {
+				title: 'Three threads and regions between them: a region moves to another thread without a copy, everyone reads a frozen region, an access to a region owned by another thread bounces off',
+				lanes: ['main thread', 'thread 1', 'thread 2'],
+				ticket: 'read',
+				error: 'OwnershipError',
+				legend: ['a move, no copy', 'frozen: everyone reads', 'not yours: hands off'],
+			};
+const lanes = [30, 140, 250];
+---
+
+<figure class="rj-lanes" aria-labelledby="rj-lanes-t">
+	<svg viewBox="0 0 520 340" role="img" aria-labelledby="rj-lanes-t">
+		<title id="rj-lanes-t">{T.title}</title>
+		<defs>
+			<pattern id="rj-frost" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+				<rect width="8" height="8" class="frost-bg"></rect>
+				<line x1="0" y1="0" x2="0" y2="8" class="frost-line"></line>
+			</pattern>
+		</defs>
+		{
+			lanes.map((y, i) => (
+				<g class={`lane lane-${i}`}>
+					<rect x="4" y={y} width="512" height="88" rx="18" class="lane-bg" />
+					<text x="22" y={y + 22} class="lane-label">{T.lanes[i]}</text>
+				</g>
+			))
+		}
+
+		<!-- tickets of the readers of the frozen region -->
+		<g class="ticket ticket-1">
+			<path d="M430,170 V104" class="ticket-line"></path>
+			<rect x="404" y="170" width="52" height="26" rx="6" class="ticket-bg"></rect>
+			<text x="430" y="187" class="ticket-text">{T.ticket}</text>
+		</g>
+		<g class="ticket ticket-2">
+			<path d="M462,280 V104" class="ticket-line"></path>
+			<rect x="436" y="280" width="52" height="26" rx="6" class="ticket-bg"></rect>
+			<text x="462" y="297" class="ticket-text">{T.ticket}</text>
+		</g>
+
+		<!-- the frozen (mint) region on the main thread -->
+		<g class="region region-c">
+			<rect width="56" height="56" rx="14" class="box"></rect>
+			<rect width="56" height="56" rx="14" class="frost"></rect>
+			<circle cx="19" cy="19" r="5" class="dot"></circle>
+			<circle cx="37" cy="19" r="5" class="dot"></circle>
+			<circle cx="19" cy="37" r="5" class="dot"></circle>
+			<circle cx="37" cy="37" r="5" class="dot"></circle>
+			<g class="flake" transform="translate(46 10)">
+				<path d="M0,-7 V7 M-6,-3.5 L6,3.5 M-6,3.5 L6,-3.5"></path>
+			</g>
+		</g>
+
+		<!-- the coral region: thread 2 → main → thread 2 -->
+		<g class="region region-b">
+			<rect width="56" height="56" rx="14" class="box"></rect>
+			<circle cx="19" cy="19" r="5" class="dot"></circle>
+			<circle cx="37" cy="19" r="5" class="dot"></circle>
+			<circle cx="19" cy="37" r="5" class="dot"></circle>
+			<circle cx="37" cy="37" r="5" class="dot"></circle>
+		</g>
+
+		<!-- the violet region: main → thread 1 → main -->
+		<g class="region region-a">
+			<rect width="56" height="56" rx="14" class="box"></rect>
+			<circle cx="19" cy="19" r="5" class="dot"></circle>
+			<circle cx="37" cy="19" r="5" class="dot"></circle>
+			<circle cx="19" cy="37" r="5" class="dot"></circle>
+			<circle cx="37" cy="37" r="5" class="dot"></circle>
+		</g>
+
+		<!-- the main thread tries to touch the violet region while thread 1 owns it -->
+		<g class="poke">
+			<circle cx="0" cy="0" r="7" class="poke-dot"></circle>
+		</g>
+		<g class="refused">
+			<circle cx="0" cy="0" r="11" class="refused-bg"></circle>
+			<path d="M-4.5,-4.5 L4.5,4.5 M4.5,-4.5 L-4.5,4.5" class="refused-x"></path>
+			<text x="16" y="5" class="refused-text">{T.error}</text>
+		</g>
+	</svg>
+	<figcaption>
+		<span class="key key-a">{T.legend[0]}</span>
+		<span class="key key-c">{T.legend[1]}</span>
+		<span class="key key-x">{T.legend[2]}</span>
+	</figcaption>
+</figure>
+
+<style>
+	.rj-lanes {
+		margin: 0;
+	}
+	svg {
+		display: block;
+		width: 100%;
+		height: auto;
+		overflow: visible;
+	}
+	.lane-bg {
+		fill: var(--rj-surface);
+		stroke: var(--rj-border-strong);
+		stroke-width: 1.2;
+		stroke-dasharray: 5 5;
+	}
+	.lane-label {
+		fill: var(--sl-color-gray-3);
+		font: 700 11px var(--__sl-font-mono);
+		letter-spacing: 0.06em;
+		text-transform: uppercase;
+	}
+	.dot {
+		fill: var(--rj-on-color);
+		opacity: 0.85;
+	}
+	.box {
+		stroke-width: 2;
+	}
+	.region-a .box {
+		fill: var(--rj-violet);
+		stroke: color-mix(in srgb, var(--rj-violet) 70%, black);
+	}
+	.region-b .box {
+		fill: var(--rj-coral);
+		stroke: color-mix(in srgb, var(--rj-coral) 70%, black);
+	}
+	.region-c .box {
+		fill: var(--rj-mint);
+		stroke: color-mix(in srgb, var(--rj-mint) 70%, black);
+	}
+	.frost {
+		fill: url(#rj-frost);
+		stroke: var(--rj-ice);
+		stroke-width: 2.5;
+	}
+	.frost-bg {
+		fill: var(--rj-ice-fill);
+	}
+	.frost-line {
+		stroke: var(--rj-ice);
+		stroke-width: 2;
+		opacity: 0.55;
+	}
+	.flake path {
+		stroke: var(--rj-ice);
+		stroke-width: 2.2;
+		stroke-linecap: round;
+		fill: none;
+	}
+	.ticket-line {
+		stroke: var(--rj-ice);
+		stroke-width: 1.6;
+		stroke-dasharray: 3 4;
+		fill: none;
+	}
+	.ticket-bg {
+		fill: var(--rj-ice-wash);
+		stroke: var(--rj-ice);
+		stroke-width: 1.5;
+	}
+	.ticket-text {
+		fill: var(--sl-color-white);
+		font: 700 10.5px var(--__sl-font);
+		text-anchor: middle;
+	}
+	.poke-dot {
+		fill: var(--rj-pink);
+	}
+	.refused-bg {
+		fill: var(--rj-bad);
+	}
+	.refused-x {
+		stroke: var(--rj-on-color);
+		stroke-width: 2.6;
+		stroke-linecap: round;
+	}
+	.refused-text {
+		fill: var(--rj-bad);
+		font: 700 11.5px var(--__sl-font-mono);
+	}
+
+	/* ---- The static picture: the middle of the story. ---- */
+	.region-a {
+		transform: translate(290px, 156px);
+	}
+	.region-b {
+		transform: translate(290px, 46px);
+	}
+	.region-c {
+		transform: translate(416px, 46px);
+	}
+	.poke {
+		transform: translate(262px, 140px);
+	}
+	.refused {
+		transform: translate(284px, 140px);
+	}
+
+	figcaption {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.4rem 1rem;
+		justify-content: center;
+		margin-top: 0.6rem;
+		color: var(--sl-color-gray-3);
+		font-size: 0.82rem;
+	}
+	.key {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.4rem;
+	}
+	.key::before {
+		content: '';
+		width: 0.8rem;
+		height: 0.8rem;
+		border-radius: 0.25rem;
+	}
+	.key-a::before {
+		background: var(--rj-violet);
+	}
+	.key-c::before {
+		background: var(--rj-ice-fill);
+		box-shadow: inset 0 0 0 2px var(--rj-ice);
+	}
+	.key-x::before {
+		border-radius: 50%;
+		background: var(--rj-bad);
+	}
+
+	/* ---- The story, a 12 s loop. Only for readers who did not ask for reduced motion. ---- */
+	@media (prefers-reduced-motion: no-preference) {
+		.region-a {
+			animation: rj-move-a 12s var(--rj-ease) infinite;
+		}
+		.region-a .dot {
+			animation: rj-work 12s linear infinite;
+		}
+		.region-b {
+			animation: rj-move-b 12s var(--rj-ease) infinite;
+		}
+		.frost,
+		.flake {
+			animation: rj-freeze 12s linear infinite;
+		}
+		.ticket {
+			animation: rj-ticket 12s var(--rj-ease) infinite;
+		}
+		.ticket-2 {
+			animation-delay: 0.25s;
+		}
+		.poke {
+			animation: rj-poke 12s var(--rj-ease) infinite;
+		}
+		.refused {
+			animation: rj-refused 12s var(--rj-bounce) infinite;
+		}
+	}
+
+	@keyframes rj-move-a {
+		0%,
+		10% {
+			transform: translate(140px, 46px);
+		}
+		22%,
+		62% {
+			transform: translate(290px, 156px);
+		}
+		74%,
+		100% {
+			transform: translate(140px, 46px);
+		}
+	}
+	@keyframes rj-work {
+		0%,
+		24% {
+			opacity: 0.85;
+		}
+		30%,
+		38%,
+		46%,
+		54% {
+			opacity: 0.35;
+		}
+		34%,
+		42%,
+		50%,
+		58% {
+			opacity: 0.95;
+		}
+		62%,
+		100% {
+			opacity: 0.85;
+		}
+	}
+	@keyframes rj-move-b {
+		0%,
+		28% {
+			transform: translate(140px, 266px);
+		}
+		40%,
+		82% {
+			transform: translate(290px, 46px);
+		}
+		94%,
+		100% {
+			transform: translate(140px, 266px);
+		}
+	}
+	@keyframes rj-freeze {
+		0%,
+		34% {
+			opacity: 0;
+		}
+		40%,
+		80% {
+			opacity: 1;
+		}
+		86%,
+		100% {
+			opacity: 0;
+		}
+	}
+	@keyframes rj-ticket {
+		0%,
+		42% {
+			opacity: 0;
+			transform: translateY(14px);
+		}
+		48%,
+		76% {
+			opacity: 1;
+			transform: translateY(0);
+		}
+		82%,
+		100% {
+			opacity: 0;
+			transform: translateY(14px);
+		}
+	}
+	@keyframes rj-poke {
+		0%,
+		40% {
+			opacity: 0;
+			transform: translate(200px, 96px);
+		}
+		42% {
+			opacity: 1;
+			transform: translate(200px, 96px);
+		}
+		47% {
+			opacity: 1;
+			transform: translate(270px, 150px);
+		}
+		52% {
+			opacity: 1;
+			transform: translate(214px, 106px);
+		}
+		55%,
+		100% {
+			opacity: 0;
+			transform: translate(214px, 106px);
+		}
+	}
+	@keyframes rj-refused {
+		0%,
+		46% {
+			opacity: 0;
+			transform: translate(284px, 140px) scale(0.3);
+		}
+		49%,
+		58% {
+			opacity: 1;
+			transform: translate(284px, 140px) scale(1);
+		}
+		62%,
+		100% {
+			opacity: 0;
+			transform: translate(284px, 140px) scale(0.6);
+		}
+	}
+</style>

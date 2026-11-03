@@ -1,0 +1,179 @@
+---
+// The "Versus tokio" table as a race: in each scenario three lanes fill at the same speed, so each
+// one finishes when its measured run did (replayed ten times slower). The final picture, which is
+// also what readers without JavaScript or with reduced motion see, is a bar chart of the times.
+import { RACE, RACE_LANES } from '../../data/bench';
+import { ui } from '../../lib/i18n';
+import { typograph, typographHtml } from '../../lib/typograph.mjs';
+
+/** Screen milliseconds per measured millisecond. */
+const SLOWDOWN = 10;
+
+const { lang, t } = ui(Astro.url);
+const typo = (s: string) => (lang === 'ru' ? typograph(s) : s);
+const typoHtml = (s: string) => (lang === 'ru' ? typographHtml(s) : s);
+const note =
+	lang === 'ru'
+		? 'Воспроизведено в 10 раз медленнее замера. Все дорожки заполняются с одной скоростью, поэтому каждая заканчивает тогда же, когда закончился её настоящий прогон.'
+		: 'Replayed ten times slower than measured. Every lane fills at the same speed, so each one finishes when its real run did.';
+---
+
+<div class="rj-race not-content" data-lang={lang}>
+	{
+		RACE.map((scenario) => {
+			const max = Math.max(...scenario.lanes.map((l) => l.ms));
+			return (
+				<figure class="race-card">
+					<figcaption>{typo(scenario.title[lang])}</figcaption>
+					<ul class="lanes">
+						{scenario.lanes.map((lane) => (
+							<li class={`lane lane-${lane.key}`} style={`--f:${lane.ms / max};--d:${lane.ms * SLOWDOWN}ms`}>
+								<span class="name" set:html={typoHtml(RACE_LANES[lane.key][lang])} />
+								<span class="track">
+									<span class="bar" />
+									<span class="time" data-final={typo(lane.text[lang])} data-ms={lane.ms * SLOWDOWN}>
+										{typo(lane.text[lang])}
+									</span>
+								</span>
+							</li>
+						))}
+					</ul>
+				</figure>
+			);
+		})
+	}
+	<div class="race-foot">
+		<p>{typo(note)}</p>
+		<button type="button" class="rj-btn ghost small replay" hidden>
+			<svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7"></path><path d="M3 4v5h5"></path></svg>
+			{t.replay}
+		</button>
+	</div>
+</div>
+<!-- /race -->
+
+<style>
+	.rj-race {
+		display: grid;
+		gap: 0.9rem;
+		margin: 1.6rem 0 1.4rem;
+	}
+	.race-card {
+		margin: 0;
+		padding: 1rem 1.1rem 0.9rem;
+		border: 1px solid var(--rj-border);
+		border-radius: var(--rj-radius-lg);
+		background: var(--rj-surface);
+		box-shadow: var(--rj-shadow);
+	}
+	figcaption {
+		margin: 0 0 0.7rem;
+		color: var(--sl-color-white);
+		font-size: 0.95rem;
+		font-weight: 650;
+		line-height: 1.4;
+	}
+	.lanes {
+		display: grid;
+		gap: 0.45rem;
+		margin: 0;
+		padding: 0;
+		list-style: none;
+	}
+	.lane {
+		--c: var(--rj-violet);
+		display: grid;
+		grid-template-columns: 11.5rem minmax(0, 1fr);
+		align-items: center;
+		gap: 0.75rem;
+		margin: 0;
+	}
+	.lane-workers {
+		--c: var(--rj-coral);
+	}
+	.lane-tokio {
+		--c: var(--rj-mint);
+	}
+	.name {
+		color: var(--sl-color-gray-2);
+		font-size: 0.84rem;
+		line-height: 1.3;
+	}
+	.name :global(code) {
+		padding: 0.05em 0.3em;
+		border-radius: 0.3rem;
+		background: var(--sl-color-bg-inline-code);
+		color: var(--sl-color-white);
+		font-size: 0.9em;
+	}
+	.track {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		height: 1.6rem;
+		padding: 0 0.2rem;
+		border-radius: 999px;
+		background:
+			repeating-linear-gradient(90deg, transparent 0 14px, color-mix(in srgb, var(--rj-border) 60%, transparent) 14px 15px),
+			var(--rj-surface-2);
+	}
+	.bar {
+		flex: none;
+		width: max(0.4rem, calc((100% - 5.5rem) * var(--f)));
+		height: 1.1rem;
+		border-radius: 999px;
+		background: var(--c);
+		box-shadow: inset 0 -3px 0 rgb(0 0 0 / 0.12);
+	}
+	.time {
+		flex: none;
+		color: var(--sl-color-white);
+		font: 700 0.8rem/1 var(--__sl-font-mono);
+		font-variant-numeric: tabular-nums;
+		white-space: nowrap;
+	}
+	.race-foot {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.6rem 1rem;
+	}
+	.race-foot p {
+		margin: 0;
+		max-width: 34rem;
+		color: var(--sl-color-gray-3);
+		font-size: 0.82rem;
+		line-height: 1.45;
+	}
+	.replay {
+		gap: 0.4rem;
+	}
+
+	/* The race: lanes start empty and fill at one speed. Only with the motion flag from <head>. */
+	:global(.rj-motion) .rj-race .bar {
+		transition: width var(--d) linear;
+	}
+	:global(.rj-motion) .rj-race:not(.is-in) .bar {
+		width: 0.4rem;
+		transition: none;
+	}
+	:global(.rj-motion) .rj-race:not(.is-in) .time {
+		opacity: 0.55;
+	}
+	.lane.done .bar {
+		animation: rj-pop 0.35s var(--rj-bounce);
+	}
+	@keyframes rj-pop {
+		50% {
+			transform: scaleY(1.35);
+		}
+	}
+
+	@media (max-width: 40rem) {
+		.lane {
+			grid-template-columns: minmax(0, 1fr);
+			gap: 0.25rem;
+		}
+	}
+</style>

@@ -17,10 +17,17 @@ sidebar:
   label: "What this is"
 ---
 import Example from '../../components/Example.astro';
+import Chart from '../../components/Chart.astro';
+import Race from '../../components/landing/Race.astro';
+import Steps from '../../components/landing/Steps.astro';
+
+<div class="rj-landing">
 
 :::caution[Limits up front]
 All of this works only in d8, the V8 test shell. It is not available in browsers or Node. This is a prototype: its job is to find out whether this can be done at all and what it costs. The limits are covered in detail on the [last page](/region-js/limits/).
 :::
+
+<Steps />
 
 ## Example: orders on four threads {/* #example-orders-on-four-threads */}
 
@@ -35,6 +42,8 @@ The task code is ordinary JavaScript. `'use region'` is a directive string, like
 ## Versus tokio and plain workers {/* #tokio */}
 
 Three realistic scenarios with orders, each done three ways: `spawn` with regions, plain workers with `postMessage` (how it is done in JS today), and Rust with tokio. Each uses four worker threads. V8 here is built without internal checks, like tokio in release mode (`tests/bench-real.js` and `tests/tokio-bench`, best of five runs).
+
+<Race />
 
 | Scenario | `spawn` + regions | workers + `postMessage` | tokio |
 | --- | --- | --- | --- |
@@ -55,7 +64,14 @@ Against today's workers, regions win by 3.5 to 23 times: the data is not copied 
 
 The numbers were measured on Apple Silicon. Absolute values will differ on another machine; look at the ratios. Details and charts are on the [Numbers](/region-js/numbers/) page. That page also states plainly what is still slower than ordinary JS: writing to fields of region objects takes about 1.7 times longer, and indexed access to a region array about 2 times longer.
 
+<div class="rj-landing-charts">
+<Chart id="move-1m" />
+<Chart id="frozen-scaling" />
+</div>
+
 ## What the prototype can do {/* #what-the-prototype-can-do */}
+
+<div class="rj-features">
 
 - **`spawn(fn, ...args)`**: a function on a separate thread in one line. Tasks go to a pool of long-lived workers, `spawn` finds the variables it needs on its own, and regions move there and back without a copy. A task handle is awaited like a promise. Nested tasks finish before the outer one, errors are not lost, and there is cancellation: `abort`, `timeout`, `JoinSet` ([more](/region-js/spawn/)).
 - **Data in shared memory from the start**: `'use region'` at the top of a function or file makes every `{}` and `[]` a region object, and the `#{...}` and `#[...]` literals do the same in specific places. The object is created directly in machine code, with no intermediate copy ([more](/region-js/guide/#literals)).
@@ -66,6 +82,9 @@ The numbers were measured on Apple Silicon. Absolute values will differ on anoth
 - **Workers directly**: `worker.postMessage(msg, [region])` hands a region to a worker without a copy. This is the low level: `spawn` and channels do the same thing on their own ([more](/region-js/guide/#move)).
 - **Freeing** (`region.free()`, `using`): release a region right away, without waiting for the garbage collector ([more](/region-js/guide/#free)).
 - **An editor playground**: types and Biome and ESLint rules that highlight common mistakes before you run the code.
+
+
+</div>
 
 ## Where to start {/* #where-to-start */}
 
@@ -81,3 +100,5 @@ The numbers were measured on Apple Silicon. Absolute values will differ on anoth
 <li><a href="/region-js/numbers/"><strong>Numbers</strong>A comparison with tokio and plain workers, the cost of each operation.</a></li>
 <li><a href="/region-js/limits/"><strong>Limits and running</strong>What is missing, what is planned, and how to try it yourself.</a></li>
 </ul>
+
+</div>

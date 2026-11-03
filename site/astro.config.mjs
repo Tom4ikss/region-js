@@ -56,6 +56,7 @@ export default defineConfig({
 				'./src/styles/theme.css',
 				'./src/styles/docs.css',
 				'./src/styles/diagrams.css',
+				'./src/styles/landing.css',
 			],
 			components: {
 				Head: './src/components/overrides/Head.astro',

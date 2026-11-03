@@ -1,4 +1,110 @@
 ---
+// The landing page hero: the pitch on the left, threads and regions in motion on the right.
+// Title, tagline and buttons come from the page's `hero` frontmatter, the label above the title
+// from `eyebrow`.
+import RegionLanes from '../landing/RegionLanes.astro';
+import { ui } from '../../lib/i18n';
+import { typograph, typographHtml } from '../../lib/typograph.mjs';
+
 const { data } = Astro.locals.starlightRoute.entry;
+const { lang } = ui(Astro.url);
+const { title = data.title, tagline, actions = [] } = data.hero ?? {};
+const typo = (s: string) => (lang === 'ru' ? typograph(s) : s);
+const typoHtml = (s: string) => (lang === 'ru' ? typographHtml(s) : s);
 ---
-<div class="rj-hero"><h1 id="_top" data-page-title set:html={data.hero?.title} /></div>
+
+<section class="rj-hero">
+	<div class="pitch">
+		{data.eyebrow && <p class="rj-eyebrow">{typo(data.eyebrow)}</p>}
+		<h1 id="_top" data-page-title>{typo(title)}</h1>
+		{tagline && <p class="tagline" set:html={typoHtml(tagline)} />}
+		{
+			actions.length > 0 && (
+				<div class="actions">
+					{actions.map(({ link, text, variant }) => (
+						<a class:list={['rj-btn', variant === 'primary' ? 'primary' : 'ghost']} href={link}>
+							{text}
+						</a>
+					))}
+				</div>
+			)
+		}
+	</div>
+	<div class="art">
+		<RegionLanes />
+	</div>
+</section>
+
+<style>
+	.rj-hero {
+		position: relative;
+		display: grid;
+		grid-template-columns: minmax(0, 1fr);
+		gap: 2rem;
+		align-items: center;
+		padding-block: 2.5rem 1.5rem;
+	}
+	.rj-hero::before {
+		content: '';
+		position: absolute;
+		inset: -4rem -50vw auto;
+		height: 30rem;
+		z-index: -1;
+		background:
+			radial-gradient(28rem 16rem at 22% 18%, color-mix(in srgb, var(--rj-violet) 22%, transparent), transparent 70%),
+			radial-gradient(24rem 14rem at 78% 30%, color-mix(in srgb, var(--rj-pink) 16%, transparent), transparent 70%),
+			radial-gradient(22rem 12rem at 55% 85%, color-mix(in srgb, var(--rj-mint) 14%, transparent), transparent 70%);
+		pointer-events: none;
+	}
+	.pitch {
+		display: flex;
+		flex-direction: column;
+		align-items: flex-start;
+		gap: 1.1rem;
+	}
+	.rj-eyebrow {
+		margin: 0;
+	}
+	h1 {
+		margin: 0;
+		font-family: var(--rj-font-display);
+		font-size: clamp(2.3rem, 1.4rem + 3.6vw, 3.9rem);
+		font-weight: 800;
+		line-height: 1.04;
+		letter-spacing: -0.035em;
+		color: var(--sl-color-white);
+		text-wrap: balance;
+	}
+	.tagline {
+		margin: 0;
+		max-width: 38rem;
+		color: var(--sl-color-gray-2);
+		font-size: clamp(1.02rem, 0.95rem + 0.35vw, 1.18rem);
+		line-height: 1.62;
+		text-wrap: pretty;
+	}
+	.tagline :global(code) {
+		padding: 0.08em 0.35em;
+		border-radius: 0.35rem;
+		background: var(--sl-color-bg-inline-code);
+		color: var(--sl-color-white);
+		font-size: 0.88em;
+		white-space: nowrap;
+	}
+	.actions {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.75rem;
+		margin-top: 0.4rem;
+	}
+	.art {
+		min-width: 0;
+	}
+	@media (min-width: 62rem) {
+		.rj-hero {
+			grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr);
+			gap: 3rem;
+			padding-block: 4rem 2.5rem;
+		}
+	}
+</style>

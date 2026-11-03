@@ -17,10 +17,17 @@ sidebar:
   label: "Что это такое"
 ---
 import Example from '../../../components/Example.astro';
+import Chart from '../../../components/Chart.astro';
+import Race from '../../../components/landing/Race.astro';
+import Steps from '../../../components/landing/Steps.astro';
+
+<div class="rj-landing">
 
 :::caution[Сразу о границах]
 Всё это работает только в d8, тестовой оболочке V8. В браузере и в Node этого нет. Это прототип: его задача — проверить, можно ли так сделать вообще и сколько это стоит. Подробно об ограничениях — на [последней странице](/region-js/ru/limits/).
 :::
+
+<Steps />
 
 ## Пример: заказы в четырёх потоках {/* #example-orders-on-four-threads */}
 
@@ -35,6 +42,8 @@ import Example from '../../../components/Example.astro';
 ## Против tokio и обычных воркеров {/* #tokio */}
 
 Три жизненных сценария с заказами, каждый тремя способами: `spawn` с регионами, обычные воркеры с `postMessage` (так это делают в JS сегодня) и Rust с tokio. У всех четыре рабочих потока. V8 здесь собран без внутренних проверок, как tokio в release (`tests/bench-real.js` и `tests/tokio-bench`, лучший из пяти прогонов).
+
+<Race />
 
 | Сценарий | `spawn` + регионы | воркеры + `postMessage` | tokio |
 | --- | --- | --- | --- |
@@ -55,7 +64,14 @@ import Example from '../../../components/Example.astro';
 
 Цифры сняты на Apple Silicon. Абсолютные значения на другой машине будут другими, смотреть стоит на соотношения. Подробности и графики — на странице [«Цифры»](/region-js/ru/numbers/). Там же честно сказано, что пока медленнее обычного JS: запись в поля объектов региона дольше примерно в 1,7 раза, доступ к массиву региона по индексу — примерно в 2 раза.
 
+<div class="rj-landing-charts">
+<Chart id="move-1m" />
+<Chart id="frozen-scaling" />
+</div>
+
 ## Что умеет прототип {/* #what-the-prototype-can-do */}
+
+<div class="rj-features">
 
 - **`spawn(fn, ...args)`** — функция в отдельном потоке одной строкой. Задачи идут в пул долгоживущих воркеров, нужные переменные `spawn` находит сам, регионы перемещает туда и обратно без копии. Ручку задачи ждут как промис. Вложенные задачи заканчиваются раньше внешней, ошибки не теряются, есть отмена: `abort`, `timeout`, `JoinSet` ([подробнее](/region-js/ru/spawn/)).
 - **Данные сразу в общей памяти** — `'use region'` в начале функции или файла делает каждый `{}` и `[]` объектом региона, литералы `#{...}` и `#[...]` делают то же точечно. Объект создаётся прямо в машинном коде, без промежуточной копии ([подробнее](/region-js/ru/guide/#literals)).
@@ -66,6 +82,9 @@ import Example from '../../../components/Example.astro';
 - **Воркеры напрямую** — `worker.postMessage(msg, [region])` отдаёт регион воркеру без копии. Это нижний уровень: `spawn` и каналы делают то же самое сами ([подробнее](/region-js/ru/guide/#move)).
 - **Освобождение** (`region.free()`, `using`) — отдать регион сразу, не дожидаясь сборщика мусора ([подробнее](/region-js/ru/guide/#free)).
 - **Песочница для редактора** — типы и правила Biome и ESLint, которые подсвечивают типичные ошибки до запуска.
+
+
+</div>
 
 ## С чего начать {/* #where-to-start */}
 
@@ -81,3 +100,5 @@ import Example from '../../../components/Example.astro';
 <li><a href="/region-js/ru/numbers/"><strong>Цифры</strong>Сравнение с tokio и обычными воркерами, стоимость каждой операции.</a></li>
 <li><a href="/region-js/ru/limits/"><strong>Ограничения и запуск</strong>Чего нет, что в планах и как попробовать самому.</a></li>
 </ul>
+
+</div>

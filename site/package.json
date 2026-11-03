@@ -10,7 +10,9 @@
   "scripts": {
     "dev": "ASTRO_TELEMETRY_DISABLED=1 astro dev",
     "build": "ASTRO_TELEMETRY_DISABLED=1 astro build",
-    "preview": "ASTRO_TELEMETRY_DISABLED=1 astro preview"
+    "preview": "ASTRO_TELEMETRY_DISABLED=1 astro preview",
+    "check": "node scripts/check-site.mjs",
+    "examples": "node scripts/run-examples.mjs"
   },
   "dependencies": {
     "@astrojs/markdown-remark": "^7.3.0",

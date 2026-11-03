@@ -1,1 +1,218 @@
-/* placeholder */
+/*
+ * region-js design tokens.
+ *
+ * The visual language is the project's own idea: a region is a coloured box with one owner.
+ * Six saturated "region" hues (violet, coral, mint, sun, pink, sky) plus "ice" for frozen data,
+ * on a warm cream page in the light theme and a deep night-indigo page in the dark one. Each
+ * theme is its own set of steps, checked for contrast; neither is an inversion of the other.
+ * Starlight's variables (--sl-*) are mapped onto these tokens, so the docs and the landing page
+ * share one system.
+ */
+
+:root {
+	--sl-font: 'Golos Text Variable', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+	--sl-font-mono: 'JetBrains Mono Variable', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+	--rj-font-display: 'Unbounded Variable', 'Golos Text Variable', ui-sans-serif, system-ui, sans-serif;
+
+	--sl-text-h1: 2.4rem;
+	--sl-text-h2: 1.7rem;
+	--sl-text-h3: 1.28rem;
+	--sl-text-h4: 1.1rem;
+	--sl-text-code: 0.86em;
+	--sl-line-height: 1.7;
+	--sl-line-height-headings: 1.2;
+
+	--sl-nav-height: 3.75rem;
+	--sl-nav-pad-x: 1.25rem;
+	--sl-sidebar-width: 17rem;
+	--sl-content-width: 46rem;
+
+	--rj-radius-sm: 0.4rem;
+	--rj-radius: 0.65rem;
+	--rj-radius-lg: 1rem;
+	--rj-ease: cubic-bezier(0.22, 0.8, 0.24, 1);
+	--rj-bounce: cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+/* ---------- Dark (Starlight's default) ---------- */
+:root,
+::backdrop {
+	--sl-color-white: #ffffff;
+	--sl-color-gray-1: #ece7fb;
+	--sl-color-gray-2: #cfc8e8;
+	--sl-color-gray-3: #a49cc8;
+	--sl-color-gray-4: #6f6798;
+	--sl-color-gray-5: #322a5c;
+	--sl-color-gray-6: #1c1638;
+	--sl-color-black: #120d26;
+
+	--sl-color-accent-low: #2d2066;
+	--sl-color-accent: #a184ff;
+	--sl-color-accent-high: #cfc0ff;
+
+	--sl-color-text: var(--sl-color-gray-2);
+	--sl-color-text-accent: var(--sl-color-accent-high);
+	--sl-color-bg: var(--sl-color-black);
+	--sl-color-bg-nav: rgb(18 13 38 / 0.82);
+	--sl-color-bg-sidebar: var(--sl-color-black);
+	--sl-color-bg-inline-code: #251e48;
+	--sl-color-hairline-light: #2f2858;
+	--sl-color-hairline: #241d47;
+	--sl-color-hairline-shade: #0b0818;
+
+	--sl-color-blue-low: #10294d;
+	--sl-color-blue: #6cb8ff;
+	--sl-color-blue-high: #b8dcff;
+	--sl-color-purple-low: #2a1d5c;
+	--sl-color-purple: #a184ff;
+	--sl-color-purple-high: #d6c9ff;
+	--sl-color-orange-low: #3a2a07;
+	--sl-color-orange: #ffd23f;
+	--sl-color-orange-high: #ffe79a;
+	--sl-color-red-low: #47152a;
+	--sl-color-red: #ff7a8a;
+	--sl-color-red-high: #ffc2ca;
+
+	--rj-surface: #191233;
+	--rj-surface-2: #221a43;
+	--rj-surface-3: #2b2253;
+	--rj-border: #2f2858;
+	--rj-border-strong: #4a4080;
+	--rj-shadow: 0 1px 2px rgb(0 0 0 / 0.35), 0 10px 30px rgb(0 0 0 / 0.35);
+	--rj-glow: 0 0 0 1px rgb(161 132 255 / 0.25), 0 18px 50px -12px rgb(161 132 255 / 0.45);
+
+	/* Region hues: a fill/line colour, readable text on the page, and a soft wash. */
+	--rj-violet: #a184ff;
+	--rj-violet-ink: #cbbaff;
+	--rj-violet-wash: rgb(161 132 255 / 0.15);
+	--rj-coral: #ff8a66;
+	--rj-coral-ink: #ffb199;
+	--rj-coral-wash: rgb(255 138 102 / 0.14);
+	--rj-mint: #3fe0c5;
+	--rj-mint-ink: #8ff0dc;
+	--rj-mint-wash: rgb(63 224 197 / 0.13);
+	--rj-sun: #ffd23f;
+	--rj-sun-ink: #ffe07a;
+	--rj-sun-wash: rgb(255 210 63 / 0.14);
+	--rj-pink: #ff7ab8;
+	--rj-pink-ink: #ffb0d5;
+	--rj-pink-wash: rgb(255 122 184 / 0.14);
+	--rj-sky: #6cb8ff;
+	--rj-sky-ink: #a9d6ff;
+	--rj-sky-wash: rgb(108 184 255 / 0.14);
+	--rj-ice: #8fe3ff;
+	--rj-ice-fill: #1d4b63;
+	--rj-ice-wash: rgb(143 227 255 / 0.12);
+	--rj-on-color: #120d26;
+
+	--rj-good: #3fe0c5;
+	--rj-bad: #ff7a8a;
+
+	/* Charts: s1 is regions / the good variant, s2 plain JS / the bad variant. */
+	--rj-series-1: #a184ff;
+	--rj-series-2: #ff8a66;
+
+	/* Code. */
+	--rj-code-bg: #18112f;
+	--rj-code-ink: #ebe6fa;
+	--rj-out-bg: #0e0a1f;
+	--rj-out-ink: #d9d3ef;
+	--rj-dots: #4a4080;
+	--rj-tok-comment: #8f87b3;
+	--rj-tok-keyword: #c9a8ff;
+	--rj-tok-string: #7ee6c4;
+	--rj-tok-number: #ffab80;
+	--rj-tok-api: #7cc4ff;
+	--rj-tok-fn: #ffd780;
+}
+
+/* ---------- Light ---------- */
+:root[data-theme='light'],
+[data-theme='light'] ::backdrop {
+	--sl-color-white: #1d1440;
+	--sl-color-gray-1: #2b2251;
+	--sl-color-gray-2: #3a3259;
+	--sl-color-gray-3: #5f587c;
+	--sl-color-gray-4: #8c85a6;
+	--sl-color-gray-5: #e5d8c4;
+	--sl-color-gray-6: #f5ebdc;
+	--sl-color-gray-7: #fbf4ea;
+	--sl-color-black: #fffaf2;
+
+	--sl-color-accent-low: #ece3ff;
+	--sl-color-accent: #6b3cf5;
+	--sl-color-accent-high: #4a1fc4;
+
+	--sl-color-text: var(--sl-color-gray-2);
+	--sl-color-text-accent: var(--sl-color-accent);
+	--sl-color-text-invert: #ffffff;
+	--sl-color-bg: var(--sl-color-black);
+	--sl-color-bg-nav: rgb(255 250 242 / 0.85);
+	--sl-color-bg-sidebar: var(--sl-color-black);
+	--sl-color-bg-inline-code: #f3e8f9;
+	--sl-color-hairline-light: #efe2cf;
+	--sl-color-hairline: #eadcc7;
+	--sl-color-hairline-shade: #e2d1b8;
+
+	--sl-color-blue-low: #e3f1ff;
+	--sl-color-blue: #1f7fe0;
+	--sl-color-blue-high: #0f4f99;
+	--sl-color-purple-low: #efe8ff;
+	--sl-color-purple: #6b3cf5;
+	--sl-color-purple-high: #4a1fc4;
+	--sl-color-orange-low: #fff2c7;
+	--sl-color-orange: #f0a500;
+	--sl-color-orange-high: #7a4b00;
+	--sl-color-red-low: #ffe6e4;
+	--sl-color-red: #e5484d;
+	--sl-color-red-high: #a1202a;
+
+	--rj-surface: #ffffff;
+	--rj-surface-2: #fdf1e1;
+	--rj-surface-3: #f9e6cc;
+	--rj-border: #ecdcc5;
+	--rj-border-strong: #dcc29d;
+	--rj-shadow: 0 1px 2px rgb(74 46 10 / 0.06), 0 10px 28px rgb(74 46 10 / 0.08);
+	--rj-glow: 0 0 0 1px rgb(107 60 245 / 0.18), 0 18px 44px -14px rgb(107 60 245 / 0.35);
+
+	--rj-violet: #7b4dff;
+	--rj-violet-ink: #5a2be0;
+	--rj-violet-wash: #efe8ff;
+	--rj-coral: #ff6a3d;
+	--rj-coral-ink: #c23b12;
+	--rj-coral-wash: #ffe9e0;
+	--rj-mint: #12b89c;
+	--rj-mint-ink: #087a67;
+	--rj-mint-wash: #dcf7f1;
+	--rj-sun: #ffc21a;
+	--rj-sun-ink: #855300;
+	--rj-sun-wash: #fff1c2;
+	--rj-pink: #f2449a;
+	--rj-pink-ink: #b51768;
+	--rj-pink-wash: #ffe4f1;
+	--rj-sky: #2a8dff;
+	--rj-sky-ink: #0f5fbf;
+	--rj-sky-wash: #e2f0ff;
+	--rj-ice: #36b6e3;
+	--rj-ice-fill: #d7f4ff;
+	--rj-ice-wash: #e6f8ff;
+	--rj-on-color: #ffffff;
+
+	--rj-good: #0b9b83;
+	--rj-bad: #e0453a;
+
+	--rj-series-1: #7b4dff;
+	--rj-series-2: #f2602f;
+
+	--rj-code-bg: #fdf6ec;
+	--rj-code-ink: #2b2251;
+	--rj-out-bg: #f6ecdc;
+	--rj-out-ink: #3a3259;
+	--rj-dots: #dcc29d;
+	--rj-tok-comment: #857d99;
+	--rj-tok-keyword: #7a2fd0;
+	--rj-tok-string: #0b7a5c;
+	--rj-tok-number: #c03d0a;
+	--rj-tok-api: #1d5fd1;
+	--rj-tok-fn: #8a5200;
+}

@@ -1,1 +1,90 @@
-/* placeholder */
+/* Classes of the inline SVG diagrams in the docs. A region is a coloured box: violet when a thread
+   owns it, warm while it is in transit, plain for everything else. */
+
+.d-box {
+	fill: var(--rj-surface-2);
+	stroke: var(--rj-border-strong);
+	stroke-width: 1;
+}
+.d-box-a {
+	fill: var(--rj-violet-wash);
+	stroke: var(--rj-violet);
+	stroke-width: 1.8;
+}
+.d-box-w {
+	fill: var(--rj-coral-wash);
+	stroke: var(--rj-coral);
+	stroke-width: 1.8;
+}
+.d-box-g {
+	fill: none;
+	stroke: var(--rj-border-strong);
+	stroke-width: 1.2;
+	stroke-dasharray: 4 4;
+}
+.d-fill-a {
+	fill: var(--rj-series-1);
+}
+.d-fill-b {
+	fill: var(--rj-series-2);
+}
+.d-fill-m {
+	fill: var(--rj-border-strong);
+}
+.d-line {
+	stroke: var(--sl-color-gray-4);
+	stroke-width: 1.5;
+	fill: none;
+}
+.d-line-a {
+	stroke: var(--rj-series-1);
+	stroke-width: 2;
+	fill: none;
+}
+.d-line-b {
+	stroke: var(--rj-series-2);
+	stroke-width: 2;
+	fill: none;
+}
+.d-arrow {
+	fill: var(--sl-color-gray-4);
+}
+.d-arrow-a {
+	fill: var(--rj-series-1);
+}
+.d-arrow-b {
+	fill: var(--rj-series-2);
+}
+.d-t {
+	fill: var(--sl-color-white);
+	font: 500 14px var(--__sl-font);
+}
+.d-t-b {
+	fill: var(--sl-color-white);
+	font: 700 14px var(--__sl-font);
+}
+.d-t-s {
+	fill: var(--sl-color-gray-3);
+	font: 400 12.5px var(--__sl-font);
+}
+.d-t-h {
+	fill: var(--sl-color-white);
+	font: 700 15px var(--__sl-font);
+}
+.d-t-m {
+	fill: var(--sl-color-gray-2);
+	font: 500 12px var(--__sl-font-mono);
+}
+.d-t-a {
+	fill: var(--rj-violet-ink);
+	font: 700 13px var(--__sl-font);
+}
+.d-t-w {
+	fill: var(--rj-coral-ink);
+	font: 700 13px var(--__sl-font);
+}
+/* Text drawn on top of a filled bar. */
+.d-t-on {
+	fill: var(--rj-on-color);
+	font: 650 13px var(--__sl-font);
+}
