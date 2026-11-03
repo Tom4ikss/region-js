@@ -69,7 +69,15 @@ scripts/setup.sh                     # depot_tools, V8 на нужном ком�
 v8-src/v8/out/release/d8 --harmony-regions --module tests/channels.js
 ```
 
-Документация — на [сайте](https://tom4ikss.github.io/region-js/ru/) или в `docs/ru/index.html`, её можно открыть прямо из файла. Пересобрать с выводом примеров: `python3 docs/_build/build.py`.
+Документация — на [сайте](https://tom4ikss.github.io/region-js/ru/). Сайт собирается из `site/` (Astro и Starlight, нужны Node 22 и pnpm):
+
+```sh
+cd site
+pnpm install
+pnpm dev                             # http://localhost:4321/region-js/
+pnpm build && pnpm check             # статический сайт в site/dist и проверка ссылок и якорей
+node scripts/run-examples.mjs        # перезапустить примеры в d8 и обновить их вывод (*.out.txt)
+```
 
 Песочница: откройте папку `playground/` в VSCode, выполните `npm install`, запуск открытого файла — Cmd+Shift+B. Подробнее в `playground/README.md`.
 
@@ -78,7 +86,7 @@ v8-src/v8/out/release/d8 --harmony-regions --module tests/channels.js
 | Папка | Что там |
 |---|---|
 | `v8/regions.patch` | Сам форк: патч поверх V8 `v8/BASE`, флаги сборки в `v8/args.gn` |
-| `docs/` | Сайт с документацией: английский в корне, русский в `docs/ru`. Исходники в `docs/_build` (`pages` и `pages-ru`), примеры в `docs/examples` и `docs/ru/examples` |
+| `site/` | Сайт с документацией: страницы в `site/src/content/docs` (английский в корне, русский в `ru/`), примеры с сохранённым выводом в `site/examples/en` и `site/examples/ru` |
 | `tests/` | Тесты и бенчмарки регионов, `spawn`, каналов и `free()`, фаззер |
 | `playground/` | Типы, Biome, ESLint-плагин и примеры для VSCode |
 | `prototype/js-ownership/` | Первая версия идеи на чистом JS поверх `SharedArrayBuffer` |
@@ -86,4 +94,4 @@ v8-src/v8/out/release/d8 --harmony-regions --module tests/channels.js
 
 ## Статус
 
-Alpha. Тесты V8 (mjsunit, 9 255) проходят, свои тесты и фаззер — тоже, но это исследовательский прототип: проверки безопасности уровня настоящего V8 не было, чужой код в нём не запускайте. Что не сделано и почему — на странице `docs/ru/limits.html`.
+Alpha. Тесты V8 (mjsunit, 9 255) проходят, свои тесты и фаззер — тоже, но это исследовательский прототип: проверки безопасности уровня настоящего V8 не было, чужой код в нём не запускайте. Что не сделано и почему — на странице [«Ограничения и планы»](https://tom4ikss.github.io/region-js/ru/limits/) (`site/src/content/docs/ru/limits.mdx`).

@@ -365,7 +365,7 @@ if (region.frozen) {
     конец файла.
   - С паузой в 300 мс перед выходом ошибки нет.
   - Эта строка попала в сохранённый вывод примеров документации
-    `docs/examples/30-channel-pipeline.out.txt` и `38-rwlock.out.txt`.
+    `site/examples/ru/30-channel-pipeline.out.txt` и `38-rwlock.out.txt`.
 - Падений d8 (CHECK, segfault) не было. Зависания — только п. 9.
 - **Исправлено:** ошибка пула при выходе. Воркер пула ставит `spawn.aborted`, только если
   `spawn` уже есть.
@@ -428,7 +428,7 @@ if (region.frozen) {
   `--harmony-regions`. Закрывает п. 20.
 - В конце текста — где регион отправили, разморозили, заморозили, запечатали, освободили или
   положили в `RwLock`: `region 0 was sent to another thread and has not been received yet
-  (sent at 44-errors.js:6:14)` (пример `docs/examples/44-errors.js`). Тексты «is being moved
+  (sent at 44-errors.js:6:14)` (пример `site/examples/ru/44-errors.js`). Тексты «is being moved
   between isolates» и «owned by isolate 1, not by isolate 0» заменены на «was sent to
   another thread and has not been received yet» и «belongs to another thread». Помогает в
   пп. 1, 6, 7, 15, 16.
@@ -449,7 +449,7 @@ if (region.frozen) {
   возвращаются, необработанных отказов нет.
 
 Пункт 3 списка выше: семантика отмены (`tests/spawn-cancel.js`, пример
-`docs/examples/46-cancel.js`):
+`site/examples/ru/46-cancel.js`):
 - п. 8: в отменённой задаче каждый `await` бросает её `AbortError` или `TimeoutError`, ручка
   отказывает в срок. В `server.js` (`abort-region`) документ после `timeout(20)` —
   `{"title":"final","words":0,"saved":false}`: код после `await` не выполняется. `catch` и
@@ -471,7 +471,7 @@ if (region.frozen) {
 `spawn.aborted()`.
 
 Пункт 4 списка выше: билет в момент `spawn()` и `region.thawWhenFree()`
-(`tests/spawn-thaw.js`, пример `docs/examples/47-thaw-wait.js`):
+(`tests/spawn-thaw.js`, пример `site/examples/ru/47-thaw-wait.js`):
 - п. 13: `spawn()` берёт билет на захваченный или переданный замороженный регион сразу, в
   вызывающем потоке, а задача при старте забирает его себе, без второго читателя.
   `region.readers` сразу после `spawn` — 1, `thaw()` падает, пока задача ждёт в очереди. В
@@ -502,5 +502,5 @@ if (region.frozen) {
 
 Анализ по позициям в тексте одной функции, без типов: регионом считается переменная из
 `что-то.run(...)`, обычными данными — литерал `{}` или `[]`. Ложных срабатываний на
-`playground/examples/` нет, в `tests/` и `docs/examples/` правила отмечают только места,
+`playground/examples/` нет, в `tests/` и `site/examples/ru/` правила отмечают только места,
 где ошибка сделана нарочно.

@@ -196,7 +196,7 @@ tester.run('no-write-to-spawn-copy', writeToSpawnCopy, {
         await spawn(() => { seen.push(1); });`,
       errors: [{ messageId: 'copy', data: { name: 'seen' } }],
     },
-    // A captured variable is assigned (docs/examples/18-spawn-gotchas.js).
+    // A captured variable is assigned (site/examples/en/18-spawn-gotchas.js).
     {
       code: `let counter = 0;
         spawn(() => ++counter).join();
