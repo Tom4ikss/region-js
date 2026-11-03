@@ -62,12 +62,16 @@ print('payload items:', await worker); // 3
 
 ## Как запустить
 
-Нужны macOS или Linux, git, Python 3, около 10 ГБ места и терпение: V8 собирается долго.
+Нужны macOS или Linux (подойдёт и WSL2), git, Python 3, около 15 ГБ места и терпение: V8 собирается долго.
 
 ```sh
 scripts/setup.sh                     # depot_tools, V8 на нужном коммите, патч, сборка d8
 v8-src/v8/out/release/d8 --harmony-regions --module tests/channels.js
+scripts/run-tests.sh v8-src/v8/out/release/d8          # все тесты по разу
+scripts/test-variants.sh v8-src/v8/out/release/d8      # тесты под вариантами флагов, часы
 ```
+
+`scripts/setup.sh tsan is_tsan=true` собирает d8 с другими аргументами gn в `out/tsan`, `JOBS=8` ограничивает число параллельных задач сборки, если памяти мало.
 
 Документация — на [сайте](https://tom4ikss.github.io/region-js/ru/). Сайт собирается из `site/` (Astro и Starlight, нужны Node 22 и pnpm):
 
