@@ -863,3 +863,38 @@ pre.out .err {
 		fill: CanvasText;
 	}
 }
+
+/* ---------- Header buttons: GitHub, theme and language look the same ---------- */
+
+.rj-icon-btn {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: 0.3rem;
+	min-width: 2.2rem;
+	height: 2.2rem;
+	padding: 0 0.45rem;
+	border: 0;
+	border-radius: var(--rj-radius);
+	background: none;
+	color: var(--sl-color-gray-2);
+	font: 600 0.8rem/1 var(--__sl-font);
+	letter-spacing: 0.02em;
+	text-decoration: none;
+	cursor: pointer;
+	transition: background-color 0.15s, color 0.15s;
+}
+.rj-icon-btn:hover {
+	background: var(--rj-surface-2);
+	color: var(--sl-color-white);
+}
+
+/* ---------- Code: no ligatures, so #{ and #[ stay two characters ---------- */
+
+code,
+kbd,
+pre,
+samp {
+	font-variant-ligatures: none;
+	font-feature-settings: 'liga' 0, 'calt' 0;
+}

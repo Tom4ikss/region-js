@@ -9,8 +9,8 @@ const href = otherLangHref(Astro.url.pathname);
 const other = t.switchLabel === 'RU' ? 'ru' : 'en';
 ---
 
-<a class="rj-lang" href={href} hreflang={other} lang={other} aria-label={t.switchTo} title={t.switchTo}>
-	<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"></circle><path d="M3 12h18M12 3c2.5 2.6 3.8 5.6 3.8 9s-1.3 6.4-3.8 9c-2.5-2.6-3.8-5.6-3.8-9S9.5 5.6 12 3z"></path></svg>
+<a class="rj-icon-btn rj-lang" href={href} hreflang={other} lang={other} aria-label={t.switchTo} title={t.switchTo}>
+	<svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"></circle><path d="M3 12h18M12 3c2.5 2.6 3.8 5.6 3.8 9s-1.3 6.4-3.8 9c-2.5-2.6-3.8-5.6-3.8-9S9.5 5.6 12 3z"></path></svg>
 	<span>{t.switchLabel}</span>
 </a>
 

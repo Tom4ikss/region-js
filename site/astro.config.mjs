@@ -64,6 +64,7 @@ export default defineConfig({
 				Hero: './src/components/overrides/Hero.astro',
 				PageTitle: './src/components/overrides/PageTitle.astro',
 				LanguageSelect: './src/components/overrides/LanguageSelect.astro',
+				ThemeSelect: './src/components/overrides/ThemeSelect.astro',
 				Footer: './src/components/overrides/Footer.astro',
 				Sidebar: './src/components/overrides/Sidebar.astro',
 			},
