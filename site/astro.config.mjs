@@ -5,6 +5,7 @@ import starlight from '@astrojs/starlight';
 import { BASE, GITHUB, GROUPS, PAGES, SITE } from './src/lib/site.mjs';
 import remarkRegionDocs from './src/plugins/remark-region-docs.mjs';
 import rehypeRegionDocs from './src/plugins/rehype-region-docs.mjs';
+import logoPreview from './src/lib/logo-preview.mjs';
 
 // Sidebar groups in the old site's order. The landing page is the first item of the first group.
 const sidebar = GROUPS.map((group, i) => ({
@@ -102,5 +103,6 @@ export default defineConfig({
 				},
 			},
 		}),
+		logoPreview(BASE),
 	],
 });
