@@ -33,7 +33,7 @@ print('payload items:', await worker); // 3
 
 It runs only in `d8`, the engine's test shell; none of this reaches browsers or Node.
 
-**Documentation:** https://tom4ikss.github.io/region-js/ (in Russian: https://tom4ikss.github.io/region-js/ru/) · **Release:** [v0.4.1-alpha](https://github.com/Tom4ikss/region-js/releases/tag/v0.4.1-alpha)
+**Documentation:** https://tom4ikss.github.io/region-js/ (in Russian: https://tom4ikss.github.io/region-js/ru/) · **Release:** [v0.5.0-alpha](https://github.com/Tom4ikss/region-js/releases/tag/v0.5.0-alpha)
 
 ## Against workers and tokio
 

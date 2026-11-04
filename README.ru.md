@@ -33,7 +33,7 @@ print('payload items:', await worker); // 3
 
 Работает только в тестовой оболочке движка `d8`, в браузер и Node это не попадает.
 
-**Документация:** https://tom4ikss.github.io/region-js/ru/ (английская версия: https://tom4ikss.github.io/region-js/) · **Релиз:** [v0.4.1-alpha](https://github.com/Tom4ikss/region-js/releases/tag/v0.4.1-alpha)
+**Документация:** https://tom4ikss.github.io/region-js/ru/ (английская версия: https://tom4ikss.github.io/region-js/) · **Релиз:** [v0.5.0-alpha](https://github.com/Tom4ikss/region-js/releases/tag/v0.5.0-alpha)
 
 ## Против воркеров и tokio
 
