@@ -1,507 +1,509 @@
-# Регионы владения в V8
+# Ownership regions in V8
 
-Исследовательский прототип: объекты JS, которые живут в отдельной общей части кучи,
-принадлежат одному потоку и передаются между потоками за O(1), как `move` в Rust.
-Итог — работающий d8 с прототипом, бенчмарки и выводы. Возможно, форк движка.
+**English** · [Русский](DESIGN.ru.md)
 
-Субботний MVP на `SharedArrayBuffer` лежит в `prototype/js-ownership/` и задаёт базовую
-линию для сравнения.
+A research prototype: JS objects that live in a separate shared part of the heap, belong to
+one thread and are passed between threads in O(1), like `move` in Rust.
+The outcome: a working d8 with the prototype, benchmarks and conclusions. Possibly an engine fork.
 
-## Что реализовано и чем это отличается от дизайна
+The weekend MVP on `SharedArrayBuffer` is in `prototype/js-ownership/` and sets the
+baseline for comparison.
 
-Реализация — `v8/regions.patch` поверх V8 из `v8/BASE`; JS API доступен в d8 с флагом
-`--harmony-regions`. Разделы после этого — исходный дизайн; где реализация от него ушла,
-сказано здесь.
+## What is implemented and how it differs from the design
 
-- **Хранение.** Объекты лежат в общем `SHARED_SPACE`, номер региона — Smi в самом объекте,
-  а не в заголовке страницы. Свойства — в массивах `keys` / `values`, одна Map на форму
-  объекта (одинаковые ключи в одинаковом порядке), поэтому inline cache по паре
-  «Map + имя» знает индекс поля.
-- **Проверка владения** на быстром пути IC: таблица адресов isolate-владельцев по номеру
-  региона, одно сравнение с адресом текущего isolate. Запись проверяет значение тут же.
-- **Прототипы.** Своего прототипа нет, но отсутствующие свойства читаются из
-  `Array.prototype` / `Object.prototype` читающего isolate: работают `for...of`, spread,
-  `map`/`filter`. `Object.keys`, `for...in`, `JSON.stringify`, `Array.isArray` работают
-  через перечисление ключей региона.
-- **В регион попадают** plain-объекты (`Object.prototype` или `null`), массивы с
-  `Array.prototype`, примитивы, типизированные массивы, функции `Region.fn` и ручки
-  `Region.localRef` (ниже). Экземпляры классов, `Map`, обычные функции — ошибка.
-- **`freeze` / `borrow`.** Битсета заимствований нет: у региона счётчик читателей, а кто
-  может читать замороженный регион, решает таблица чтения изолята («Обязательный borrow»
-  ниже). `thaw` при читателях — исключение, `thawWhenFree()` ждёт, пока билеты сдадут.
-- **Возврат и `Region.of(obj)`** — хендл региона объекта, чтобы положить его в transfer list.
-- **Освобождение.** Номер региона переиспользуется, когда в куче не осталось его объектов
-  (проверка в конце сборки shared space, на global safepoint) и нет JS-хендлов `Region`.
-  Сообщение в пути считается хендлом; поколение номера защищает от устаревших сообщений.
-- **`spawn(fn, ...args)`**: пул воркеров, `join()` и `await`, захват переменных из замыкания
-  (данные копируются, регионы move'аются и возвращаются после задачи, замороженные шарятся,
-  функции едут исходником), лексические `this` и `arguments` стрелки. Классы, `eval`/`with`,
-  нативные функции — ошибка на месте вызова.
-- **Память.** Недостижимые объекты живого региона собирает обычный GC shared space: это
-  обычные объекты shared heap. Номер региона освобождается, когда у него не осталось ни
-  объектов, ни хендлов. Регион, в котором набралось 64 КБ (`--region-page-threshold`),
-  получает свои страницы shared space: на них нет ничего, кроме его объектов и их массивов
-  значений, номер региона записан в метаданных страницы, страница не эвакуируется и
-  освобождается целиком, когда опустела. Литералы выделяются на них в машинном коде через
-  буфер региона в `Isolate`, C++ — через `RegionAllocator`; остаток буфера при смене региона
-  достаётся следующему владельцу. Это шаг 1 сборки региона без остановки остальных потоков
+The implementation is `v8/regions.patch` on top of V8 from `v8/BASE`; the JS API is available in d8 with the
+`--harmony-regions` flag. The sections after this one are the original design; where the implementation
+diverged from it, this section says so.
+
+- **Storage.** Objects live in the shared `SHARED_SPACE`, and the region number is a Smi in the object itself,
+  not in the page header. Properties are in `keys` / `values` arrays, with one Map per object shape
+  (the same keys in the same order), so the inline cache knows the field index from the
+  “Map + name” pair.
+- **Ownership check** on the IC fast path: a table of owner isolate addresses indexed by region
+  number, and one comparison with the address of the current isolate. A write checks the value right there.
+- **Prototypes.** There is no own prototype, but missing properties are read from the
+  `Array.prototype` / `Object.prototype` of the reading isolate: `for...of`, spread and
+  `map`/`filter` work. `Object.keys`, `for...in`, `JSON.stringify` and `Array.isArray` work
+  through enumeration of the region's keys.
+- **A region can hold** plain objects (`Object.prototype` or `null`), arrays with
+  `Array.prototype`, primitives, typed arrays, `Region.fn` functions and
+  `Region.localRef` handles (below). Class instances, `Map` and ordinary functions are an error.
+- **`freeze` / `borrow`.** There is no borrow bitset: a region has a reader count, and who
+  may read a frozen region is decided by the isolate's read table (“Mandatory borrow”
+  below). `thaw` with readers is an exception; `thawWhenFree()` waits until the borrows are returned.
+- **Returning and `Region.of(obj)`**: the handle of the object's region, so that it can be put into a transfer list.
+- **Freeing.** A region number is reused when no objects of the region remain in the heap
+  (checked at the end of a shared space collection, at a global safepoint) and there are no JS `Region` handles.
+  A message in transit counts as a handle; the number's generation protects against stale messages.
+- **`spawn(fn, ...args)`**: a worker pool, `join()` and `await`, capturing variables from the closure
+  (data is copied, regions are moved and returned after the task, frozen ones are shared,
+  functions travel as source), the lexical `this` and `arguments` of arrow functions. Classes, `eval`/`with`
+  and native functions are an error at the call site.
+- **Memory.** Unreachable objects of a live region are collected by the ordinary shared space GC: they are
+  ordinary shared heap objects. A region number is released when the region has neither
+  objects nor handles left. A region that has accumulated 64 KB (`--region-page-threshold`)
+  gets its own shared space pages: they hold nothing but its objects and their value
+  arrays, the region number is written in the page metadata, and the page is not evacuated and is
+  released as a whole when it becomes empty. Literals are allocated on them in machine code through
+  the region buffer in `Isolate`, and C++ allocates through `RegionAllocator`; on a region switch, the rest of the buffer
+  goes to the next owner. This is step 1 of collecting a region without stopping the other threads
   (`research/region-gc.md`).
-- **Кто держит регион.** У каждого региона 64-битная маска изолятов, которые могут держать
-  указатели на его объекты (`RegionRegistry::holders_`, шаг 2). Бит ставится при создании,
-  `Claim`, `SetReadable` и при передаче объекта через сообщение, а снимает его только
-  полная сборка самого изолята: перед пометкой она обходит корни, молодое поколение и
-  `OLD_TO_SHARED` и снимает бит у регионов, на которые указателей не нашла, кроме своего и
-  замороженного ею. Переезд бит не снимает: у старого владельца остаются указатели.
-- **Сборка владельцем** (шаг 3). Регион до порога выделяет кусками общих страниц, от 1 до
-  32 КБ, и помнит их до общей сборки, а его объекты, которые общая сборка застала живыми на
-  общих страницах, — списком, так что все его объекты находятся. Если во множестве только
-  владелец и его отчёт не нашёл указателей на регион, владелец собирает регион сразу, на
-  своей сборке: страницы идут в пул для новых регионов, куски и объекты из списка — в общий
-  список свободной памяти, большие массивы заполняются `undefined`. Если указатели есть и
-  регион с прошлой пометки выделил не меньше, чем тогда было живым (и не меньше 1 МБ),
-  владелец помечает его от тех же указателей: битовая карта пометки страниц региона и
-  множество для остального. Мёртвая память на страницах становится свободной памятью
-  региона, пустые страницы — пулом. Отчёт со сборкой идёт в полных сборках клиентов и в
-  малой сборке, которую изолят просит, взяв под регионы 64 страницы памяти
-  (`--region-gc-pages`); пометка — только в малой. С `--verify-heap` мёртвая память
-  заполняется шаблоном и не переиспользуется до общей сборки, чтобы верификатор поймал
-  оставшийся указатель.
-- **Просьба отчитаться** (шаг 4). Если собрать или пометить регион владельцу мешают
-  чужие биты, а такие регионы вместе выделили от 1 МБ, он просит этих держателей о двух
-  малых сборках с отчётом. Просьба приходит задачей: держатель выполняет её в цикле
-  сообщений, между задачами. Держатель, снявший бит последним, будит владельца, если тот
-  ждёт регион. Изолят просьбы находится по номеру бита в таблице под
-  мьютексом реестра. Блокирующий `getMessage` в d8 выполняет отложенные просьбы до и после
-  ожидания. Частичного safepoint по держателям нет.
-- **Строки и числа региона** (шаг 6). Строку или `HeapNumber`, которые регион хранит,
-  копия кладёт в память этого региона, и они умирают вместе с ним; строку другого региона
-  запись копирует ещё раз, ключи форм — общие копии. Чей это объект, `RegionOf` узнаёт по
-  номеру на странице или по индексу адресов кусков и объектов на общих страницах (флаг
-  страницы `REGION_MEMORY`). Общая сборка очищает индекс перед обходом, потому что
-  уплотнение двигает объекты общих страниц: строки кусков после неё становятся общими.
-  Освобождая номер региона, она переводит то, что от него осталось, в общую память.
-  Флаг `--no-region-strings`.
-- **TypedArray** — подкласс `JSRegionTypedArray`: регион хранит номер `BackingStore`, тип,
-  смещение и длину, чтение поля даёт локальный view поверх той же памяти. `run` копирует
-  буфер, буфер из transfer list переезжает без копии. При переезде и заморозке view
-  владельца отсоединяются, читатели замороженного региона получают immutable view. View
-  замороженного региона выдаются только заморозившему потоку и тем, кто держит borrow
-  (задача `spawn` получает borrow в момент вызова `spawn()`); каждый поток отсоединяет свои
-  view сам, когда сдаёт последний borrow, размораживает регион или отдаёт право разморозки.
-- **Право разморозки** — размораживает тот поток, который заморозил; замороженный регион в
-  transfer list передаёт это право. Задача `spawn` заканчивается после своих вложенных
-  задач, забытые синхронные borrow снимаются в конце задачи, `borrowWhile` держит borrow
-  до конца промиса. Ручка задачи ведёт себя как промис: `join()` и `await` повторяемы.
-- **Каналы** (`d8-channel.cc`) — `new Channel(capacity)`, `send`/`recv`, `close`, `select`,
-  async и блокирующие версии, `for await` и `for...of`. Примитивы, строки, объекты регионов
-  и каналы идут нативно, как в порте задач (см. ниже), обычные объекты — через сериализатор
-  `postMessage`; канал сам перемещает регионы, на которые значение ссылается напрямую.
-  Блокирующее ожидание паркует поток для GC общей кучи; `Worker.terminate()` снимает
-  ожидания изолята, а недочитанное значение возвращается в канал.
-- **Быстрый spawn** (≈6 µs на `spawn(...).join()`, было ≈40). Анализ замыкания кэшируется
-  по позиции функции в скрипте; `__prepareSpawn` возвращает плоский массив
-  `[code id, this, arguments, ...значения]`, код задачи едет в воркер один раз на id.
-  Сообщения — плоские массивы, примитивы идут без региона, промисы создаются только для
-  `await`. Потоки перед сном до `--spin-wait-us` (50) крутятся в task runner платформы,
-  `getMessage` и блокирующих операциях каналов: пробуждение через condvar стоит ≈5 µs.
-- **Порт задач** (`d8-port.cc`, ≈3.5 µs на `spawn(...).join()`). Задачи и ответы идут не через
-  `postMessage`, а через нативный порт: сообщение — массив примитивов, строк, объектов
-  регионов и каналов, копируется в C++-буфер без ValueSerializer; объекты регионов в пути
-  держат persistent-хендлы shared-изолята (как SharedValueConveyor), регионы из transfer
-  list переезжают с сообщением. Воркер получает задачи drain-задачей в своём task runner,
-  клиент забирает ответы блокирующим `take()` (spin + park) или слушает их из event loop.
-  Каналы используют тот же маршалинг для таких значений; обычные объекты по-прежнему
-  копируются сериализатором.
-- **Запись прямо в регион.** `region.enter()` делает регион текущим (стек на изолят, `run()`
-  тоже кладёт регион на него) для литералов `#{}`. У массивов есть поле `array_length`,
-  `values()` держит запас ёмкости (рост в полтора раза), так что `push` линеен; запись по
-  индексу (StoreRegionElement handler) и `push` одного элемента (ArrayPrototypePush) пишут в
-  запас без рантайма; методы прототипа кэшируются как константы с validity cell локального
-  `Array.prototype`/`Object.prototype` и проверкой доступа к региону в EmitAccessCheck. IC
-  читает длину и проверяет границы по `array_length`. Эвакуатор копирует fast-mode объекты
-  по дескрипторам map (кэш «map → форма региона») и плотные массивы напрямую.
-- **Литералы `#{}` / `#[]`** (`--harmony-region-literals`, его включает
-  `--harmony-regions`). Сканер выдаёт токены `#{` и `#[`, парсер разворачивает литерал в
-  `%CreateRegionObjectLiteral(ключ, значение, ...)` или `%CreateRegionArrayLiteral(...)`;
-  рантайм создаёт объект прямо в текущем регионе (стек текущих регионов теперь в ядре,
-  `enter()`/`run()` кладут на него). Формы — общий для изолята кэш «набор ключей → keys +
-  map», им же пользуется эвакуатор, так что объекты одной формы делят map, а IC мономорфны.
-  Быстрый путь: CallJSRuntime к TFJ-билтинам `RegionObjectLiteral`/`RegionArrayLiteral` из
-  native context; кэш форм в native context (хэш ключей → [map, keys, локальные ключи]),
-  текущий регион в поле изолята, выделение объекта и значений одним куском из shared LAB
-  главного потока (LAB вынесен в `Isolate::shared_allocation_info()`, top/limit — external
-  references), барьер только при маркировке; первый литерал формы и необычные случаи —
-  CPP-билтины `Region*LiteralSlow`, значения, которые надо копировать, —
+- **Who holds a region.** Each region has a 64-bit mask of the isolates that may hold
+  pointers to its objects (`RegionRegistry::holders_`, step 2). A bit is set on creation,
+  `Claim`, `SetReadable` and when an object is passed in a message, and only a
+  full collection of the isolate itself clears it: before marking, it walks the roots, the young generation and
+  `OLD_TO_SHARED` and clears the bit for regions to which it found no pointers, except its own region and
+  the ones it froze. A move does not clear the bit: the old owner still has pointers.
+- **Collection by the owner** (step 3). Below the threshold, a region allocates in chunks of common pages, from 1 to
+  32 KB, and remembers them until the shared collection; its objects that the shared collection found alive on
+  common pages it remembers as a list, so all of its objects can be found. If the set contains only
+  the owner and the owner's report found no pointers to the region, the owner collects the region right away, during
+  its own collection: the pages go to a pool for new regions, and the chunks and the objects from the list go to the common
+  free list; large arrays are filled with `undefined`. If there are pointers, and
+  since the last marking the region has allocated at least as much as was live then (and at least 1 MB),
+  the owner marks it starting from those same pointers: a mark bitmap for the region's pages and
+  a set for the rest. Dead memory on the pages becomes free memory of the
+  region, and empty pages go to the pool. The report together with collection runs in full collections of clients and in the
+  minor collection that an isolate requests after taking 64 pages of memory for regions
+  (`--region-gc-pages`); marking runs only in the minor one. With `--verify-heap`, dead memory
+  is filled with a pattern and is not reused until the shared collection, so that the verifier catches a
+  remaining pointer.
+- **Report requests** (step 4). If other isolates' bits prevent the owner from collecting or marking a region,
+  and such regions have together allocated 1 MB or more, the owner asks those holders for two
+  minor collections with a report. The request arrives as a task: the holder runs it in its message
+  loop, between tasks. The holder that clears its bit last wakes the owner if the owner
+  is waiting for the region. The isolate to ask is found by bit number in a table under the
+  registry mutex. A blocking `getMessage` in d8 runs pending requests before and after
+  waiting. There is no partial safepoint over the holders.
+- **Region strings and numbers** (step 6). A string or `HeapNumber` that a region stores
+  is put by the copy into that region's memory, and they die together with it; a string of another region
+  is copied once more on write; shape keys are shared copies. `RegionOf` finds which region an object belongs to by the
+  number on the page or by an index of chunk and object addresses on common pages (the page
+  flag `REGION_MEMORY`). The shared collection clears the index before the traversal, because
+  compaction moves objects on common pages: after it, strings in chunks become shared.
+  When it releases a region number, it turns what is left of the region into shared memory.
+  Flag `--no-region-strings`.
+- **TypedArray** is the `JSRegionTypedArray` subclass: the region stores the `BackingStore` number, the type,
+  the offset and the length, and reading the field gives a local view over the same memory. `run` copies the
+  buffer; a buffer from the transfer list moves without a copy. On a move and on freezing, the owner's views
+  are detached, and readers of a frozen region get an immutable view. Views
+  of a frozen region are handed out only to the thread that froze it and to those holding a borrow
+  (a `spawn` task gets a borrow at the moment `spawn()` is called); each thread detaches its own
+  views itself when it returns its last borrow, thaws the region or gives away the right to thaw.
+- **The right to thaw**: the thread that froze a region thaws it; a frozen region in a
+  transfer list passes this right on. A `spawn` task finishes after its nested
+  tasks, forgotten synchronous borrows are released at the end of the task, and `borrowWhile` holds the borrow
+  until the promise settles. A task handle behaves like a promise: `join()` and `await` are repeatable.
+- **Channels** (`d8-channel.cc`): `new Channel(capacity)`, `send`/`recv`, `close`, `select`,
+  async and blocking versions, `for await` and `for...of`. Primitives, strings, region objects
+  and channels travel natively, as in the task port (see below); ordinary objects go through the `postMessage`
+  serializer; the channel itself moves the regions that the value references directly.
+  A blocking wait parks the thread for shared heap GC; `Worker.terminate()` removes
+  the isolate's waits, and a value not yet read goes back to the channel.
+- **Fast spawn** (≈6 µs per `spawn(...).join()`, was ≈40). Closure analysis is cached
+  by the function's position in the script; `__prepareSpawn` returns a flat array
+  `[code id, this, arguments, ...values]`, and the task code travels to the worker once per id.
+  Messages are flat arrays, primitives travel without a region, and promises are created only for
+  `await`. Before sleeping, threads spin for up to `--spin-wait-us` (50) in the platform task runner,
+  `getMessage` and blocking channel operations: a wake-up through a condvar costs ≈5 µs.
+- **Task port** (`d8-port.cc`, ≈3.5 µs per `spawn(...).join()`). Tasks and replies go not through
+  `postMessage` but through a native port: a message is an array of primitives, strings, region objects
+  and channels, copied into a C++ buffer without ValueSerializer; region objects in transit
+  are held by persistent handles of the shared space isolate (like SharedValueConveyor), and regions from the transfer
+  list move with the message. A worker receives tasks with a drain task in its task runner,
+  and a client picks up replies with a blocking `take()` (spin + park) or listens for them from the event loop.
+  Channels use the same marshaling for such values; ordinary objects are still
+  copied by the serializer.
+- **Writing directly into a region.** `region.enter()` makes the region current (a stack per isolate; `run()`
+  also pushes the region onto it) for `#{}` literals. Arrays have an `array_length` field,
+  and `values()` keeps spare capacity (growth by 1.5 times), so `push` is linear; an indexed write
+  (StoreRegionElement handler) and a single-element `push` (ArrayPrototypePush) write into
+  the spare capacity without the runtime; prototype methods are cached as constants with the validity cell of the local
+  `Array.prototype`/`Object.prototype` and a region access check in EmitAccessCheck. The IC
+  reads the length and checks bounds against `array_length`. The evacuator copies fast-mode objects
+  by map descriptors (a “map → region shape” cache) and dense arrays directly.
+- **`#{}` / `#[]` literals** (`--harmony-region-literals`, turned on by
+  `--harmony-regions`). The scanner produces `#{` and `#[` tokens, and the parser expands the literal into
+  `%CreateRegionObjectLiteral(key, value, ...)` or `%CreateRegionArrayLiteral(...)`;
+  the runtime creates the object directly in the current region (the stack of current regions is now in the engine core,
+  and `enter()`/`run()` push onto it). Shapes are an isolate-wide cache “set of keys → keys +
+  map”, which the evacuator also uses, so objects of one shape share a map, and ICs are monomorphic.
+  Fast path: CallJSRuntime to the TFJ builtins `RegionObjectLiteral`/`RegionArrayLiteral` from the
+  native context; the shape cache is in the native context (key hash → [map, keys, local keys]),
+  the current region is in an isolate field, the object and its values are allocated as one chunk from the main thread's shared LAB
+  (the LAB is moved out into `Isolate::shared_allocation_info()`, top/limit are external
+  references), and a barrier is needed only during marking; the first literal of a shape and unusual cases go to the
+  CPP builtins `Region*LiteralSlow`, and values that have to be copied go to
   `Runtime::kShareRegionLiteralValue`.
-- **Пул `spawn`:** один порт задач на пул, все воркеры его обслуживают
-  (`PortState::servers`); `send` будит воркер, который сейчас не разбирает очередь,
-  разбирающие берут задачи по одной; порт помнит id задач каждого воркера и при его смерти
-  отвечает за них ошибкой; код задач в порте (`port.code`), `port.expect()` для ещё не
-  запущенных воркеров.
-- **`DataOf()`** в портах и каналах кэширует запись изолята в
-  `thread_local`; `data_epoch` растёт при удалении записи, чтобы новый изолят с адресом
-  старого не получил чужую запись.
-- **Очереди каналов:** получатели, завершённые через другой канал (`select`) или отменённые,
-  остаются в очереди с `done` и пропускаются; `ChannelState::stale` считает их, очередь
-  чистится, когда их половина (амортизированно O(1) на доставку).
-- **Поиск дедлоков** (`Deadlocks` в `d8-channel.cc`): libplatform сообщает, когда цикл
-  событий изолята засыпает и просыпается (`DefaultForegroundTaskRunner::SleepObserver`);
-  блокирующие ожидания каналов и `port.take()` отмечаются сами. Будит поток тот, кто ставит
-  ему задачу или сигналит, под своим мьютексом, поэтому «спят все» не бывает ложным на миг.
-  Когда спят все изоляты и нет таймеров `timeout()`, проверка ждёт 50 мс на потоке
-  платформы; если эпоха не изменилась, ожидания каналов и локов отменяются с
-  `DeadlockError`. Ожидание отложенной задачи V8 (memory reducer) считается сном.
-  Побудка цикла, которую вызвали только его собственные задачи или потоки движка (сборка
-  мусора ставит следующий шаг задачей), эпоху не меняет: libplatform спрашивает наблюдателя
-  о каждой поставленной задаче (`PostedByOther`), и в счёт идут только задачи от других
-  изолятов. Разбудить другой поток такой цикл может только операцией канала, лока или
-  задачи или задачей в чужой цикл, а они меняют эпоху сами. Иначе GC, который всё время
-  ставит задачи, прятал бы дедлок навсегда.
-- **`RwLock`** (`d8-channel.cc`): `ChannelState` с `LockData`, чтобы лок ходил как канал.
-  Регион лока: `InTransit`, пока лок свободен; `Owned(писатель)`; `Frozen(никто, n)` для
-  читателей (`FreezeInTransit`/`ThawToTransit`). Выдача под мьютексом каналов, а
-  `Claim`/`Borrow` делает поток получателя (`TakeGrant`); невзятая выдача возвращается
-  (`ReturnUndeliveredLocked`). `RegionRegistry::locked_` запрещает `Free`, `Freeze`, перенос
-  и чужой `Borrow`; отдельные тексты `OwnershipError`.
-- **Отравление `RwLock`:** `LockData::poisoned` ставит `ReleaseHeld`, когда write-guard
-  отпускает отменённая задача (`LockRelease`), когда задача упала, оставив guard
-  (`RwLock.__releaseTask` из `__endTask`; guard'ы помнят задачу, которая их взяла), или
-  когда уходит поток. `TakeGrant` отказывает отравленному локу с `PoisonError` и возвращает
-  выдачу.
-- **Отмена задач:** воркер держит id задачи в continuation data (`Region.__task`), так
-  ожидания каналов и локов знают свою задачу и после `await`. `port.abort(id, name,
-  message[, delay])`: задача из inbox превращается в ответ с её регионами; у запущенной
-  `PortState::aborted` подменяет результат, а `Channels::AbortTask` отменяет блокирующие
-  ожидания сразу и асинхронные задачей на потоке воркера; новые ожидания отменённой задачи
-  падают до `TaskEnded`. Таймаут — отложенная задача на потоке платформы.
-- **Вложенная отмена:** `spawn` на воркере пула запоминает своих детей по id текущей задачи
-  (`Region.__task()`). `port.serve(onTask, onAbort)`: отмена запущенной задачи ставит её
-  воркеру `AbortNoticeTask`, и `onAbort(id)` отменяет детей тем же `port.abort`, дальше по
-  цепочке.
-- **Отмена на `await`:** пока у изолята есть отменённая задача
-  (`Isolate::region_task_aborted_`, ставит `Channels::AbortTask` с любого потока), четыре
-  места, где возобновляется `await` (`PromiseReactionJob` с генератором вместо обработчика,
-  замыкания `AsyncFunctionAwaitResumeClosure` и `AsyncGeneratorAwaitResume`,
-  `AsyncResumeTask` в очереди микрозадач), спрашивают `Runtime_RegionAwaitAbortError`. Тот
-  по continuation data проверяет задачу через хук d8 (`RegionRegistry::SetTaskAbortHook`) и
-  отдаёт её ошибку, и генератор возобновляется броском. Без отмен это одно чтение байта на
-  `await`. Ожидание промиса, который ещё не выполнен, будит
-  `RegionRegistry::InterruptTaskAwaits`: `onAbort` на воркере обходит кучу, находит у
-  промисов в ожидании реакции `await` этой задачи (по continuation data реакции) и отклоняет
-  каждую отдельно (`JSPromise::TriggerPromiseReactions` для одной снятой со списка реакции).
-  `await` на промис async-функции этой же задачи, которая тоже ждёт, пропускается: ошибка
-  придёт изнутри. Цепочка `await` держится только снизу: промис держит реакции с
-  генераторами, генератор — свой промис, а нижний промис — только тот, кто его выполнит.
-  Поэтому `Await` (`builtins-async-gen.cc`), если continuation data — число (задача или
-  shield), кладёт промис в список изолята (`Isolate::region_task_awaits_`, глобальный хэндл
-  на `ArrayList`) прямо в CSA, пока есть место до порога, иначе через
-  `Runtime_RegionHoldTaskAwait` (`RegionRegistry::HoldTaskAwait`), который выкидывает
-  выполненные промисы и растит порог вдвое. Около 5 нс на `await` промиса в ожидании. В
-  `__endTask` раннер зовёт `Region.__forgetAwaits(id)` (`ForgetTaskAwaits`): промисы,
-  которые ждёт только эта задача и её shield, отпускаются, и брошенные ею функции
-  собираются. Если `await` задачи всё же не нашлось (код ничего не ждёт), раннер отвечает за
-  неё сам (`__live`).
-- **`spawn.shield(fn)`** — JS в прелюдии: `fn` вызывается с continuation data `-(id + 1) -
-  n·2³²`, своим `n` на каждый shield. Его не называет ни одна отмена задачи, поэтому её
-  ожидания (`CurrentTask` — не id задачи), `await` (хук, обход кучи) и дети (родитель — id
-  shield) отмену не видят; задачу по id shield восстанавливает
-  `RegionRegistry::ShieldedTask`. Обход кучи считает такие `await`, но не трогает, и `await`
-  на промис shield (async-обёртка `shielded`) пропускает, как `await` на функцию задачи.
-  Раннер ждёт открытые shield задачи (`spawn.__shielded(id)`) вместе со `spawn.idle()`;
-  guard'ы, взятые в shield, отпускает `__releaseTask` вместе с остальными. Ошибку отмены на
-  `await` получает только возобновление со значением: отказ промиса приходит как есть. `{
-  timeout }`: `port.deadline(id, name, message, ms)` ставит отложенную задачу на потоке
-  платформы, `port.ended(id)` из `close` её снимает (`PortServer::deadlines` под мьютексом
-  порта). Сработавший дедлайн отменяет id shield как задачу: `PortState::aborted`,
-  `Channels::AbortTask` и `AbortNoticeTask`, так что `onAbort` прерывает `await` shield и
-  отменяет его детей. Если прерывать всё же нечего, раннер закрывает учёт shield
-  (`spawn.__shieldGone`). Лок, который держит shield, отпускает `LockReleaseTask` по
+- **`spawn` pool:** one task port per pool, and all workers serve it
+  (`PortState::servers`); `send` wakes a worker that is not currently draining the queue, and
+  draining workers take tasks one at a time; the port remembers the task ids of each worker and, if the worker dies,
+  replies for them with an error; task code is in the port (`port.code`), and `port.expect()` is for workers not yet
+  started.
+- **`DataOf()`** in ports and channels caches the isolate's entry in
+  `thread_local`; `data_epoch` grows when an entry is deleted, so that a new isolate at the address of
+  an old one does not get someone else's entry.
+- **Channel queues:** receivers completed through another channel (`select`) or cancelled
+  stay in the queue with `done` and are skipped; `ChannelState::stale` counts them, and the queue
+  is cleaned when they make up half of it (amortized O(1) per delivery).
+- **Deadlock detection** (`Deadlocks` in `d8-channel.cc`): libplatform reports when an isolate's event
+  loop goes to sleep and wakes up (`DefaultForegroundTaskRunner::SleepObserver`);
+  blocking channel waits and `port.take()` mark themselves. A thread is woken by whoever posts
+  it a task or signals it, under their own mutex, so “everyone is asleep” is never falsely true even for an instant.
+  When all isolates are asleep and there are no `timeout()` timers, the check waits 50 ms on a
+  platform thread; if the epoch has not changed, channel and lock waits are cancelled with
+  `DeadlockError`. Waiting for a delayed V8 task (memory reducer) counts as sleep.
+  A wake-up of a loop caused only by its own tasks or by engine threads (garbage
+  collection posts its next step as a task) does not change the epoch: libplatform asks the observer
+  about every posted task (`PostedByOther`), and only tasks from other
+  isolates count. Such a loop can wake another thread only with a channel, lock or
+  task operation, or with a task posted to another loop, and those change the epoch themselves. Otherwise a GC that keeps
+  posting tasks would hide a deadlock forever.
+- **`RwLock`** (`d8-channel.cc`): a `ChannelState` with `LockData`, so that a lock travels like a channel.
+  The lock's region: `InTransit` while the lock is free; `Owned(writer)`; `Frozen(nobody, n)` for
+  readers (`FreezeInTransit`/`ThawToTransit`). The grant is made under the channels mutex, and
+  `Claim`/`Borrow` is done by the receiver's thread (`TakeGrant`); a grant that was not taken is returned
+  (`ReturnUndeliveredLocked`). `RegionRegistry::locked_` forbids `Free`, `Freeze`, transfer
+  and a `Borrow` by other threads; `OwnershipError` has separate texts for this.
+- **`RwLock` poisoning:** `LockData::poisoned` is set by `ReleaseHeld` when a write guard
+  is released by a cancelled task (`LockRelease`), when a task failed while leaving a guard held
+  (`RwLock.__releaseTask` from `__endTask`; guards remember the task that took them), or
+  when a thread goes away. `TakeGrant` refuses a poisoned lock with `PoisonError` and returns
+  the grant.
+- **Task cancellation:** the worker keeps the task id in continuation data (`Region.__task`), so
+  channel and lock waits know their task even after `await`. `port.abort(id, name,
+  message[, delay])`: a task from the inbox turns into a reply with its regions; for a running one,
+  `PortState::aborted` replaces the result, and `Channels::AbortTask` cancels blocking
+  waits right away and async ones with a task on the worker thread; new waits of a cancelled task
+  fail until `TaskEnded`. A timeout is a delayed task on a platform thread.
+- **Nested cancellation:** `spawn` on a pool worker remembers its children by the id of the current task
+  (`Region.__task()`). `port.serve(onTask, onAbort)`: cancelling a running task posts an
+  `AbortNoticeTask` to its worker, and `onAbort(id)` cancels the children with the same `port.abort`, and so on down the
+  chain.
+- **Cancellation at `await`:** while an isolate has a cancelled task
+  (`Isolate::region_task_aborted_`, set by `Channels::AbortTask` from any thread), the four
+  places where an `await` resumes (`PromiseReactionJob` with a generator instead of a handler,
+  the closures `AsyncFunctionAwaitResumeClosure` and `AsyncGeneratorAwaitResume`,
+  `AsyncResumeTask` in the microtask queue) ask `Runtime_RegionAwaitAbortError`. It
+  checks the task by continuation data through a d8 hook (`RegionRegistry::SetTaskAbortHook`) and
+  returns its error, and the generator resumes with a throw. Without cancellations this is one byte read per
+  `await`. A wait on a promise that is not yet settled is woken by
+  `RegionRegistry::InterruptTaskAwaits`: `onAbort` on the worker walks the heap, finds the `await` reactions of this task on
+  pending promises (by the reaction's continuation data) and rejects
+  each one separately (`JSPromise::TriggerPromiseReactions` for one reaction removed from the list).
+  An `await` on the promise of an async function of the same task that is also waiting is skipped: the error
+  will come from inside. An `await` chain is held only from the bottom: a promise holds reactions with
+  generators, a generator holds its promise, and the bottom promise is held only by whoever will settle it.
+  So `Await` (`builtins-async-gen.cc`), if the continuation data is a number (a task or a
+  shield), puts the promise into an isolate list (`Isolate::region_task_awaits_`, a global handle
+  to an `ArrayList`) directly in CSA while there is room below the threshold, and otherwise through
+  `Runtime_RegionHoldTaskAwait` (`RegionRegistry::HoldTaskAwait`), which drops
+  settled promises and doubles the threshold. About 5 ns per `await` on a pending promise. In
+  `__endTask` the runner calls `Region.__forgetAwaits(id)` (`ForgetTaskAwaits`): promises
+  that only this task and its shield are waiting for are released, and the functions it abandoned are
+  collected. If no `await` of the task was found after all (the code waits for nothing), the runner replies for
+  it itself (`__live`).
+- **`spawn.shield(fn)`**: JS in the prelude: `fn` is called with continuation data `-(id + 1) -
+  n·2³²`, with its own `n` for each shield. No task cancellation refers to it, so the task's
+  waits (`CurrentTask` is not the task id), `await`s (the hook, the heap walk) and children (the parent is the
+  shield id) do not see the cancellation; `RegionRegistry::ShieldedTask` recovers the task from the shield id.
+  The heap walk counts such `await`s but does not touch them, and it skips an `await`
+  on a shield's promise (the async wrapper `shielded`), like an `await` on a function of the task.
+  The runner waits for the task's open shields (`spawn.__shielded(id)`) together with `spawn.idle()`;
+  guards taken in a shield are released by `__releaseTask` together with the rest. Only a resumption with a value
+  gets the cancellation error at an `await`: a promise rejection arrives as is. `{
+  timeout }`: `port.deadline(id, name, message, ms)` posts a delayed task on a
+  platform thread, and `port.ended(id)` from `close` removes it (`PortServer::deadlines` under the port
+  mutex). A deadline that fires cancels the shield id as a task: `PortState::aborted`,
+  `Channels::AbortTask` and `AbortNoticeTask`, so `onAbort` interrupts the shield's `await` and
+  cancels its children. If there is nothing to interrupt after all, the runner closes the shield's accounting
+  (`spawn.__shieldGone`). A lock held by a shield is released by `LockReleaseTask` via
   `ShieldedTask`.
-- **`spawn.scope`** — JS в прелюдии d8 (`SpawnScope`): множество ручек блока, каналы
-  `s.channel()`, первая ошибка (`fail`) отменяет ручки через `pool.abort` с `AbortError` и
-  закрывает каналы; `AbortError` задач блок не считает отказом. Конец блока ждёт, пока
-  множество ручек опустеет, без `await`: в отменённой задаче он бы бросил.
-- **Билет задачи `spawn` на замороженный регион:** `RegionRegistry::Reserve` в вызывающем
-  потоке увеличивает `readers` без изолята и держит номер региона (`AddHandle`), прелюдия
-  хранит токен (`Region.__reserve`, `BorrowKind::kReservation`) в задаче и сдаёт его в
-  `settle`, на любом ответе, в том числе `#failAll`, или если `spawn()` бросил. Номера
-  регионов идут в слоте сообщения `reserved` строкой `,id,id,`; воркер берёт резерв себе
-  (`Region.__takeReserved`, `TakeReserved`/`DropReserved`: таблица чтения и учёт view, без
-  счётчика), поэтому задача — один читатель и в очереди, и в работе. Воркер сдаёт свою часть
-  в `__endTask` до ответа, вызывающий — счётчик после ответа.
-- **`region.thawWhenFree()`:** `Thaw`, а при `kBorrowed` — `ChannelWaiter::Kind::kThaw` в
-  `AsyncWaiters` (его видят детектор дедлоков и отмена задачи) и в `ThawWaiters()` по номеру
-  региона. `Unborrow`/`Unreserve`, опустившие `readers` до 0, вызывают хук d8 `ReadersFree`,
-  если есть ожидающие (`readers_waits_`, без мьютекса, иначе); он под `channels_mutex` будит
-  их `WakeTask`, который снова пробует `Thaw` на потоке ожидающего и при новом читателе
-  встаёт в очередь заново. Пробуждение не теряется: ожидающий увеличивает `readers_waits_`,
-  сдающий уменьшает `readers_`, оба ставят seq_cst-барьер и только потом читают чужой
-  счётчик; ожидающий перепроверяет `Readers` под мьютексом после постановки. `Unborrow` под
-  `channels_mutex` не вызывается.
-- **Ошибки:** `OwnershipError`, `AbortError`, `TimeoutError`, `DeadlockError`, `PoisonError`
-  ставит `Genesis::InitializeGlobal_regions` (слоты native context
-  `REGION_*_ERROR_FUNCTION_INDEX`), `RegionRegistry::NewOwnershipError` и `NewTaskError`
-  создают их из движка и d8. История региона — `RegionRegistry::Remember(region, Event,
-  text)`: последняя смена владельца (отправка или разморозка), заморозка, освобождение и
-  лок, по номеру региона под мьютексом, сбрасывается при повторном использовании номера;
-  текст дописывается к ошибке с подходящим `reason`. Место берёт d8 (`ScriptLocations`):
-  первый кадр с именем скрипта, без прелюдии и пула; ответ кадра кешируется по коду и
-  смещению до следующей сборки, `--no-region-history` выключает запись. Код задачи `spawn`
-  фабрика раскладывает по строкам и колонкам исходного файла (`Region.spawnCode().places`,
-  отступы перед каждой функцией, `//# sourceURL`), если весь он из одного скрипта и функции
-  не вложены друг в друга.
-- **Место запуска в стеке ошибки задачи:** `spawn()` зовёт `Region.__callerStack()`
-  (`CallerStacks` в `d8.cc`), который обходит кадры JS и по их коду и смещению (как
-  `ScriptLocations`, кеш до следующей сборки) находит номер текста; текст «`at spawn()` и
-  кадры с файлом скрипта, до 10» собирается при первой встрече набора кадров и хранится по
-  номеру, пока жив изолят. Номер лежит в задаче; на ответе с ошибкой прелюдия дописывает
-  `Region.__callerStackText(id)` к стеку воркера. Вложенные задачи складываются сами: стек
-  воркера уже содержит место запуска внутренней. С `--no-spawn-stack` d8 не ставит
-  `Region.__callerStack`, прелюдия видит `undefined` и пишет `-1`.
-- **Обязательный borrow.** Читать замороженный регион может только поток, который его
-  заморозил (или получил право разморозки), и те, кто держит borrow; задачи `spawn` берут
-  borrow на захваченное сами. У изолята таблица «могу читать замороженный регион N»
-  (`Isolate::region_read_table_`, ленивая, байт на регион), её видит IC через isolate-specific
-  external reference; ставится на freeze/borrow/ClaimFreeze, снимается на thaw/последний
-  release/ReleaseFreeze/free и во всех таблицах при освобождении номера региона.
-- **Доступ в Maglev и Turbofan.** JSNativeContextSpecialization превращает обращения к
-  объектам региона в операторы simplified-графа `LoadRegionField` / `StoreRegionField`
-  (позиция в `values()` — из хендлера IC `kRegionField`; Map региона — один набор ключей,
-  поэтому позиция одна для всех объектов с этой Map) и `LoadRegionElement` /
-  `StoreRegionElement` (включая дописывание при `index == length` в запас `values()`).
-  Понижаются они в turboshaft graph-builder: проверка владельца по таблице владельцев, для
-  чтения замороженного — по таблице чтения изолята, индекс против `array_length` и размера
-  `values()`, значение при записи (Smi, read-only, shared-примитив, объект того же региона).
-  Если быстрый путь не подходит, загрузка возвращает hole, запись — false, и управление идёт
-  в клон исходного JS-узла, который сохраняет feedback и больше не специализируется (обычный
-  вызов IC, без деоптимизации; исключения бросает он). Места, где есть и Map региона, и
-  обычные Map, делятся `CompareMaps`: обычные идут в клон под `CheckMaps`, специализированный
-  как обычно. В Maglev — узлы с теми же именами, кодогенерация только на arm64 (на других
-  целях остаётся вызов IC; Turbolev такие функции отдаёт Turbofan). Флаг
-  `--no-inline-region-access` выключает встраивание, `tests/jit.js` сверяет вывод с `--jitless`.
-- **Проверка владельца один раз на цикл.** Доступ изолята к региону меняет только сам
-  изолят и только вызовом рантайма (переезд, `freeze`, `thaw`, `free`, возврат билета),
-  поэтому проверка верна до первого узла, который может вызвать что-то. Внутри цикла
-  Turbofan (если у `JumpLoop` не запрещена спекуляция) ставит перед обращением
-  `CheckRegionAccess` (деоптимизация `kRegionAccess`), операторы доступа строит без своей
-  проверки владельца, а неудачу быстрого пути превращает в `CheckIf` вместо вызова IC.
-  `RedundancyElimination` убирает повторные `CheckRegionAccess` того же региона (объект,
-  загруженный из объекта региона, лежит в том же регионе; phi цикла вида `n = n.next` —
-  тоже), сбрасывает
-  их на узлах, которые могут вызвать что-то, и не протаскивает в цикл, если в его теле такой
-  узел есть. Деоптимизация несёт feedback `JumpLoop`, ставит ему запрет спекуляции, и
-  следующая компиляция цикла вызывает IC как раньше. Флаг `--no-region-loop-speculation`,
-  тест `tests/loop-access.js`.
-- **Методы массивов без рантайма на элемент.** Когда изолят может читать регион (владелец
-  или заёмщик замороженного), значения берутся прямо из `values()`: в общих билтинах
-  `GetProperty` / `HasProperty`, через которые `map`, `filter`, `forEach`, `reduce`, `some`,
-  `every`, `find`, `at`, `slice` и др. читают элементы (дыр в массиве региона нет, все индексы
-  ниже длины есть); в итераторе массива (`for...of`, `entries`/`keys`/`values`); в копии
-  `Array.from` и spread, пока цел протектор итератора массива (один цикл по `values()` в новый
-  JSArray); в `includes` / `indexOf` (цикл по `values()` в рантайме, отдельный для Smi).
-  Элемент-TypedArray по-прежнему идёт общим путём (новый локальный view); подменённый
-  `Array.prototype[Symbol.iterator]` соблюдается. На 100 000 чисел `map` 21,5 → 1,46 мс,
-  `for...of` 15,4 → 1,36, spread 17,0 → 0,28, `indexOf` 4,03 → 0,09. `tests/array-methods.js`
-  сверяет каждый метод с обычным массивом тех же значений.
-- **`Region.fn(f)`** вместо `Shared.fn`. d8 проверяет функцию разбором `spawn`: захватывать
-  можно только встроенные глобалы, своё имя и глобальный `this`; `eval`/`with`, классы и
-  методы — `TypeError`. Движок (`JSRegionObject::NewFunction`) собирает дескриптор
-  `[id, source, script name, line, column]` со строками, расшаренными вне регионов,
-  компилирует `"(" + source + ")"` со смещением строки и колонки и метит функцию приватным
-  символом своего isolate (не root: так не меняется read-only heap). Запись в регион создаёт
-  `JSRegionFunction` (`JS_REGION_FUNCTION_TYPE`, наследник `JSRegionObject`): копия
-  дескриптора в регионе, одна на функцию за один `run`, та же функция поверх той же записи
-  не перезаписывается. Чтение — `ToJSValue`: функция из кэша isolate (id → weak global
-  handle) или новая компиляция. Быстрые пути (IC, CSA, итератор, Maglev, Turboshaft) видят
-  диапазон `FIRST/LAST_JS_REGION_MATERIALIZED_TYPE` и уходят в рантайм, как с view
-  типизированного массива. Дедупликации между разными записями нет: около 48 байт на регион.
-- **`Region.localRef(obj)`** вместо `Shared.localRef`. Возвращает обёртку `LocalRef`
-  (обычный объект isolate с прототипом из d8 и дескриптором `[id, thread]` под приватным
-  символом). Цель лежит в isolate-создателе под сильным global handle. Запись обёртки в регион
-  создаёт `JSRegionLocalRef` (`JS_REGION_LOCAL_REF_TYPE`, в том же диапазоне
-  materialized-типов, что `JSRegionFunction`), чтение holder'а даёт обёртку этого isolate из
-  кэша (id → weak handle с колбэком). `deref()` в чужом isolate — `OwnershipError`
-  `other-thread`. Время жизни: глобальная таблица id → {создатель, цель, число живых обёрток во
-  всех isolate, нашла ли последняя общая сборка holder в неосвобождённом регионе, поколение
-  holder'ов}. `ReleaseUnusedRegions` собирает id живых holder'ов; создатель в GC epilogue
-  отпускает цель, если обёрток нет, holder'а не нашли и после той сборки новых holder'ов не
-  появлялось. Ошибка в учёте даёт `the object of this LocalRef was released`, а не висячий
-  указатель: всё идёт через таблицу.
-- **Не реализовано:** region-local Map с дескрипторами.
+- **`spawn.scope`**: JS in the d8 prelude (`SpawnScope`): a set of the block's handles, channels
+  `s.channel()`, and the first error (`fail`) cancels the handles through `pool.abort` with `AbortError` and
+  closes the channels; the block does not count the tasks' `AbortError` as a failure. The end of the block waits until
+  the set of handles is empty, without `await`: in a cancelled task it would throw.
+- **A `spawn` task's borrow of a frozen region:** `RegionRegistry::Reserve` in the calling
+  thread increments `readers` without an isolate and holds the region number (`AddHandle`); the prelude
+  keeps the token (`Region.__reserve`, `BorrowKind::kReservation`) in the task and returns it in
+  `settle`, on any reply, including `#failAll`, or if `spawn()` threw. Region numbers
+  travel in the message slot `reserved` as the string `,id,id,`; the worker takes the reservation for itself
+  (`Region.__takeReserved`, `TakeReserved`/`DropReserved`: the read table and view accounting, without the
+  counter), so the task is one reader both in the queue and while running. The worker returns its part
+  in `__endTask` before the reply, and the caller returns the counter after the reply.
+- **`region.thawWhenFree()`:** `Thaw`, and on `kBorrowed`, a `ChannelWaiter::Kind::kThaw` in
+  `AsyncWaiters` (the deadlock detector and task cancellation see it) and in `ThawWaiters()` by
+  region number. `Unborrow`/`Unreserve` that bring `readers` down to 0 call the d8 hook `ReadersFree`
+  if there are waiters (`readers_waits_`, read without a mutex; otherwise they do not); under `channels_mutex` the hook wakes
+  them with `WakeTask`, which tries `Thaw` again on the waiter's thread and, if there is a new reader,
+  queues up again. The wake-up is not lost: the waiter increments `readers_waits_`,
+  the returning side decrements `readers_`, both issue a seq_cst fence and only then read the other
+  counter; the waiter rechecks `Readers` under the mutex after queuing. `Unborrow` is not called under
+  `channels_mutex`.
+- **Errors:** `OwnershipError`, `AbortError`, `TimeoutError`, `DeadlockError` and `PoisonError`
+  are set up by `Genesis::InitializeGlobal_regions` (native context slots
+  `REGION_*_ERROR_FUNCTION_INDEX`); `RegionRegistry::NewOwnershipError` and `NewTaskError`
+  create them from the engine and from d8. A region's history is `RegionRegistry::Remember(region, Event,
+  text)`: the last change of owner (a send or a thaw), the freeze, the free and the
+  lock, by region number under a mutex, reset when the number is reused;
+  the text is appended to an error with a matching `reason`. The location is taken by d8 (`ScriptLocations`):
+  the first frame with a script name, excluding the prelude and the pool; the answer for a frame is cached by code and
+  offset until the next collection, and `--no-region-history` turns recording off. The code of a `spawn` task
+  is mapped by the factory to lines and columns of the source file (`Region.spawnCode().places`,
+  indentation before each function, `//# sourceURL`), if all of it comes from one script and the functions
+  are not nested in each other.
+- **Launch site in a task's error stack:** `spawn()` calls `Region.__callerStack()`
+  (`CallerStacks` in `d8.cc`), which walks the JS frames and finds a text number by their code and offset (like
+  `ScriptLocations`, cached until the next collection); the text “`at spawn()` and
+  frames with a script file, up to 10” is built the first time a set of frames is seen and is kept by
+  number while the isolate is alive. The number is stored in the task; on an error reply the prelude appends
+  `Region.__callerStackText(id)` to the worker's stack. Nested tasks compose by themselves: the
+  worker's stack already contains the launch site of the inner task. With `--no-spawn-stack`, d8 does not install
+  `Region.__callerStack`, and the prelude sees `undefined` and writes `-1`.
+- **Mandatory borrow.** A frozen region can be read only by the thread that
+  froze it (or received the right to thaw it) and by those holding a borrow; `spawn` tasks take
+  a borrow on what they capture by themselves. An isolate has a table “I can read frozen region N”
+  (`Isolate::region_read_table_`, lazy, one byte per region), which the IC sees through an isolate-specific
+  external reference; an entry is set on freeze/borrow/ClaimFreeze and cleared on thaw/last
+  release/ReleaseFreeze/free, and in all tables when the region number is released.
+- **Access in Maglev and Turbofan.** JSNativeContextSpecialization turns accesses to
+  region objects into simplified-graph operators `LoadRegionField` / `StoreRegionField`
+  (the position in `values()` comes from the IC handler `kRegionField`; a region Map is one set of keys,
+  so the position is the same for all objects with that Map) and `LoadRegionElement` /
+  `StoreRegionElement` (including appending at `index == length` into the spare capacity of `values()`).
+  They are lowered in the turboshaft graph builder: the owner is checked against the owner table, and for
+  reads of a frozen region against the isolate's read table; the index against `array_length` and the size of
+  `values()`; the value on write (Smi, read-only, shared primitive, object of the same region).
+  If the fast path does not apply, a load returns hole and a store returns false, and control goes
+  to a clone of the original JS node, which keeps its feedback and is not specialized again (an ordinary
+  IC call, without deoptimization; it throws the exceptions). Sites that see both region Maps and
+  ordinary Maps are split by `CompareMaps`: ordinary ones go to the clone under `CheckMaps`, which is specialized
+  as usual. In Maglev these are nodes with the same names, with code generation only on arm64 (on other
+  targets the IC call remains; Turbolev hands such functions to Turbofan). The
+  `--no-inline-region-access` flag turns inlining off, and `tests/jit.js` compares the output with `--jitless`.
+- **Owner check once per loop.** An isolate's access to a region is changed only by the
+  isolate itself and only with a runtime call (a move, `freeze`, `thaw`, `free`, returning a borrow),
+  so the check holds until the first node that can call something. Inside a loop,
+  Turbofan (unless speculation is forbidden for the `JumpLoop`) places a
+  `CheckRegionAccess` (deoptimization `kRegionAccess`) before the access, builds the access operators without their own
+  owner check, and turns a fast-path failure into `CheckIf` instead of an IC call.
+  `RedundancyElimination` removes repeated `CheckRegionAccess` of the same region (an object
+  loaded from a region object lives in the same region; so does a loop phi of the form `n = n.next`),
+  resets
+  them at nodes that can call something, and does not carry them into a loop if its body contains such a
+  node. The deoptimization carries the `JumpLoop` feedback and forbids speculation for it, and
+  the next compilation of the loop calls the IC as before. Flag `--no-region-loop-speculation`,
+  test `tests/loop-access.js`.
+- **Array methods without a runtime call per element.** When an isolate can read a region (the owner,
+  or a borrower of a frozen one), values are taken straight from `values()`: in the generic builtins
+  `GetProperty` / `HasProperty`, through which `map`, `filter`, `forEach`, `reduce`, `some`,
+  `every`, `find`, `at`, `slice` and others read elements (a region array has no holes, and every index
+  below the length is present); in the array iterator (`for...of`, `entries`/`keys`/`values`); in the copy in
+  `Array.from` and spread, while the array iterator protector is intact (one loop over `values()` into a new
+  JSArray); in `includes` / `indexOf` (a loop over `values()` in the runtime, a separate one for Smi).
+  A TypedArray element still takes the generic path (a new local view); an overridden
+  `Array.prototype[Symbol.iterator]` is respected. On 100,000 numbers: `map` 21.5 → 1.46 ms,
+  `for...of` 15.4 → 1.36, spread 17.0 → 0.28, `indexOf` 4.03 → 0.09. `tests/array-methods.js`
+  compares each method with an ordinary array of the same values.
+- **`Region.fn(f)`** instead of `Shared.fn`. d8 checks the function with the `spawn` analysis: it may capture
+  only builtin globals, its own name and the global `this`; `eval`/`with`, classes and
+  methods give `TypeError`. The engine (`JSRegionObject::NewFunction`) builds a descriptor
+  `[id, source, script name, line, column]` with strings shared outside regions,
+  compiles `"(" + source + ")"` with a line and column offset and tags the function with a private
+  symbol of its isolate (not a root: this way the read-only heap does not change). A write to a region creates
+  a `JSRegionFunction` (`JS_REGION_FUNCTION_TYPE`, a subclass of `JSRegionObject`): a copy of the
+  descriptor in the region, one per function per `run`; the same function written over the same entry
+  is not rewritten. A read is `ToJSValue`: a function from the isolate's cache (id → weak global
+  handle) or a new compilation. Fast paths (IC, CSA, iterator, Maglev, Turboshaft) see the
+  range `FIRST/LAST_JS_REGION_MATERIALIZED_TYPE` and go to the runtime, as with a typed array
+  view. There is no deduplication between different writes: about 48 bytes per region.
+- **`Region.localRef(obj)`** instead of `Shared.localRef`. Returns a `LocalRef` wrapper
+  (an ordinary isolate object with a prototype from d8 and a descriptor `[id, thread]` under a private
+  symbol). The target lives in the creator isolate under a strong global handle. Writing the wrapper into a region
+  creates a `JSRegionLocalRef` (`JS_REGION_LOCAL_REF_TYPE`, in the same range of
+  materialized types as `JSRegionFunction`), and reading the holder gives this isolate's wrapper from
+  a cache (id → weak handle with a callback). `deref()` in another isolate is `OwnershipError`
+  `other-thread`. Lifetime: a global table id → {creator, target, number of live wrappers in
+  all isolates, whether the last shared collection found a holder in an unfreed region, holder
+  generation}. `ReleaseUnusedRegions` collects the ids of live holders; the creator, in the GC epilogue,
+  releases the target if there are no wrappers, no holder was found, and no new holders have
+  appeared since that collection. An accounting error gives `the object of this LocalRef was released` rather than a dangling
+  pointer: everything goes through the table.
+- **Not implemented:** region-local Maps with descriptors.
 
-## Принятые решения
+## Decisions made
 
-| Вопрос | Решение |
+| Question | Decision |
 |---|---|
-| Движок и хост | V8, `d8` и его `Worker` |
-| Потоки | Isolate на поток; регионы — отдельная общая часть кучи по образцу shared space |
-| Что хранится | Объекты и массивы без прототипов, числа, строки, типизированные массивы, функции `Region.fn`, ручки `Region.localRef` |
-| Прототипы | Своего прототипа нет; отсутствующие свойства читаются из `Array.prototype` / `Object.prototype` того isolate, который читает |
-| Функции | `Region.fn`: без замыканий, из глобалов только встроенные; каждый isolate компилирует исходник сам |
-| Попадание в регион | Литералы `#{}` / `#[]` и `'use region'` выделяют прямо в регионе; `region.run(fn)` копирует готовый граф |
-| Форма объектов | Одна общая Map на набор ключей в shared space, а не своя у региона; форма фиксирована, переходов нет |
-| Доступ | Один владелец или много читателей (shared borrow) |
-| Проверка владения | Номер региона в самом объекте, таблица владельцев по номеру, одно сравнение с адресом isolate |
-| Запись при активных читателях | Исключение, без ожидания |
-| Ссылка на локальный объект | Только через ручку `Region.localRef`; `deref()` — только в потоке-создателе |
-| Строки | Строки и числа, которые хранит регион, копируются в его память и умирают с ним; ключи форм — общие копии |
-| GC | Владелец сам собирает брошенный регион и мусор живого, если другие потоки на него не смотрят; иначе — сборка общей кучи; `free()` — сразу |
-| Синтаксис | Литералы `#{}` / `#[]` и директива `'use region'`, остальное отложено |
+| Engine and host | V8, `d8` and its `Worker` |
+| Threads | An isolate per thread; regions are a separate shared part of the heap, modeled on shared space |
+| What is stored | Objects and arrays without prototypes, numbers, strings, typed arrays, `Region.fn` functions, `Region.localRef` handles |
+| Prototypes | No own prototype; missing properties are read from the `Array.prototype` / `Object.prototype` of the isolate that reads |
+| Functions | `Region.fn`: no closures, only builtin globals; each isolate compiles the source itself |
+| Getting into a region | `#{}` / `#[]` literals and `'use region'` allocate directly in the region; `region.run(fn)` copies a ready graph |
+| Object shape | One shared Map per set of keys in shared space, not a per-region one; the shape is fixed, there are no transitions |
+| Access | One owner or many readers (shared borrow) |
+| Ownership check | The region number in the object itself, an owner table by number, one comparison with the isolate address |
+| Write with active readers | An exception, without waiting |
+| Reference to a local object | Only through a `Region.localRef` handle; `deref()` only on the creator thread |
+| Strings | Strings and numbers that a region stores are copied into its memory and die with it; shape keys are shared copies |
+| GC | The owner itself collects an abandoned region and the garbage of a live one if other threads are not looking at it; otherwise, the shared heap collection; `free()` is immediate |
+| Syntax | `#{}` / `#[]` literals and the `'use region'` directive; the rest is deferred |
 
 ## API
 
 ```js
 const region = new Region();
 
-const tree = region.run(() => build(20));     // всё, что создано внутри, лежит в регионе
-tree.left.value = 5;                          // владелец читает и пишет
+const tree = region.run(() => build(20));     // everything created inside lives in the region
+tree.left.value = 5;                          // the owner reads and writes
 
-worker.postMessage({ tree }, [region]);       // регион в transfer list = move
-tree.value;                                   // OwnershipError: регион принадлежит другому потоку
+worker.postMessage({ tree }, [region]);       // region in the transfer list = move
+tree.value;                                   // OwnershipError: the region belongs to another thread
 
-// в воркере
+// in the worker
 onmessage = ({ data: { tree } }) => sum(tree);
 
 // shared borrow
-region.freeze();                              // запись запрещена всем, включая владельца
+region.freeze();                              // writes are forbidden for everyone, including the owner
 worker.postMessage({ tree, region });
-using borrow = region.borrow();               // в любом потоке; release() при выходе из скоупа
-region.thaw();                                // только заморозивший; если есть читатели — исключение
-await region.thawWhenFree();                  // или дождаться, пока читатели сдадут билеты
+using borrow = region.borrow();               // on any thread; release() on scope exit
+region.thaw();                                // only the thread that froze it; if there are readers, an exception
+await region.thawWhenFree();                  // or wait until the readers return their borrows
 
-// функции без замыкания
+// functions without a closure
 const sum = Region.fn(function sum(node) {
     return node.value + (node.left ? sum(node.left) : 0) + (node.right ? sum(node.right) : 0);
 });
-region.run(() => ({ reducer: sum }));         // хранится в регионе, каждый isolate компилирует сам
+region.run(() => ({ reducer: sum }));         // stored in the region, each isolate compiles it itself
 
-// ручка на объект своего потока
+// a handle to an object of your own thread
 const ref = region.run(() => ({ ui: Region.localRef(domLikeObject) }));
-ref.ui.deref();                               // в потоке-создателе вернёт объект, в чужом — исключение
+ref.ui.deref();                               // returns the object on the creator thread, throws on another
 ```
 
-В дизайне это были `Shared.fn` и `Shared.localRef`. `Region.fn` отклоняет функцию, если у неё
-есть захваченные переменные или глобалы, кроме встроенных; разбор тот же, что у `spawn`.
-`Region.localRef` — аналог `SendWrapper` из Rust: держит глобальный хендл в isolate-создателе,
-а в регионе хранит только номер ручки и потока, поэтому GC не трассирует ссылки из региона
-наружу.
+In the design these were `Shared.fn` and `Shared.localRef`. `Region.fn` rejects a function if it
+has captured variables, or globals other than builtins; the analysis is the same as for `spawn`.
+`Region.localRef` is an analog of `SendWrapper` from Rust: it holds a global handle in the creator isolate,
+and the region stores only the handle number and the thread number, so GC does not trace references from the region
+to the outside.
 
-## Устройство
+## Internals
 
-Исходный план. Сделано иначе: объекты лежат в `SHARED_SPACE`, большие регионы — на своих
-его страницах, номер региона — в объекте, Map общие для формы, битсета заимствований нет
-(см. «Что реализовано»).
+The original plan. It was done differently: objects live in `SHARED_SPACE`, large regions on their own
+pages of it, the region number is in the object, Maps are shared per shape, and there is no borrow bitset
+(see “What is implemented”).
 
-**Регион** — набор страниц в отдельном пространстве кучи, рядом с `SHARED_SPACE`
-(`--shared-heap`). Указатель на дескриптор региона хранится в `BasePage`, а не в
-`MemoryChunk`: флаги `MemoryChunk` в sandbox-сборках считаются недоверенными.
-В дескрипторе есть атомарное слово состояния:
+**A region** is a set of pages in a separate heap space, next to `SHARED_SPACE`
+(`--shared-heap`). The pointer to the region descriptor is stored in `BasePage`, not in
+`MemoryChunk`: `MemoryChunk` flags are considered untrusted in sandbox builds.
+The descriptor has an atomic state word:
 
 ```
 state: Owned(isolate_id) | Frozen(owner_id, readers) | Sealed
 ```
 
-- `move` — `compareExchange(Owned(me), Owned(target))`.
-- `freeze` — `Owned(me) → Frozen(me, 0)`; `borrow` — `readers + 1`; `thaw` — только при `readers == 0`.
-- `seal` — `Owned(me) | Frozen(me, n) → Sealed`, как `Arc<T>`. В прототипе это `Frozen` с `frozen_by_ == kSealedBy`: разморозить, освободить и передать право нельзя. Бит в таблице чтения ставится в медленном пути при первом чтении и не снимается до освобождения номера сборщиком (`ReleaseUnusedRegions` чистит все таблицы), поэтому быстрый путь в IC, Maglev и Turbofan не изменился. View типизированных массивов не отслеживаются и не отсоединяются.
-- У каждого isolate есть битсет регионов, которые он сейчас заимствует.
+- `move` is `compareExchange(Owned(me), Owned(target))`.
+- `freeze` is `Owned(me) → Frozen(me, 0)`; `borrow` is `readers + 1`; `thaw` only when `readers == 0`.
+- `seal` is `Owned(me) | Frozen(me, n) → Sealed`, like `Arc<T>`. In the prototype this is `Frozen` with `frozen_by_ == kSealedBy`: it cannot be thawed or freed, and the right cannot be handed over. The bit in the read table is set on the slow path at the first read and is not cleared until the collector releases the number (`ReleaseUnusedRegions` clears all tables), so the fast path in IC, Maglev and Turbofan did not change. Typed array views are not tracked and are not detached.
+- Each isolate has a bitset of the regions it currently borrows.
 
-**Проверка доступа**: `page(obj) → region → state`. Разрешено, если `Owned(me)` или
-`Frozen` и регион есть в битсете текущего isolate. Запись разрешена только при `Owned(me)`.
+**Access check**: `page(obj) → region → state`. Allowed if `Owned(me)`, or
+`Frozen` and the region is in the current isolate's bitset. Writing is allowed only with `Owned(me)`.
 
-**Hidden classes** аллоцируются в регионе. Переходы делает только владелец, читатели
-видят замороженное дерево, поэтому локи не нужны.
+**Hidden classes** are allocated in the region. Only the owner makes transitions, and readers
+see a frozen tree, so no locks are needed.
 
-**Обход fast paths.** Сотни встроенных функций читают объекты напрямую, минуя inline
-caches. Объекты региона получают свой instance type `JS_REGION_OBJECT_TYPE` в диапазоне
-special receivers: тогда inline caches и generic-builtins уходят в рантайм сами. Бит
-`is_access_check_needed` не подходит: он допустим только у special receiver и ведёт в
-проверки доступа embedder'а. В `LookupIterator` появляется своё состояние `REGION_OBJECT`,
-по образцу `WASM_OBJECT` у объектов Wasm GC (они тоже special receivers, тоже живут в shared
-space и тоже передаются по ссылке — это главный прецедент). Отдельно проверить builtins,
-которые обходят `LookupIterator`: перечисление ключей, `ElementsAccessor`, `CloneObject`.
-В v2 inline caches получают инлайн-проверку владения, и горячий путь не уходит в рантайм.
+**Bypassing fast paths.** Hundreds of builtins read objects directly, bypassing inline
+caches. Region objects get their own instance type `JS_REGION_OBJECT_TYPE` in the
+special receivers range: then inline caches and generic builtins go to the runtime by themselves. The
+`is_access_check_needed` bit does not fit: it is allowed only on a special receiver and leads into
+the embedder's access checks. `LookupIterator` gets its own state `REGION_OBJECT`,
+modeled on `WASM_OBJECT` for Wasm GC objects (they are also special receivers, also live in shared
+space and are also passed by reference; this is the main precedent). Separately check the builtins
+that bypass `LookupIterator`: key enumeration, `ElementsAccessor`, `CloneObject`.
+In v2 inline caches get an inline ownership check, and the hot path does not go to the runtime.
 
-**Ссылки наружу.** Write barrier ничего не записывает для хоста в shared space, поэтому
-ссылка из региона на локальный объект сломает GC. Каждая запись в объект региона проходит
-барьер в духе `SharedValueBarrier` у shared structs: значение из региона или примитив —
-пишем, локальный объект — исключение (вне `run`) или эвакуация (внутри `run`).
+**References to the outside.** The write barrier records nothing for a host in shared space, so
+a reference from a region to a local object would break GC. Every write to a region object goes through
+a barrier in the spirit of `SharedValueBarrier` for shared structs: a value from the region or a primitive
+is written; a local object is an exception (outside `run`) or an evacuation (inside `run`).
 
-**Аллокация в `region.run`.** JIT аллоцирует литералы инлайн в young generation и убирает
-write barrier у свежих объектов, считая их молодыми. Перенаправить эту аллокацию в регион
-без переписывания Turboshaft и Maglev не получится, `--no-inline-new` это допущение не
-отменяет. Поэтому в v1 `fn` выполняется как обычно, а граф, достижимый из результата,
-эвакуируется в регион на выходе из `run` — один раз, O(n) при создании. `move` при этом
-остаётся O(1). Цена: объекты, на которые остались локальные ссылки внутри `fn`, — это
-другие объекты, не те, что лежат в регионе. Настоящий скоуп аллокации — этап 6.
+**Allocation in `region.run`.** The JIT allocates literals inline in the young generation and removes the
+write barrier for fresh objects, assuming they are young. Redirecting this allocation into a region
+is not possible without rewriting Turboshaft and Maglev, and `--no-inline-new` does not cancel this
+assumption. So in v1 `fn` runs as usual, and the graph reachable from the result
+is evacuated into the region on exit from `run`: once, O(n) at creation. `move` still
+stays O(1). The cost: objects that local references inside `fn` still point to are
+different objects, not the ones that live in the region. A real allocation scope is stage 6.
 
-**Передача через `postMessage`.** Объекты региона сериализуются по ссылке тем же путём,
-что shared structs и shared-объекты Wasm: `ValueSerializer::WriteSharedObject` и
-`SharedValueConveyor`, получатель видит тот же указатель. Регион в transfer list d8
-означает `move`.
+**Passing through `postMessage`.** Region objects are serialized by reference along the same path
+as shared structs and shared Wasm objects: `ValueSerializer::WriteSharedObject` and
+`SharedValueConveyor`, and the receiver sees the same pointer. A region in the d8 transfer list
+means `move`.
 
-## Этапы
+## Stages
 
-0. Собрать `d8`, погонять `--shared-heap` и `--experimental-wasm-shared`. Shared structs
-   в текущем V8 мёртвые: `--harmony-struct` и `--shared-string-table` зафиксированы в `false`,
-   `SharedStructType` не устанавливается. Живой прецедент — shared-объекты Wasm GC.
-1. Пространство регионов, `new Region()`, `region.run(fn)` с эвакуацией результата:
-   объекты и массивы без прототипов.
-2. Проверки владения: `JS_REGION_OBJECT_TYPE`, состояние `REGION_OBJECT` в `LookupIterator`,
-   `OwnershipError`; барьер записи для ссылок наружу.
-3. `postMessage(msg, [region])`. Бенчмарк против structured clone и MVP на SAB.
-4. `freeze` / `borrow` / `thaw`, битсет заимствований.
-5. Строки через `Object::Share` в shared space, `Shared.fn`, `Shared.localRef`.
-6. Производительность: инлайн-проверка в inline caches, аллокация без рантайма, встраивание
-   доступа в Maglev и Turbofan, проверка владельца один раз на цикл в Turbofan.
-7. Освобождение регионов и GC внутри региона.
+0. Build `d8`, try out `--shared-heap` and `--experimental-wasm-shared`. Shared structs
+   are dead in current V8: `--harmony-struct` and `--shared-string-table` are fixed to `false`,
+   and `SharedStructType` is not installed. The live precedent is shared Wasm GC objects.
+1. The region space, `new Region()`, `region.run(fn)` with evacuation of the result:
+   objects and arrays without prototypes.
+2. Ownership checks: `JS_REGION_OBJECT_TYPE`, the `REGION_OBJECT` state in `LookupIterator`,
+   `OwnershipError`; a write barrier for references to the outside.
+3. `postMessage(msg, [region])`. A benchmark against structured clone and the SAB MVP.
+4. `freeze` / `borrow` / `thaw`, the borrow bitset.
+5. Strings through `Object::Share` into shared space, `Shared.fn`, `Shared.localRef`.
+6. Performance: an inline check in inline caches, allocation without the runtime, inlining
+   access in Maglev and Turbofan, an owner check once per loop in Turbofan.
+7. Freeing regions and GC inside a region.
 
-Все этапы пройдены; что вошло в каждый релиз — в `CHANGELOG.md`.
+All stages are done; what went into each release is in `CHANGELOG.md`.
 
-## Отложено
+## Deferred
 
-- **`region.alloc(type, ...values)`.** Мутная идея: одна функция, которая выделяет в регионе
-  объект любого встроенного типа (`Map`, `Set`, `Date`, ...). Для каждого типа пришлось бы
-  отдельно решать, где лежит его внутреннее состояние, как его читают другие isolate и что
-  делать с методами прототипа. Схемы пока нет.
-- **Проверка владельца один раз на цикл в Maglev.** В Turbofan сделано: в цикле обращение
-  к региону деоптимизируется вместо запасного вызова IC, отдельная проверка
-  `CheckRegionAccess` остаётся верной до первого вызова, и `RedundancyElimination` убирает
-  повторные. Деоптимизация помечает подсказки `JumpLoop`, чтобы не зацикливаться.
-- **Быстрый путь Maglev не на arm64.**
+- **`region.alloc(type, ...values)`.** A vague idea: one function that allocates in a region
+  an object of any builtin type (`Map`, `Set`, `Date`, ...). For each type one would have to
+  decide separately where its internal state lives, how other isolates read it and what
+  to do with prototype methods. There is no scheme yet.
+- **Owner check once per loop in Maglev.** Done in Turbofan: in a loop, a region access
+  deoptimizes instead of making the fallback IC call, a separate
+  `CheckRegionAccess` check stays valid until the first call, and `RedundancyElimination` removes
+  repeated ones. The deoptimization marks the `JumpLoop` hints so as not to loop.
+- **Maglev fast path on targets other than arm64.**
 
-## Критерии
+## Criteria
 
-Успех — если выполняется хотя бы половина:
+Success if at least half of these hold:
 
-- `move` за O(1): время не зависит от размера графа;
-- доступ к полю в оптимизированном коде не более чем в 1.5 раза медленнее обычного объекта
-  (в MVP на SAB — в 6.4 раза);
-- почти линейное масштабирование параллельного чтения;
-- обычный JS не замедляется, гонки в фаззинге дают исключения, а не падение процесса.
+- `move` in O(1): the time does not depend on the graph size;
+- field access in optimized code at most 1.5 times slower than with an ordinary object
+  (6.4 times in the SAB MVP);
+- near-linear scaling of parallel reads;
+- ordinary JS does not slow down, and races in fuzzing give exceptions, not a process crash.
 
-Итог: `move` за O(1) — да; чтение поля ×1,2 от обычного объекта — да, но запись ×1,7 и
-доступ по индексу ×2,3; чтение в 8 потоках быстрее одного в 5,9 раза. Гонки за владение
-гоняет `tests/fuzz.js`, значения, которые движок материализует при чтении, —
-`tests/fuzz-holders.js`. Цифры — на странице «Цифры» сайта (`site/src/content/docs/ru/numbers.mdx`).
+Result: `move` in O(1): yes; a field read at ×1.2 of an ordinary object: yes, but writes at ×1.7 and
+indexed access at ×2.3; reading on 8 threads is 5.9 times faster than on one. Ownership races
+are exercised by `tests/fuzz.js`, and the values the engine materializes on read by
+`tests/fuzz-holders.js`. The numbers are on the site's “Numbers” page (`site/src/content/docs/numbers.mdx`).
 
-## Риски и открытые вопросы
+## Risks and open questions
 
-- **Пропущенный fast path = дыра в безопасности.** Любая встроенная функция, которая
-  прочитает объект региона мимо проверки, даст гонку данных на куче. Нужен фаззинг.
-- **Устаревшие указатели и освобождение.** После `move` у отправителя остаются сырые
-  указатели на объекты региона. Пока они существуют, страницы нельзя переиспользовать:
-  иначе проверка владения прочитает чужой дескриптор. Освобождать регион можно только
-  когда ни один isolate на него не ссылается, а это требует согласования между isolate
-  (эпохи или отчёт каждого GC о том, на какие регионы он ссылается). Сделано так: номер
-  переиспользуется, только когда общая сборка не нашла в куче его объектов, поколение номера
-  отсекает устаревшие сообщения, а маска держателей и отчёты изолятов («Кто держит регион»)
-  дают владельцу собрать регион без общей сборки.
-- **GC внутри региона.** Компакция или sweep требует знать все входящие ссылки из всех
-  isolate, включая их стеки. Это сводится к global safepoint — тот же stop-the-world,
-  от которого хотели уйти. Так и сделано: объекты регионов собирает сборка общей кучи на
-  global safepoint. Сборка одного региона без остановки остальных потоков — открытый вопрос;
-  разбор, литература и план — в `research/region-gc.md`.
-- **Feedback vectors.** Inline caches других isolate держат слабые ссылки на Map региона.
-  При смерти региона их нужно очистить во всех isolate. Не понадобилось: Map общие для
-  формы, а не для региона, и вместе с регионом не умирают.
+- **A missed fast path = a security hole.** Any builtin that
+  reads a region object bypassing the check gives a data race on the heap. Fuzzing is needed.
+- **Stale pointers and freeing.** After a `move`, the sender keeps raw
+  pointers to region objects. While they exist, the pages cannot be reused:
+  otherwise the ownership check would read someone else's descriptor. A region can be freed only
+  when no isolate references it, and this requires coordination between isolates
+  (epochs, or each GC reporting which regions it references). What was done: a number
+  is reused only when the shared collection found none of its objects in the heap, the number's generation
+  cuts off stale messages, and the holder mask and isolate reports (“Who holds a region”)
+  let the owner collect a region without a shared collection.
+- **GC inside a region.** Compaction or sweep requires knowing all incoming references from all
+  isolates, including their stacks. This comes down to a global safepoint: the same stop-the-world
+  that was meant to be avoided. That is how it was done: region objects are collected by the shared heap collection at a
+  global safepoint. Collecting one region without stopping the other threads is an open question;
+  the analysis, the literature and the plan are in `research/region-gc.md`.
+- **Feedback vectors.** Inline caches of other isolates hold weak references to region Maps.
+  When a region dies, they have to be cleared in all isolates. Not needed: Maps are shared per
+  shape, not per region, and do not die with the region.

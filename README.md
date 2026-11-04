@@ -33,7 +33,7 @@ print('payload items:', await worker); // 3
 
 It runs only in `d8`, the engine's test shell; none of this reaches browsers or Node.
 
-**Documentation:** https://tom4ikss.github.io/region-js/ (in Russian: https://tom4ikss.github.io/region-js/ru/) · **Release:** [v0.5.0-alpha](https://github.com/Tom4ikss/region-js/releases/tag/v0.5.0-alpha)
+**Documentation:** https://tom4ikss.github.io/region-js/ (in Russian: https://tom4ikss.github.io/region-js/ru/) · **Release:** [v0.5.1-alpha](https://github.com/Tom4ikss/region-js/releases/tag/v0.5.1-alpha)
 
 ## Against workers and tokio
 
@@ -61,6 +61,10 @@ That is 3–27 times faster than today's workers, because nothing is copied. Sti
 - **Documentation in English and Russian** with examples, each with the real d8 output, and "bad / good" microbenchmarks.
 
 ## How to run it
+
+[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/Tom4ikss/region-js?quickstart=1)
+
+In the browser, with nothing to install: the codespace gets the prebuilt d8 and opens the playground; Ctrl+Shift+B (Cmd+Shift+B on a Mac) runs the open file.
 
 On Linux x64 (and in WSL2) there is no need to build: `scripts/get-d8.sh` downloads the prebuilt d8 from the latest release and installs it as `~/.local/bin/d8` and `v8-src/v8/out/release/d8`. The same d8 is in the image `docker run --rm -it ghcr.io/tom4ikss/region-js`.
 
@@ -96,7 +100,7 @@ The playground: open the `playground/` folder in VSCode and run `npm install`; C
 | `tests/` | Tests and benchmarks for regions, `spawn`, channels and `free()`, a fuzzer |
 | `playground/` | Types, Biome, the ESLint plugin and examples for VSCode |
 | `prototype/js-ownership/` | The first version of the idea in plain JS on top of `SharedArrayBuffer` |
-| `DESIGN.md` | The design and how much of it is implemented (in Russian) |
+| `DESIGN.md` | The design and how much of it is implemented |
 
 ## Status
 

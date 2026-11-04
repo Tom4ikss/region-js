@@ -13,7 +13,7 @@ This is an experiment, and it has many limits. Some simplify the first version; 
 
 ## How to run it {/* #run */}
 
-You need a d8 built from the fork. The `scripts/setup.sh` script downloads V8 at the right commit, applies the `v8/regions.patch` patch, and builds d8. The examples from this site are in `site/examples/en/`, and each one runs with a single command:
+The quickest way needs nothing installed: [open the repository in GitHub Codespaces](https://codespaces.new/Tom4ikss/region-js?quickstart=1). It gets the prebuilt d8 and opens the playground, where Ctrl+Shift+B (Cmd+Shift+B on a Mac) runs the open file. On Linux x64 and in WSL2, `scripts/get-d8.sh` downloads the same prebuilt d8 from the latest release, and `docker run --rm -it ghcr.io/tom4ikss/region-js` starts it in a container. On macOS, or to change the engine, build d8 from the fork: the `scripts/setup.sh` script downloads V8 at the right commit, applies the `v8/regions.patch` patch, and builds d8. The examples from this site are in `site/examples/en/`, and each one runs with a single command:
 
 ```sh
 $ v8-src/v8/out/release/d8 --harmony-regions site/examples/en/01-first-region.js

@@ -192,10 +192,12 @@ gc();
 ask(owner, { op: 'thaw' });
 ask(owner, { op: 'drop' });
 sleep(300);
-// Under heavy GC (--stress-concurrent-allocation) the string can become
-// common memory meanwhile; then the reader holds nothing of the region, and
-// the owner collects it at once. The state is read first, so a string that
-// moves later still counts as held.
+// The string is the last thing alive in the region now. If a shared GC comes
+// meanwhile, as it does under --stress-concurrent-allocation, it releases the
+// id of the region and the string becomes common, as after 'detach' above;
+// then the reader holds nothing of the region, and the owner collects it at
+// once. The state is read first, so a string that moves later still counts
+// as held.
 const pages = ask(owner, { op: 'state' })[0];
 check('not collected while the reader holds the string',
       pages > 0 || ask(reader, { op: 'moved', id }));

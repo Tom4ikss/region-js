@@ -33,7 +33,7 @@ print('payload items:', await worker); // 3
 
 Работает только в тестовой оболочке движка `d8`, в браузер и Node это не попадает.
 
-**Документация:** https://tom4ikss.github.io/region-js/ru/ (английская версия: https://tom4ikss.github.io/region-js/) · **Релиз:** [v0.5.0-alpha](https://github.com/Tom4ikss/region-js/releases/tag/v0.5.0-alpha)
+**Документация:** https://tom4ikss.github.io/region-js/ru/ (английская версия: https://tom4ikss.github.io/region-js/) · **Релиз:** [v0.5.1-alpha](https://github.com/Tom4ikss/region-js/releases/tag/v0.5.1-alpha)
 
 ## Против воркеров и tokio
 
@@ -61,6 +61,10 @@ print('payload items:', await worker); // 3
 - **Документация на русском и английском** с примерами, у каждого из которых настоящий вывод d8, и микробенчмарками «плохо / хорошо».
 
 ## Как запустить
+
+[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/Tom4ikss/region-js?quickstart=1)
+
+В браузере, ничего не ставя: codespace сам скачает готовый d8 и откроет песочницу, Ctrl+Shift+B (Cmd+Shift+B на Mac) запускает открытый файл.
 
 На Linux x64 (и в WSL2) собирать не обязательно: `scripts/get-d8.sh` скачивает готовый d8 из последнего релиза и ставит его в `~/.local/bin/d8` и `v8-src/v8/out/release/d8`. Тот же d8 есть в образе `docker run --rm -it ghcr.io/tom4ikss/region-js`.
 
@@ -96,7 +100,7 @@ node scripts/run-examples.mjs        # перезапустить примеры
 | `tests/` | Тесты и бенчмарки регионов, `spawn`, каналов и `free()`, фаззер |
 | `playground/` | Типы, Biome, ESLint-плагин и примеры для VSCode |
 | `prototype/js-ownership/` | Первая версия идеи на чистом JS поверх `SharedArrayBuffer` |
-| `DESIGN.md` | Дизайн и что из него реализовано |
+| `DESIGN.ru.md` | Дизайн и что из него реализовано |
 
 ## Статус
 

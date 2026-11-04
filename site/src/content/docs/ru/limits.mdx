@@ -13,7 +13,7 @@ sidebar:
 
 ## Как запустить {/* #run */}
 
-Нужен собранный d8 из форка. Скрипт `scripts/setup.sh` скачивает V8 на нужном коммите, накладывает патч `v8/regions.patch` и собирает d8. Примеры с этого сайта лежат в `site/examples/ru/`, и каждый запускается одной командой:
+Быстрее всего — ничего не ставить: [откройте репозиторий в GitHub Codespaces](https://codespaces.new/Tom4ikss/region-js?quickstart=1). Он сам скачает готовый d8 и откроет песочницу, где Ctrl+Shift+B (Cmd+Shift+B на Mac) запускает открытый файл. На Linux x64 и в WSL2 тот же готовый d8 из последнего релиза скачивает `scripts/get-d8.sh`, а `docker run --rm -it ghcr.io/tom4ikss/region-js` запускает его в контейнере. На macOS или чтобы менять движок, d8 собирают из форка: скрипт `scripts/setup.sh` скачивает V8 на нужном коммите, накладывает патч `v8/regions.patch` и собирает d8. Примеры с этого сайта лежат в `site/examples/ru/`, и каждый запускается одной командой:
 
 ```sh
 $ v8-src/v8/out/release/d8 --harmony-regions site/examples/ru/01-first-region.js
@@ -123,4 +123,4 @@ V8 is running with experimental features enabled. Stability and security will su
 
 ### Где посмотреть код? {/* #where-is-the-code */}
 
-Изменения движка — патч `v8/regions.patch`, после `scripts/setup.sh` они лежат в `v8-src/v8`: объект региона в `src/objects/js-region.*`, API — в `src/d8/d8.cc`, порт задач и каналы — в `src/d8/d8-port.cc` и `src/d8/d8-channel.cc`. Решения и риски описаны в `DESIGN.md`, что вошло в релиз — в `CHANGELOG.md`, тесты и замеры — в `tests/`, типы и правила линтеров — в `playground/`.
+Изменения движка — патч `v8/regions.patch`, после `scripts/setup.sh` они лежат в `v8-src/v8`: объект региона в `src/objects/js-region.*`, API — в `src/d8/d8.cc`, порт задач и каналы — в `src/d8/d8-port.cc` и `src/d8/d8-channel.cc`. Решения и риски описаны в `DESIGN.ru.md`, что вошло в релиз — в `CHANGELOG.md`, тесты и замеры — в `tests/`, типы и правила линтеров — в `playground/`.
