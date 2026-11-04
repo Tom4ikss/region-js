@@ -1,7 +1,7 @@
 ---
 title: "spawn: a function on a separate thread"
 description: "spawn(callback, ...args): a function on a separate thread, join and await, capturing variables, this and arguments, nested tasks, errors, freezing and borrows inside tasks."
-eyebrow: "Chapter 3"
+eyebrow: "Chapter 4"
 sidebar:
   label: "spawn: tasks on threads"
 ---
@@ -128,6 +128,28 @@ A task can call `spawn` itself. Such tasks are nested in it, as in Rust's `std::
 
 <Example file="23-spawn-nested.js" />
 
+## Freezing in tasks {/* #frozen */}
+
+A task gets a frozen region as shared, without a move. The right to thaw stays with the calling thread ([more about the right](/region-js/guide/#thaw-right)), and the task cannot thaw such a region. In return, the task holds a borrow on it, like `borrow()`, so it can read it, including typed arrays ([a frozen region is not read without a borrow](/region-js/guide/#borrow)). The borrow is issued for regions the task captured or received as an argument. A frozen object that reached the task another way, for example through `recv()` from a channel, is read under its own borrow: `using b = Region.of(x).borrow()`. If the task stashes a typed array view somewhere, for example in `globalThis`, it will be empty after the task ends. A sealed region ([`Region.share`](/region-js/guide/#share)) needs no borrows: it is read however and from wherever you like, and its views do not go empty.
+
+<p id="frozen-ticket">The borrow is taken at the moment `spawn()` is called, not when the task starts, and is returned when its answer arrives. While the task waits for a free worker, the region already cannot be thawed: the task will read exactly what was there at the call, not what someone managed to write before it started. `region.readers` counts such a task as one reader both in the queue and while it runs. To rebuild the data after the tasks, wait for them or call `await region.thawWhenFree()`.</p>
+
+<Example file="47-thaw-wait.js" />
+
+If the task froze a region itself, the right to thaw comes back to the caller together with the result. This makes it convenient to build a lookup table in a task: build it, freeze it, return it, and then hand it out to other tasks without copies.
+
+<Example file="27-spawn-freeze.js" />
+
+### Borrows in tasks: `borrowWhile` {/* #borrow */}
+
+A plain `region.borrow()` taken in a task must not outlive it. When the task has finished, the remaining borrows are returned automatically, and the worker prints a `console.warn` warning. Otherwise the calling thread could not thaw the region: the borrow would stay in the worker forever.
+
+The problem is asynchronous work. If a task took a borrow and put off the read (`setTimeout`, `await` without returning the promise), the task has already finished, the borrow has been returned, and the deferred read gets an `OwnershipError`: a frozen region cannot be read without a borrow, and it may have been thawed as well. For such work there is `region.borrowWhile(fn)`: it holds the borrow until the promise returned by `fn` settles, and returns that promise. Return it from the task or wait for it with `await`; then the task finishes only after the work.
+
+<Example file="25-spawn-borrow.js" />
+
+In the first task, the borrow is returned when the task ends, `readers` is 0, and the main thread thaws the region without trouble. The deferred read in the worker then fails. In the second task, the borrow is held until the asynchronous work ends: inside you can see `readers: 2`; one borrow is held by the task itself, the other by `borrowWhile`. If you call `borrowWhile` with an async function and do not return the promise, you get the same error as with a bare borrow. The ESLint rule [`no-floating-borrow-while`](/region-js/tooling/#no-floating-borrow-while) catches this. A borrow declared with `using` is returned at the end of the block and causes no warning.
+
 ## Cancellation: `abort`, `timeout`, `JoinSet` {/* #abort */}
 
 `handle.abort()` cancels a task, and its `await` and `join()` end with an `AbortError`. A task that no worker has picked up yet simply does not start, and the regions it captured go back to whoever started it. In a running task, every `await` throws this error: waiting on a channel or a lock, including the blocking `recvSync` and `writeSync`, and waiting on a plain promise, even one that will never settle. If the promise rejected with its own error, that error arrives as is. This is how tokio and asyncio cancel a task at the next `await`. Its `catch` and `finally` run before the handle finishes, and the task's regions are still available in them, but the next `await` throws again. Code that waits for nothing, such as a long loop, cannot be stopped from outside: JS does not interrupt a function in the middle of its work. Such a loop checks `spawn.aborted()` itself.
@@ -138,7 +160,7 @@ A task can call `spawn` itself. Such tasks are nested in it, as in Rust's `std::
 
 A promise that the task code is waiting for is kept alive until it settles or the task finishes. So even a promise that nothing else references is not collected by the garbage collector together with the functions waiting on it: on cancellation their `catch` and `finally` will run. Functions that the task stopped waiting for before it finished are no longer kept.
 
-Cancellation in the middle of work can leave data half-changed. With the task's regions this is visible right away: whoever cancelled it gets an `AbortError` or a `TimeoutError`. It is worse with an `RwLock` shared by several tasks: the others do not know about the cancellation. So a writer cancelled while holding a guard poisons the lock, and the next one to take it gets a `PoisonError` (see [RwLock](/region-js/channels/#rwlock)):
+Cancellation in the middle of work can leave data half-changed. With the task's regions this is visible right away: whoever cancelled it gets an `AbortError` or a `TimeoutError`. It is worse with an `RwLock` shared by several tasks: the others do not know about the cancellation. So a writer cancelled while holding a guard poisons the lock, and the next one to take it gets a `PoisonError` (see [RwLock](/region-js/channels/#rwlock)).
 
 Cleanup after cancellation often needs to wait: take a lock to restore a counter, send a “goodbye” to a channel. In a cancelled task such an `await` throws immediately. That is what `spawn.shield(fn)` is for, like a shielded cancel scope in Trio: inside `fn` the task behaves as if it was not cancelled. Its `await`s and waits on channels and locks do not fail, `spawn.aborted()` returns `false`, and tasks it starts are not cancelled together with the task. The task handle finishes only after all its `shield`s, even if nobody waited for them. In a cancelled task, `await spawn.shield(...)` itself throws the cancellation error again after `fn` ends, or `fn`'s own error if `fn` failed. Outside a task, and in a task that was not cancelled, `shield` simply calls `fn`.
 
@@ -179,31 +201,9 @@ Tasks started all at once cost about the same, around 4 µs each. Why starting b
 
 For tasks of a millisecond or longer this overhead is barely noticeable. For small tasks it can be larger than the work itself. How to deal with that is shown on the [Practices](/region-js/practices/#batch) page.
 
-## Freezing in tasks {/* #frozen */}
-
-A task gets a frozen region as shared, without a move. The right to thaw stays with the calling thread ([more about the right](/region-js/guide/#thaw-right)), and the task cannot thaw such a region. In return, the task holds a borrow on it, like `borrow()`, so it can read it, including typed arrays ([a frozen region is not read without a borrow](/region-js/guide/#borrow)). The borrow is issued for regions the task captured or received as an argument. A frozen object that reached the task another way, for example through `recv()` from a channel, is read under its own borrow: `using b = Region.of(x).borrow()`. If the task stashes a typed array view somewhere, for example in `globalThis`, it will be empty after the task ends. A sealed region ([`Region.share`](/region-js/guide/#share)) needs no borrows: it is read however and from wherever you like, and its views do not go empty.
-
-<p id="frozen-ticket">The borrow is taken at the moment `spawn()` is called, not when the task starts, and is returned when its answer arrives. While the task waits for a free worker, the region already cannot be thawed: the task will read exactly what was there at the call, not what someone managed to write before it started. `region.readers` counts such a task as one reader both in the queue and while it runs. To rebuild the data after the tasks, wait for them or call `await region.thawWhenFree()`.</p>
-
-<Example file="47-thaw-wait.js" />
-
-If the task froze a region itself, the right to thaw comes back to the caller together with the result. This makes it convenient to build a lookup table in a task: build it, freeze it, return it, and then hand it out to other tasks without copies.
-
-<Example file="27-spawn-freeze.js" />
-
-### Borrows in tasks: `borrowWhile` {/* #borrow */}
-
-A plain `region.borrow()` taken in a task must not outlive it. When the task has finished, the remaining borrows are returned automatically, and the worker prints a `console.warn` warning. Otherwise the calling thread could not thaw the region: the borrow would stay in the worker forever.
-
-The problem is asynchronous work. If a task took a borrow and put off the read (`setTimeout`, `await` without returning the promise), the task has already finished, the borrow has been returned, and the deferred read gets an `OwnershipError`: a frozen region cannot be read without a borrow, and it may have been thawed as well. For such work there is `region.borrowWhile(fn)`: it holds the borrow until the promise returned by `fn` settles, and returns that promise. Return it from the task or wait for it with `await`; then the task finishes only after the work.
-
-<Example file="25-spawn-borrow.js" />
-
-In the first task, the borrow is returned when the task ends, `readers` is 0, and the main thread thaws the region without trouble. The deferred read in the worker then fails. In the second task, the borrow is held until the asynchronous work ends: inside you can see `readers: 2`; one borrow is held by the task itself, the other by `borrowWhile`. If you call `borrowWhile` with an async function and do not return the promise, you get the same error as with a bare borrow. The ESLint rule [`no-floating-borrow-while`](/region-js/tooling/#no-floating-borrow-while) catches this. A borrow declared with `using` is returned at the end of the block and causes no warning.
-
 :::caution[spawn limitations]
 - Classes are not supported; `super`, `new.target` and `import` do not work in the callback.
-- If a pool worker dies in the middle of a task, that task's `join()` and `await` end with the error `spawn() worker exited without a result`. This applies only to the tasks it had already picked up: the rest are run by other workers, and if all of them died, the next `spawn` sets up a new pool. Tasks have no timeout: a task that runs forever is waited for forever.
+- If a pool worker dies in the middle of a task, that task's `join()` and `await` end with the error `spawn() worker exited without a result`. This applies only to the tasks it had already picked up: the rest are run by other workers, and if all of them died, the next `spawn` sets up a new pool. Without `timeout(ms)`, a task that runs forever is waited for forever.
 - Like everything else, `spawn` exists only in d8 with the `--harmony-regions` flag.
 :::
 

@@ -1,7 +1,7 @@
 ---
 title: "Data in regions"
 description: "Regions, the #{} literals and 'use region', read and write rules, arrays, typed arrays, Region.share, freeze and borrow, free, workers directly via postMessage and Region.of. Every step comes with an example that was actually run."
-eyebrow: "Chapter 4"
+eyebrow: "Chapter 5"
 sidebar:
   label: "Data in regions"
 ---
@@ -14,7 +14,7 @@ import Example from '../../components/Example.astro';
 </div>
 
 :::note[How to read the examples]
-The examples are run like this: `d8 --harmony-regions file.js` (the full command is on the [“Limits and plans”](/region-js/limits/#run) page). d8 uses `print` instead of `console.log`. We removed the warning line “V8 is running with experimental features enabled”, which d8 prints first, from the output.
+The examples are run like this: `d8 --harmony-regions file.js` (the full command is on the [“How to run it”](/region-js/start/#examples) page). d8 uses `print` instead of `console.log`. We removed the warning line “V8 is running with experimental features enabled”, which d8 prints first, from the output.
 
 Some examples run with the `--module` flag so they can use `await` directly at the top level of the file. Such files start with the line `// d8-flags: --module`.
 

@@ -16,6 +16,7 @@ export const PAGES = [
 	{ slug: 'index', group: 0 },
 	{ slug: 'problem', group: 0 },
 	{ slug: 'ideas', group: 0 },
+	{ slug: 'start', group: 1 },
 	{ slug: 'spawn', group: 1 },
 	{ slug: 'guide', group: 1 },
 	{ slug: 'channels', group: 1 },

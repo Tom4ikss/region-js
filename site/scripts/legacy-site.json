@@ -294,13 +294,13 @@
     "24-spawn-unhandled.js",
     "15-spawn-parallel.js",
     "23-spawn-nested.js",
+    "47-thaw-wait.js",
+    "27-spawn-freeze.js",
+    "25-spawn-borrow.js",
     "39-spawn-abort.js",
     "46-cancel.js",
     "45-scope.js",
-    "19-spawn-overhead.js",
-    "47-thaw-wait.js",
-    "27-spawn-freeze.js",
-    "25-spawn-borrow.js"
+    "19-spawn-overhead.js"
    ],
    "charts": []
   },
@@ -621,13 +621,13 @@
     "24-spawn-unhandled.js",
     "15-spawn-parallel.js",
     "23-spawn-nested.js",
+    "47-thaw-wait.js",
+    "27-spawn-freeze.js",
+    "25-spawn-borrow.js",
     "39-spawn-abort.js",
     "46-cancel.js",
     "45-scope.js",
-    "19-spawn-overhead.js",
-    "47-thaw-wait.js",
-    "27-spawn-freeze.js",
-    "25-spawn-borrow.js"
+    "19-spawn-overhead.js"
    ],
    "charts": []
   },

@@ -92,6 +92,13 @@ header.header {
 	color: var(--sl-color-gray-3);
 	font: 600 0.72rem/1 var(--sl-font-mono);
 }
+/* The landing page is not a chapter: no number, so the sidebar matches the "Chapter N" eyebrows. */
+.sidebar-content .top-level > li:first-child > details > ul > li:first-child > a {
+	counter-increment: none;
+}
+.sidebar-content .top-level > li:first-child > details > ul > li:first-child > a::before {
+	content: '•';
+}
 .sidebar-content a:hover {
 	background: var(--rj-surface-2);
 	color: var(--sl-color-white);

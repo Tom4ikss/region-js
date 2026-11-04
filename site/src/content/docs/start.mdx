@@ -1,0 +1,67 @@
+---
+title: "How to run it"
+description: "Three ways to get d8 with regions: GitHub Codespaces in the browser, a prebuilt d8 for Linux x64 and Docker, or a build from the fork. Then the examples, useful flags and the editor."
+eyebrow: "Chapter 3"
+sidebar:
+  label: "How to run it"
+---
+<div class="lead">
+
+Regions, `spawn` and channels exist only in d8, the V8 test shell, built from this fork. There are three ways to get it, from nothing installed to a build of your own. After that, every example on this site runs with a single command.
+
+</div>
+
+## In the browser: Codespaces {/* #codespaces */}
+
+The quickest way needs nothing installed: [open the repository in GitHub Codespaces](https://codespaces.new/Tom4ikss/region-js?quickstart=1). It gets the prebuilt d8 and opens the playground, where Ctrl+Shift+B (Cmd+Shift+B on a Mac) runs the open file.
+
+## A prebuilt d8 {/* #prebuilt */}
+
+On Linux x64 and in WSL2, `scripts/get-d8.sh` downloads the prebuilt d8 from the latest release, checks its checksum and installs it as `~/.local/bin/d8` and `v8-src/v8/out/release/d8`. `TAG=...` takes it from another release. The same d8 is in a container image:
+
+```sh
+$ docker run --rm -it ghcr.io/tom4ikss/region-js
+```
+
+The prebuilt d8 is a release build with V8's internal checks (DCHECK) enabled.
+
+## Building it yourself {/* #build */}
+
+On macOS, or to change the engine, build d8 from the fork. You need macOS or Linux (WSL2 works too), git, Python 3, about 15 GB of disk and some patience: V8 takes a while to build. The `scripts/setup.sh` script downloads depot_tools and V8 at the right commit (`v8/BASE`), applies the `v8/regions.patch` patch and builds d8 with the flags from `v8/args.gn`:
+
+```sh
+$ scripts/setup.sh
+$ scripts/run-tests.sh v8-src/v8/out/release/d8
+```
+
+`scripts/run-tests.sh` runs every test in `tests/` once. `scripts/test-variants.sh` runs them under V8's flag variants and takes hours. `scripts/setup.sh tsan is_tsan=true` builds d8 with other gn args in `out/tsan`, and `JOBS=8` limits the number of parallel build jobs on machines with little memory.
+
+## Running the examples {/* #examples */}
+
+The examples from this site are in `site/examples/en/`, and each one runs with a single command:
+
+```sh
+$ v8-src/v8/out/release/d8 --harmony-regions site/examples/en/01-first-region.js
+```
+
+On the first line, d8 prints a warning:
+
+```text
+V8 is running with experimental features enabled. Stability and security will suffer.
+```
+
+This is expected: d8 reports any experimental flag this way. After it comes the example's output, the same as on the site's pages.
+
+The examples are rerun with `node site/scripts/run-examples.mjs`: it runs all of them in d8 and saves their fresh output next to them, and the site shows that output when it is built (`pnpm build` in `site/`).
+
+## Useful flags {/* #flags */}
+
+- `--harmony-regions` enables `Region`, `spawn`, `Channel`, and the `#{...}` and `#[...]` literals ([more](/region-js/guide/#literals)). Without it they simply do not exist, and `#{` is a syntax error. The old flag `--harmony-region-literals` means the same thing;
+- `--module` runs the file as a module, so you can use top-level `await`. Examples that need it start with the line `// d8-flags: --module`;
+- `--max-serializer-memory=4000` raises the memory limit that d8 gives the `postMessage` serializer (in megabytes). Without it, copying a large tree in the measurements hits the limit. The site's examples were run with this flag;
+- `--spin-wait-us=50` sets how many microseconds an idle thread keeps checking for incoming work before it goes to sleep. The default is 50; `0` turns the spinning off. With it, starting `spawn` tasks and exchanging messages is about three times faster ([why](/region-js/inside/#fast-spawn));
+- `--verify-heap` and `--expose-gc` enable heap verification and the `gc()` function. The tests in `tests/` use them.
+
+## The editor {/* #editor */}
+
+To write examples with hints and checks in the editor, open the `playground/` folder in VS Code and run `npm install` there ([Editor and linters](/region-js/tooling/)). Cmd+Shift+B (Ctrl+Shift+B) runs the open file in d8.

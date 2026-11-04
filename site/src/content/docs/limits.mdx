@@ -1,7 +1,7 @@
 ---
-title: "Limits, plans, and how to try it"
-description: "What the prototype lacks, what is planned, and how to run the examples yourself."
-eyebrow: "Chapter 10"
+title: "Limits and plans"
+description: "What the prototype lacks and what is planned."
+eyebrow: "Chapter 11"
 sidebar:
   label: "Limits and plans"
 ---
@@ -11,33 +11,7 @@ This is an experiment, and it has many limits. Some simplify the first version; 
 
 </div>
 
-## How to run it {/* #run */}
-
-The quickest way needs nothing installed: [open the repository in GitHub Codespaces](https://codespaces.new/Tom4ikss/region-js?quickstart=1). It gets the prebuilt d8 and opens the playground, where Ctrl+Shift+B (Cmd+Shift+B on a Mac) runs the open file. On Linux x64 and in WSL2, `scripts/get-d8.sh` downloads the same prebuilt d8 from the latest release, and `docker run --rm -it ghcr.io/tom4ikss/region-js` starts it in a container. On macOS, or to change the engine, build d8 from the fork: the `scripts/setup.sh` script downloads V8 at the right commit, applies the `v8/regions.patch` patch, and builds d8. The examples from this site are in `site/examples/en/`, and each one runs with a single command:
-
-```sh
-$ v8-src/v8/out/release/d8 --harmony-regions site/examples/en/01-first-region.js
-```
-
-On the first line, d8 prints a warning:
-
-```text
-V8 is running with experimental features enabled. Stability and security will suffer.
-```
-
-This is expected: d8 reports any experimental flag this way. After it comes the example's output, the same as on the site's pages.
-
-Useful flags:
-
-- `--harmony-regions` enables `Region`, `spawn`, `Channel`, and the `#{...}` and `#[...]` literals ([more](/region-js/guide/#literals)). Without it they simply do not exist, and `#{` is a syntax error. The old flag `--harmony-region-literals` means the same thing;
-- `--module` runs the file as a module, so you can use top-level `await`. Examples that need it start with the line `// d8-flags: --module`;
-- `--max-serializer-memory=4000` raises the memory limit that d8 gives the `postMessage` serializer (in megabytes). Without it, copying a large tree in the measurements hits the limit. The site's examples were run with this flag;
-- `--spin-wait-us=50` sets how many microseconds an idle thread keeps checking for incoming work before it goes to sleep. The default is 50; `0` turns the spinning off. With it, starting `spawn` tasks and exchanging messages is about three times faster ([why](/region-js/inside/#fast-spawn));
-- `--verify-heap` and `--expose-gc` enable heap verification and the `gc()` function. The tests in `tests/` use them.
-
-The examples are rerun with `node site/scripts/run-examples.mjs`: it runs all of them in d8 and saves their fresh output next to them, and the site shows that output when it is built (`pnpm build` in `site/`).
-
-To write examples with hints and checks in the editor, open the `playground/` folder in VS Code ([Editor and linters](/region-js/tooling/)).
+<p id="run">How to run d8 and the examples is now on its own page, [How to run it](/region-js/start/).</p>
 
 ## Limits {/* #limits */}
 
@@ -82,12 +56,12 @@ To write examples with hints and checks in the editor, open the `playground/` fo
 - Ordinary data that is captured or passed as an argument is copied into every task. Large read-only data is better put into `Region.share` once.
 - Classes are not supported. `super`, `new.target`, and `import` do not work in callbacks.
 - If a pool worker dies in the middle of a task (pool workers do not exit on their own; running out of memory, for example, can kill one), the tasks it had already taken end with the error `spawn() worker exited without a result`. The other workers run the rest. The pool does not start a new worker in its place while the others are alive; if all of them have died, the next `spawn` starts a new pool.
-- If nobody awaits a failed task, d8 reports an unhandled promise rejection and exits with code 1. The stack in this message points inside `spawn`, not to the call site.
+- If nobody awaits a failed task, d8 reports an unhandled promise rejection and exits with code 1. The stack in this message shows where the task failed and where it was started.
 - A plain `borrow()` taken in a task is released at the end of the task. Async work needs `borrowWhile`.
+- Cancellation of a task reaches nested tasks through the thread of each one, so a deep chain is cancelled not instantly but over several thread wake-ups.
 
 ### Channels {/* #channels */}
 
-- Cancellation of a task reaches nested tasks through the thread of each one, so a deep chain is cancelled not instantly but over several thread wake-ups.
 - Deadlock detection sees only channels and locks. If a task waits for an ordinary promise that nobody will resolve, d8 waits forever, until the task is cancelled with `abort()` or `timeout()`.
 - Deadlock detection does not see an `Atomics.waitAsync` timeout and may mistake for a deadlock a wait that this timeout would have woken up.
 - Only numbers, strings, region objects, and channels themselves go through a channel without the serializer. Ordinary objects are copied, as with `postMessage`.
@@ -107,7 +81,7 @@ These are directions, not promises with deadlines.
 - **Faster receiving from a channel.** Most of it is done: a round trip through a channel costs about 3.5 µs in a build with checks and 1.1 µs without them, the same as exchanging messages with a worker. With `await` the round trip is more expensive, 1.7 µs: almost all of the remaining time goes to the promise and the `{ value, done }` result.
 - **Garbage collection without stopping all threads.** Region IDs are already freed, but that requires a shared-heap GC, and it stops all threads. We cannot yet collect a region without touching the others: that requires knowing every reference to its objects from every thread. How to do this, what V8 already has, and what the literature says are in a [research note](https://github.com/Tom4ikss/region-js/blob/main/research/region-gc.md). Five steps are done: large regions have their own pages; a region knows which threads may reference it; the owner, without stopping the others, collects a dropped region and the garbage inside a live one; threads that no longer hold a region release it at its request; and a region's strings and numbers live in its memory and die with it ([how](/region-js/inside/#gc)). A region that several threads still hold is collected by the shared GC.
 - **A fast path for literals and array growth.** Most of it is done: the `#{}` and `#[]` literals are allocated directly in machine code from the thread's buffer in the shared heap or on the region's pages, and indexed writes and `push` run without the runtime ([how](/region-js/inside/#literals)). Maglev and Turbofan now also inline access to existing region objects. What remains is copying strings and fractional numbers on field writes without the runtime too, and growing an array's spare capacity in machine code.
-- **Going beyond d8.** Teach `postMessage` in Node and Chromium to pass regions. Not even started yet.
+- **Going beyond d8.** Teach `postMessage` in Node and Chromium to pass regions. The first step is done: the fork is on V8 15.9.77, the version Node's canary branch builds with. Next comes building Node on it, starting with a d8-like stress test inside Node.
 - **Ideas from the design that are not done yet:** a `Map` that lives in a region. Of the syntax, the `#{}` and `#[]` literals and the `'use region'` directive are done; permanently shared data is `Region.share`, “pure” functions in a region are `Region.fn` ([more](/region-js/guide/#functions)), and the bridge to an object of the current thread is `Region.localRef` ([more](/region-js/guide/#local-ref)). The rest is postponed.
 - **A very vague idea: `region.alloc(type, ...values)`.** One function that allocates anything in a region: `Map`, `Set`, `Date`, your own types. How to do it is unclear for now: each such object has its own internal layout, and for each one we would have to decide where its data lives, how other threads read it, and what to do with its methods. Postponed until a clear scheme appears.
 

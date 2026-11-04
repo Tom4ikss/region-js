@@ -1,7 +1,7 @@
 ---
 title: "Данные в регионах"
 description: "Регион и литералы #{} и 'use region', правила чтения и записи, массивы, типизированные массивы, Region.share, freeze и borrow, free, воркеры напрямую через postMessage и Region.of. Каждый шаг с запущенным примером."
-eyebrow: "Глава 4"
+eyebrow: "Глава 5"
 sidebar:
   label: "Данные в регионах"
 ---
@@ -14,7 +14,7 @@ import Example from '../../../components/Example.astro';
 </div>
 
 :::note[Как читать примеры]
-Примеры запускаются так: `d8 --harmony-regions файл.js` (полная команда — на странице [«Ограничения и планы»](/region-js/ru/limits/#run)). Вместо `console.log` в d8 используется `print`. Строку-предупреждение «V8 is running with experimental features enabled», которую d8 печатает первой, мы из вывода убрали.
+Примеры запускаются так: `d8 --harmony-regions файл.js` (полная команда — на странице [«Как запустить»](/region-js/ru/start/#examples)). Вместо `console.log` в d8 используется `print`. Строку-предупреждение «V8 is running with experimental features enabled», которую d8 печатает первой, мы из вывода убрали.
 
 Некоторые примеры запускаются с флагом `--module`, чтобы писать `await` прямо на верхнем уровне файла. Такие файлы начинаются со строки `// d8-flags: --module`.
 

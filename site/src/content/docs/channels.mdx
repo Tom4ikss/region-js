@@ -1,9 +1,9 @@
 ---
 title: "Channels: threads that talk"
-description: "Channel: a queue between threads, as in Go. send and recv, the buffer, close, for await, select, blocking versions for workers, moving regions through a channel, and what it costs."
-eyebrow: "Chapter 5"
+description: "Channel: a queue between threads, as in Go. send and recv, the buffer, close, for await, select, blocking versions for workers, moving regions through a channel, RwLock for shared data, deadlocks, and what it costs."
+eyebrow: "Chapter 6"
 sidebar:
-  label: "Channels"
+  label: "Channels and RwLock"
 ---
 import Example from '../../components/Example.astro';
 
@@ -77,6 +77,16 @@ Taking the lock for writing and releasing it costs about 0.2 µs; for `RwLock` i
 
 Between threads, a lock travels like a channel: it can be captured in `spawn`, sent to a channel, and passed with `postMessage`. `new RwLock(data)` copies ordinary data into a new region, and takes a region object owned by the thread without a copy.
 
+## Deadlocks {/* #deadlock */}
+
+If all threads are waiting and none of them can wake the others, that is a deadlock. In this situation Go terminates the program with the error "all goroutines are asleep". Here every wait on channels and locks ends with a `DeadlockError`, and the program can catch it:
+
+<Example file="40-deadlock.js" />
+
+A thread is asleep when it has nothing to do in its event loop or when it is in a blocking wait: `recvSync`, `writeSync`, `join()`. A thread that is computing may still send something, so while it works there is no deadlock. The same goes for a `timeout()` timer: until it fires, it can cancel a task. The error comes if all threads have been asleep like this for 50 ms in a row.
+
+The check looks only at channels and locks. A task waiting on an ordinary promise that nobody will ever resolve keeps d8 running forever, as before.
+
 ## How this differs from Go {/* #vs-go */}
 
 |  | Go | Here |
@@ -89,16 +99,6 @@ Between threads, a lock travels like a channel: it can be captured in `spawn`, s
 | End of the program | when `main` returns | d8 waits for tasks and channel operations |
 
 The last row means that a receiver keeps the program alive as long as another thread can wake it.
-
-## Deadlocks {/* #deadlock */}
-
-If all threads are waiting and none of them can wake the others, that is a deadlock. In this situation Go terminates the program with the error "all goroutines are asleep". Here every wait on channels and locks ends with a `DeadlockError`, and the program can catch it:
-
-<Example file="40-deadlock.js" />
-
-A thread is asleep when it has nothing to do in its event loop or when it is in a blocking wait: `recvSync`, `writeSync`, `join()`. A thread that is computing may still send something, so while it works there is no deadlock. The same goes for a `timeout()` timer: until it fires, it can cancel a task. The error comes if all threads have been asleep like this for 50 ms in a row.
-
-The check looks only at channels and locks. A task waiting on an ordinary promise that nobody will ever resolve keeps d8 running forever, as before.
 
 ## What it costs {/* #cost */}
 
