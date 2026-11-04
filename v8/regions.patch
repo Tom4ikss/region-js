@@ -6314,7 +6314,7 @@ index 00000000..bd767012
 +
 +#endif  // V8_D8_D8_PORT_H_
 diff --git a/src/d8/d8.cc b/src/d8/d8.cc
-index b98eec11..bff09cdd 100644
+index b98eec11..66809e25 100644
 --- a/src/d8/d8.cc
 +++ b/src/d8/d8.cc
 @@ -14,6 +14,7 @@
@@ -8342,7 +8342,7 @@ index b98eec11..bff09cdd 100644
  }
  
  Local<ObjectTemplate> Shell::CreateAsyncHookTemplate(Isolate* isolate) {
-@@ -5403,9 +7191,1200 @@ MaybeLocal<Context> Shell::CreateEvaluationContext(Isolate* isolate) {
+@@ -5403,9 +7191,1204 @@ MaybeLocal<Context> Shell::CreateEvaluationContext(Isolate* isolate) {
    }
  #endif  // V8_ENABLE_HARDWARE_WATCHPOINT_SUPPORT
  
@@ -8716,6 +8716,9 @@ index b98eec11..bff09cdd 100644
 +      else task.reject(task.error);
 +    } else if (!task.ok && !task.joined) {
 +      task.outcome = Promise.reject(task.error);
++      // Aborted with the task that spawned it: that task's abort is what
++      // gets reported, also if this one fails before anything awaits it.
++      if (task.withParent) task.outcome.catch(noop);
 +    }
 +  };
 +
@@ -8779,7 +8782,7 @@ index b98eec11..bff09cdd 100644
 +      const task = {
 +        id, settled: false, ok: false, joined: false, value: undefined,
 +        error: undefined, outcome: null, resolve: null, reject: null,
-+        parent: undefined, reserved: null,
++        parent: undefined, reserved: null, withParent: false,
 +      };
 +      this.#tasks.set(id, task);
 +      return task;
@@ -9236,20 +9239,21 @@ index b98eec11..bff09cdd 100644
 +      let siblings = children.get(parent);
 +      if (!siblings) children.set(parent, siblings = new Set());
 +      siblings.add(task);
-+      if (spawn.aborted()) pool.abort(task, 'AbortError', abortedWithParent);
++      if (spawn.aborted()) abortWithParent(task);
 +    }
 +    return new SpawnHandle(pool, task);
 +  };
-+  const abortedWithParent =
-+      'spawn() task was aborted with the task that spawned it';
++  const abortWithParent = (task) => {
++    task.withParent = true;
++    pool.abort(task, 'AbortError',
++               'spawn() task was aborted with the task that spawned it');
++  };
 +  // Called on a pool worker when its task `parent` is aborted.
 +  Object.defineProperty(spawn, '__abortChildren', {
 +    value: (parent) => {
 +      const siblings = children.get(parent);
 +      if (!siblings) return;
-+      for (const task of siblings) {
-+        pool.abort(task, 'AbortError', abortedWithParent);
-+      }
++      for (const task of siblings) abortWithParent(task);
 +    },
 +  });
 +  spawn.poolSize = 4;
@@ -9543,7 +9547,7 @@ index b98eec11..bff09cdd 100644
  namespace {
  int LineFromOffset(Local<debug::Script> script, int offset) {
    debug::Location location = script->GetSourceLocation(offset);
-@@ -6565,6 +9544,7 @@ void SourceGroup::JoinThread(const i::ParkedScope& parked) {
+@@ -6565,6 +9548,7 @@ void SourceGroup::JoinThread(const i::ParkedScope& parked) {
  void SerializationDataQueue::Enqueue(std::unique_ptr<SerializationData> data) {
    base::MutexGuard lock_guard(&mutex_);
    data_.push_back(std::move(data));
@@ -9551,7 +9555,7 @@ index b98eec11..bff09cdd 100644
  }
  
  bool SerializationDataQueue::Dequeue(
-@@ -6574,6 +9554,7 @@ bool SerializationDataQueue::Dequeue(
+@@ -6574,6 +9558,7 @@ bool SerializationDataQueue::Dequeue(
    if (data_.empty()) return false;
    *out_data = std::move(data_[0]);
    data_.erase(data_.begin());
@@ -9559,7 +9563,7 @@ index b98eec11..bff09cdd 100644
    return true;
  }
  
-@@ -6585,6 +9566,7 @@ bool SerializationDataQueue::IsEmpty() {
+@@ -6585,6 +9570,7 @@ bool SerializationDataQueue::IsEmpty() {
  void SerializationDataQueue::Clear() {
    base::MutexGuard lock_guard(&mutex_);
    data_.clear();
@@ -9567,7 +9571,7 @@ index b98eec11..bff09cdd 100644
  }
  
  Worker::Worker(Isolate* parent_isolate, const char* script)
-@@ -6699,6 +9681,12 @@ std::unique_ptr<SerializationData> Worker::GetMessage(Isolate* requester) {
+@@ -6699,6 +9685,12 @@ std::unique_ptr<SerializationData> Worker::GetMessage(Isolate* requester) {
        out_queue_.Dequeue(&result);
        break;
      }
@@ -9580,7 +9584,7 @@ index b98eec11..bff09cdd 100644
      out_semaphore_.ParkedWait(
          reinterpret_cast<i::Isolate*>(requester)->main_thread_local_isolate());
    }
-@@ -6729,6 +9717,10 @@ void Worker::Terminate() {
+@@ -6729,6 +9721,10 @@ void Worker::Terminate() {
    base::MutexGuard lock_guard(&worker_mutex_);
    auto expected = State::kRunning;
    if (!state_.compare_exchange_strong(expected, State::kTerminating)) return;
@@ -9591,7 +9595,7 @@ index b98eec11..bff09cdd 100644
    std::unique_ptr<v8::Task> task(
        new TerminateTask(task_manager_, shared_from_this()));
    task_runner_->PostTask(std::move(task));
-@@ -6822,6 +9814,7 @@ Worker* Worker::GetCurrentWorker() { return current_worker_; }
+@@ -6822,6 +9818,7 @@ Worker* Worker::GetCurrentWorker() { return current_worker_; }
  void Worker::ExecuteInThread() {
    Isolate::CreateParams create_params = GetDefaultIsolateCreateParams();
    isolate_ = Isolate::New(create_params);
@@ -9599,7 +9603,7 @@ index b98eec11..bff09cdd 100644
  
    // TODO(mdanylo): can we omit dump disable here?
  #ifdef V8_DUMPLING
-@@ -6957,6 +9950,7 @@ void Worker::ExecuteInThread() {
+@@ -6957,6 +9954,7 @@ void Worker::ExecuteInThread() {
      platform::NotifyIsolateShutdown(g_default_platform, isolate_);
    }
  
@@ -9607,7 +9611,7 @@ index b98eec11..bff09cdd 100644
    isolate_->Dispose();
    isolate_ = nullptr;
  
-@@ -7221,6 +10215,10 @@ bool Shell::SetOptions(int argc, char* argv[]) {
+@@ -7221,6 +10219,10 @@ bool Shell::SetOptions(int argc, char* argv[]) {
        options.expected_to_throw = true;
      } else if (FlagMatches("--no-fail", &argv[i])) {
        options.no_fail = true;
@@ -9618,7 +9622,7 @@ index b98eec11..bff09cdd 100644
      } else if (FlagMatches("--dump-counters", &argv[i])) {
        options.dump_counters = true;
      } else if (FlagMatches("--dump-counters-nvp", &argv[i])) {
-@@ -7337,6 +10335,9 @@ bool Shell::SetOptions(int argc, char* argv[]) {
+@@ -7337,6 +10339,9 @@ bool Shell::SetOptions(int argc, char* argv[]) {
                                    argv, &i)) {
        // Value is expressed in MB.
        options.max_serializer_memory = atoi(flag_value) * i::MB;
@@ -9628,7 +9632,7 @@ index b98eec11..bff09cdd 100644
      } else if (FlagMatches("--bundle", &argv[i])) {
        options.bundle = true;
  #ifdef V8_FUZZILLI
-@@ -7972,6 +10973,27 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7972,6 +10977,27 @@ class Serializer : public ValueSerializer::Delegate {
      return true;
    }
  
@@ -9656,7 +9660,7 @@ index b98eec11..bff09cdd 100644
   private:
    Maybe<bool> PrepareTransfer(Local<Context> context, Local<Value> transfer) {
      if (transfer->IsArray()) {
-@@ -7980,6 +11002,22 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7980,6 +11006,22 @@ class Serializer : public ValueSerializer::Delegate {
        for (uint32_t i = 0; i < length; ++i) {
          Local<Value> element;
          if (transfer_array->Get(context, i).ToLocal(&element)) {
@@ -9679,7 +9683,7 @@ index b98eec11..bff09cdd 100644
            if (!element->IsArrayBuffer()) {
              ThrowError(isolate_,
                         "Transfer array elements must be an ArrayBuffer");
-@@ -8012,7 +11050,64 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -8012,7 +11054,64 @@ class Serializer : public ValueSerializer::Delegate {
      }
    }
  
@@ -9744,7 +9748,7 @@ index b98eec11..bff09cdd 100644
      for (const auto& global_array_buffer : array_buffers_) {
        Local<ArrayBuffer> array_buffer =
            Local<ArrayBuffer>::New(isolate_, global_array_buffer);
-@@ -8038,6 +11133,7 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -8038,6 +11137,7 @@ class Serializer : public ValueSerializer::Delegate {
    ValueSerializer serializer_;
    std::unique_ptr<SerializationData> data_;
    std::vector<Global<ArrayBuffer>> array_buffers_;
@@ -9752,7 +9756,7 @@ index b98eec11..bff09cdd 100644
    std::vector<Global<SharedArrayBuffer>> shared_array_buffers_;
    std::vector<Global<WasmModuleObject>> wasm_modules_;
    std::vector<std::shared_ptr<v8::BackingStore>> backing_stores_;
-@@ -8064,6 +11160,21 @@ class Deserializer : public ValueDeserializer::Delegate {
+@@ -8064,6 +11164,21 @@ class Deserializer : public ValueDeserializer::Delegate {
        return MaybeLocal<Value>();
      }
  
@@ -9774,7 +9778,7 @@ index b98eec11..bff09cdd 100644
      uint32_t index = 0;
      for (const auto& backing_store : data_->backing_stores()) {
        Local<ArrayBuffer> array_buffer =
-@@ -8100,6 +11211,21 @@ class Deserializer : public ValueDeserializer::Delegate {
+@@ -8100,6 +11215,21 @@ class Deserializer : public ValueDeserializer::Delegate {
      return nullptr;
    }
  
@@ -9796,7 +9800,7 @@ index b98eec11..bff09cdd 100644
   private:
    Isolate* isolate_;
    ValueDeserializer deserializer_;
-@@ -8368,9 +11494,13 @@ int Shell::Main(int argc, char* argv[]) {
+@@ -8368,9 +11498,13 @@ int Shell::Main(int argc, char* argv[]) {
    // The platform is owned by wrapper platform despite the `std::move` below.
    START_IGNORE_LIFETIME_SAFETY_WARNINGS()
    g_default_platform = g_platform.get();
@@ -9810,7 +9814,7 @@ index b98eec11..bff09cdd 100644
    }
    if (options.stress_delay_tasks) {
      int64_t random_seed = i::v8_flags.fuzzer_random_seed;
-@@ -8497,6 +11627,7 @@ int Shell::Main(int argc, char* argv[]) {
+@@ -8497,6 +11631,7 @@ int Shell::Main(int argc, char* argv[]) {
    }
  
    Isolate* isolate = Isolate::New(create_params);
@@ -12311,7 +12315,7 @@ index 6bfaf56f..a2e81225 100644
  
    using TaskQueueEntry = std::pair<Nestability, std::unique_ptr<Task>>;
 diff --git a/src/maglev/arm64/maglev-ir-arm64.cc b/src/maglev/arm64/maglev-ir-arm64.cc
-index 53898c51..18b78e56 100644
+index 53898c51..ad09df44 100644
 --- a/src/maglev/arm64/maglev-ir-arm64.cc
 +++ b/src/maglev/arm64/maglev-ir-arm64.cc
 @@ -7,6 +7,7 @@
@@ -12330,10 +12334,12 @@ index 53898c51..18b78e56 100644
  #include "src/objects/property-details.h"
  #include "src/objects/swiss-name-dictionary.h"
  
-@@ -1234,6 +1236,278 @@ void LoadDictionaryField::GenerateCode(MaglevAssembler* masm,
+@@ -1234,6 +1236,282 @@ void LoadDictionaryField::GenerateCode(MaglevAssembler* masm,
    __ bind(*done);
  }
  
++#if V8_COMPRESS_POINTERS
++
 +namespace {
 +
 +// Objects of ownership regions. These mirror CodeStubAssembler::
@@ -12606,11 +12612,13 @@ index 53898c51..18b78e56 100644
 +  __ Bind(&done);
 +}
 +
++#endif  // V8_COMPRESS_POINTERS
++
  }  // namespace maglev
  }  // namespace internal
  }  // namespace v8
 diff --git a/src/maglev/maglev-graph-builder.cc b/src/maglev/maglev-graph-builder.cc
-index 98f20cb9..5119fe8e 100644
+index 98f20cb9..07aa6ccb 100644
 --- a/src/maglev/maglev-graph-builder.cc
 +++ b/src/maglev/maglev-graph-builder.cc
 @@ -2,6 +2,7 @@
@@ -12621,7 +12629,7 @@ index 98f20cb9..5119fe8e 100644
  #include "src/maglev/maglev-graph-builder.h"
  
  #include <algorithm>
-@@ -4719,6 +4720,122 @@ MaybeReduceResult MaglevGraphBuilder::TryBuildPropertyAccess(
+@@ -4719,6 +4720,123 @@ MaybeReduceResult MaglevGraphBuilder::TryBuildPropertyAccess(
    UNREACHABLE();
  }
  
@@ -12642,7 +12650,7 @@ index 98f20cb9..5119fe8e 100644
 +    ValueNode* object, ValueNode* key, std::optional<int> field_index,
 +    base::Vector<const compiler::MapRef> maps, bool is_store,
 +    GenericAccessFunc&& build_generic_access) {
-+#if V8_TARGET_ARCH_ARM64 && V8_COMPRESS_POINTERS
++#if (V8_TARGET_ARCH_ARM64 || V8_TARGET_ARCH_X64) && V8_COMPRESS_POINTERS
 +  if (!v8_flags.inline_region_access) return {};
 +  RETURN_IF_ABORT(BuildCheckHeapObject(object));
 +  RETURN_IF_ABORT(BuildCheckMaps(object, maps));
@@ -12691,7 +12699,8 @@ index 98f20cb9..5119fe8e 100644
 +  return sub_graph.get(*result);
 +#else
 +  return {};
-+#endif  // V8_TARGET_ARCH_ARM64 && V8_COMPRESS_POINTERS
++#endif  // (V8_TARGET_ARCH_ARM64 || V8_TARGET_ARCH_X64) &&
++        // V8_COMPRESS_POINTERS
 +}
 +
 +template <typename GenericAccessFunc>
@@ -12744,7 +12753,7 @@ index 98f20cb9..5119fe8e 100644
  template <typename GenericAccessFunc>
  MaybeReduceResult MaglevGraphBuilder::TryBuildNamedAccess(
      ValueNode* receiver, ValueNode* lookup_start_object,
-@@ -4726,6 +4843,9 @@ MaybeReduceResult MaglevGraphBuilder::TryBuildNamedAccess(
+@@ -4726,6 +4844,9 @@ MaybeReduceResult MaglevGraphBuilder::TryBuildNamedAccess(
      compiler::FeedbackSource const& feedback_source,
      compiler::AccessMode access_mode,
      GenericAccessFunc&& build_generic_access) {
@@ -12754,7 +12763,7 @@ index 98f20cb9..5119fe8e 100644
    compiler::ZoneRefSet<Map> inferred_maps;
  
    bool has_deprecated_map_without_migration_target = false;
-@@ -5661,6 +5781,21 @@ MaybeReduceResult MaglevGraphBuilder::TryBuildElementAccess(
+@@ -5661,6 +5782,21 @@ MaybeReduceResult MaglevGraphBuilder::TryBuildElementAccess(
      return {};
    }
  
@@ -12832,10 +12841,10 @@ index 3fa81073..9d7a219a 100644
      StoreFixedArrayElementWithWriteBarrier* node,
      const ProcessingState& state) {
 diff --git a/src/maglev/maglev-ir.cc b/src/maglev/maglev-ir.cc
-index b3cb538b..b4b657a6 100644
+index b3cb538b..ad17e97c 100644
 --- a/src/maglev/maglev-ir.cc
 +++ b/src/maglev/maglev-ir.cc
-@@ -9272,6 +9272,36 @@ void LoadInt32::PrintParams(std::ostream& os) const {
+@@ -9272,6 +9272,38 @@ void LoadInt32::PrintParams(std::ostream& os) const {
    os << "(0x" << std::hex << offset() << std::dec << ")";
  }
  
@@ -12847,8 +12856,9 @@ index b3cb538b..b4b657a6 100644
 +  os << "(" << index() << ")";
 +}
 +
-+#if !V8_TARGET_ARCH_ARM64
-+// The graph builder creates region nodes on arm64 only.
++#if !((V8_TARGET_ARCH_ARM64 || V8_TARGET_ARCH_X64) && V8_COMPRESS_POINTERS)
++// The graph builder creates region nodes on arm64 and x64 with pointer
++// compression only.
 +void LoadRegionField::SetValueLocationConstraints() { UNREACHABLE(); }
 +void LoadRegionField::GenerateCode(MaglevAssembler*, const ProcessingState&) {
 +  UNREACHABLE();
@@ -12867,7 +12877,8 @@ index b3cb538b..b4b657a6 100644
 +                                      const ProcessingState&) {
 +  UNREACHABLE();
 +}
-+#endif  // !V8_TARGET_ARCH_ARM64
++#endif  // !((V8_TARGET_ARCH_ARM64 || V8_TARGET_ARCH_X64) &&
++        // V8_COMPRESS_POINTERS)
 +
  void LoadFixedArrayElement::PrintParams(std::ostream& os) const {
    // TODO(victorgomes): Print compression status only after the result is
@@ -12973,6 +12984,310 @@ index 40405be4..aa2a0984 100644
  class EnsureWritableFastElements
      : public FixedInputValueNodeT<2, EnsureWritableFastElements> {
   public:
+diff --git a/src/maglev/x64/maglev-ir-x64.cc b/src/maglev/x64/maglev-ir-x64.cc
+index 306a90f9..a93f7309 100644
+--- a/src/maglev/x64/maglev-ir-x64.cc
++++ b/src/maglev/x64/maglev-ir-x64.cc
+@@ -8,6 +8,7 @@
+ #include "src/codegen/x64/assembler-x64.h"
+ #include "src/codegen/x64/register-x64.h"
+ #include "src/common/globals.h"
++#include "src/ic/handler-configuration.h"
+ #include "src/maglev/maglev-assembler-inl.h"
+ #include "src/maglev/maglev-assembler.h"
+ #include "src/maglev/maglev-graph-processor.h"
+@@ -18,6 +19,7 @@
+ #include "src/objects/feedback-cell.h"
+ #include "src/objects/instance-type.h"
+ #include "src/objects/js-function.h"
++#include "src/objects/js-region.h"
+ #include "src/objects/swiss-name-dictionary.h"
+ 
+ namespace v8 {
+@@ -1269,6 +1271,283 @@ void LoadDictionaryField::GenerateCode(MaglevAssembler* masm,
+   __ bind(*done);
+ }
+ 
++
++#if V8_COMPRESS_POINTERS
++
++namespace {
++
++// Objects of ownership regions, as in maglev-ir-arm64.cc. These mirror
++// CodeStubAssembler::GotoIfRegionIdAccessDenied and GotoIfNotStorableInRegion.
++// Region ids and indices are small Smis (31-bit, as pointer compression
++// requires), untagged with 32-bit operations, which zero the upper half for
++// the address arithmetic.
++static_assert(kSmiTagSize == 1 && kSmiShiftSize == 0);
++
++void UntagRegionSmi(MaglevAssembler* masm, Register dst, Register smi) {
++  if (dst != smi) __ movl(dst, smi);
++  __ sarl(dst, Immediate(kSmiTagSize));
++}
++
++// Jumps to `denied` unless this isolate may access the region with the
++// untagged id `region`: it owns the region, or, for a read, the region is
++// frozen and marked readable in this isolate's read table. Uses the scratch
++// register.
++void EmitRegionAccessCheck(MaglevAssembler* masm, Register region,
++                           bool for_write, Label* denied, Register scratch1) {
++  MaglevAssembler::TemporaryRegisterScope temps(masm);
++  Register scratch2 = temps.AcquireScratch();
++  __ Move(scratch1, ExternalReference::region_registry_owners());
++  __ movq(scratch1, Operand(scratch1, region, times_system_pointer_size, 0));
++  __ Move(scratch2, ExternalReference::isolate_address());
++  __ cmpq(scratch1, scratch2);
++  if (for_write) {
++    __ j(not_equal, denied);
++    return;
++  }
++  Label allowed;
++  __ j(equal, &allowed, Label::kNear);
++  static_assert(RegionRegistry::kFrozen <= kMaxInt);
++  __ cmpq(scratch1, Immediate(static_cast<int32_t>(RegionRegistry::kFrozen)));
++  __ j(not_equal, denied);
++  __ Move(scratch1,
++          ExternalReference::region_read_table_address(masm->isolate()));
++  __ movq(scratch1, Operand(scratch1, 0));
++  __ testq(scratch1, scratch1);
++  __ j(zero, denied);
++  __ movzxbl(scratch1, Operand(scratch1, region, times_1, 0));
++  __ testl(scratch1, scratch1);
++  __ j(zero, denied);
++  __ bind(&allowed);
++}
++
++// Jumps to `not_storable` unless `value` can be stored as it is in the
++// region with the tagged id `region`: Smis, read-only objects, common
++// primitives in shared space and objects of the same region. A primitive in
++// memory of regions may be another region's, which the runtime tells.
++void EmitRegionStorableCheck(MaglevAssembler* masm, Register region,
++                             Register value, Label* not_storable,
++                             Register scratch) {
++  Label storable, region_object;
++  __ JumpIfSmi(value, &storable);
++#if CONTIGUOUS_COMPRESSED_READ_ONLY_SPACE_BOOL
++  __ cmpl(value,
++          Immediate(static_cast<int32_t>(kContiguousReadOnlyReservationSize)));
++  __ j(below, &storable);
++#else
++  __ CheckPageFlag(value, scratch, MemoryChunk::READ_ONLY_HEAP, not_zero,
++                   &storable);
++#endif
++  __ LoadMap(scratch, value);
++  __ movzxwl(scratch, FieldOperand(scratch, offsetof(Map, instance_type_)));
++  __ cmpl(scratch, Immediate(JS_REGION_OBJECT_TYPE));
++  __ j(equal, &region_object);
++  __ cmpl(scratch, Immediate(FIRST_JS_RECEIVER_TYPE));
++  __ j(above_equal, not_storable);
++  __ CheckPageFlag(value, scratch, MemoryChunk::IN_WRITABLE_SHARED_SPACE, zero,
++                   not_storable);
++  __ CheckPageFlag(value, scratch, MemoryChunk::REGION_MEMORY, not_zero,
++                   not_storable);
++  __ jmp(&storable);
++  __ bind(&region_object);
++  __ LoadTaggedSignedField(scratch, value, offsetof(JSRegionObject, region_id_));
++  __ cmpl(scratch, region);
++  __ j(not_equal, not_storable);
++  __ bind(&storable);
++}
++
++// A typed array of the region is read as a fresh local view, a function as
++// this isolate's copy of it, by the generic access.
++void JumpIfRegionTypedArray(MaglevAssembler* masm, Register value,
++                            Label* target) {
++  Label not_typed_array;
++  __ JumpIfSmi(value, &not_typed_array);
++  __ JumpIfObjectTypeInRange(value, FIRST_JS_REGION_MATERIALIZED_TYPE,
++                             LAST_JS_REGION_MATERIALIZED_TYPE, target);
++  __ bind(&not_typed_array);
++}
++
++}  // namespace
++
++void LoadRegionField::SetValueLocationConstraints() {
++  UseRegister(ObjectInput());
++  DefineAsRegister(this);
++  set_temporaries_needed(2);
++}
++
++void LoadRegionField::GenerateCode(MaglevAssembler* masm,
++                                   const ProcessingState& state) {
++  Register object = ToRegister(ObjectInput());
++  Register result = ToRegister(this->result());
++  MaglevAssembler::TemporaryRegisterScope temps(masm);
++  Register region = temps.Acquire();
++  Register scratch1 = temps.Acquire();
++  Label slow, done;
++  __ LoadTaggedSignedField(region, object,
++                           offsetof(JSRegionObject, region_id_));
++  UntagRegionSmi(masm, region, region);
++  EmitRegionAccessCheck(masm, region, false, &slow, scratch1);
++  if (index() == static_cast<int>(LoadHandler::kRegionArrayLengthIndex)) {
++    __ LoadTaggedField(scratch1, object,
++                       offsetof(JSRegionObject, array_length_));
++  } else {
++    // The map fixes the keys, so every object with it has this index.
++    __ LoadTaggedField(scratch1, object, offsetof(JSRegionObject, values_));
++    __ LoadTaggedField(scratch1, scratch1,
++                       FixedArray::OffsetOfElementAt(index()));
++    JumpIfRegionTypedArray(masm, scratch1, &slow);
++  }
++  __ Move(result, scratch1);
++  __ jmp(&done);
++  __ bind(&slow);
++  __ LoadRoot(result, RootIndex::kTheHoleValue);
++  __ bind(&done);
++}
++
++void LoadRegionElement::SetValueLocationConstraints() {
++  UseRegister(ObjectInput());
++  UseRegister(KeyInput());
++  DefineAsRegister(this);
++  set_temporaries_needed(3);
++}
++
++void LoadRegionElement::GenerateCode(MaglevAssembler* masm,
++                                     const ProcessingState& state) {
++  Register object = ToRegister(ObjectInput());
++  Register key = ToRegister(KeyInput());
++  Register result = ToRegister(this->result());
++  MaglevAssembler::TemporaryRegisterScope temps(masm);
++  Register index = temps.Acquire();
++  Register region = temps.Acquire();
++  Register scratch1 = temps.Acquire();
++  Label slow, done;
++  __ JumpIfNotSmi(key, &slow);
++  UntagRegionSmi(masm, index, key);
++  __ testl(index, index);
++  __ j(negative, &slow);
++  __ LoadTaggedSignedField(region, object,
++                           offsetof(JSRegionObject, region_id_));
++  UntagRegionSmi(masm, region, region);
++  EmitRegionAccessCheck(masm, region, false, &slow, scratch1);
++  // Only arrays map element indices to values(). A reader of a frozen array
++  // may race with a thaw that replaces values(), so the index is checked
++  // against both the length and the size of the values() it loaded.
++  __ LoadTaggedField(scratch1, object, offsetof(JSRegionObject, keys_));
++  __ JumpIfNotRoot(scratch1, RootIndex::kUndefinedValue, &slow);
++  __ LoadTaggedSignedField(scratch1, object,
++                           offsetof(JSRegionObject, array_length_));
++  UntagRegionSmi(masm, scratch1, scratch1);
++  __ cmpl(index, scratch1);
++  __ j(above_equal, &slow);
++  __ LoadTaggedField(region, object, offsetof(JSRegionObject, values_));
++  __ cmpl(index, FieldOperand(region, FixedArrayBase::kLengthOffset));
++  __ j(above_equal, &slow);
++  __ LoadFixedArrayElement(scratch1, region, index);
++  JumpIfRegionTypedArray(masm, scratch1, &slow);
++  __ Move(result, scratch1);
++  __ jmp(&done);
++  __ bind(&slow);
++  __ LoadRoot(result, RootIndex::kTheHoleValue);
++  __ bind(&done);
++}
++
++void StoreRegionField::SetValueLocationConstraints() {
++  UseRegister(ObjectInput());
++  UseRegister(ValueInput());
++  DefineAsRegister(this);
++  RequireSpecificTemporary(WriteBarrierDescriptor::ObjectRegister());
++  RequireSpecificTemporary(WriteBarrierDescriptor::SlotAddressRegister());
++  set_temporaries_needed(3);
++}
++
++void StoreRegionField::GenerateCode(MaglevAssembler* masm,
++                                    const ProcessingState& state) {
++  Register object = ToRegister(ObjectInput());
++  Register value = ToRegister(ValueInput());
++  Register result = ToRegister(this->result());
++  MaglevAssembler::TemporaryRegisterScope temps(masm);
++  Register region = temps.Acquire();
++  Register scratch1 = temps.Acquire();
++  Register scratch2 = temps.Acquire();
++  Label slow, done;
++  __ LoadTaggedSignedField(region, object,
++                           offsetof(JSRegionObject, region_id_));
++  UntagRegionSmi(masm, scratch1, region);
++  EmitRegionAccessCheck(masm, scratch1, true, &slow, scratch2);
++  EmitRegionStorableCheck(masm, region, value, &slow, scratch1);
++  __ LoadTaggedField(scratch1, object, offsetof(JSRegionObject, values_));
++  __ Move(scratch2, index());
++  __ StoreFixedArrayElementWithWriteBarrier(scratch1, scratch2, value,
++                                            register_snapshot());
++  __ LoadRoot(result, RootIndex::kTrueValue);
++  __ jmp(&done);
++  __ bind(&slow);
++  __ LoadRoot(result, RootIndex::kFalseValue);
++  __ bind(&done);
++}
++
++void StoreRegionElement::SetValueLocationConstraints() {
++  UseRegister(ObjectInput());
++  UseRegister(KeyInput());
++  UseRegister(ValueInput());
++  DefineAsRegister(this);
++  RequireSpecificTemporary(WriteBarrierDescriptor::ObjectRegister());
++  RequireSpecificTemporary(WriteBarrierDescriptor::SlotAddressRegister());
++  set_temporaries_needed(3);
++}
++
++void StoreRegionElement::GenerateCode(MaglevAssembler* masm,
++                                      const ProcessingState& state) {
++  Register object = ToRegister(ObjectInput());
++  Register key = ToRegister(KeyInput());
++  Register value = ToRegister(ValueInput());
++  Register result = ToRegister(this->result());
++  MaglevAssembler::TemporaryRegisterScope temps(masm);
++  Register index = temps.Acquire();
++  Register region = temps.Acquire();
++  Register scratch1 = temps.Acquire();
++  Label slow, done, no_append;
++  __ JumpIfNotSmi(key, &slow);
++  __ LoadTaggedSignedField(region, object,
++                           offsetof(JSRegionObject, region_id_));
++  // x64 has one scratch register, which the access check takes: the
++  // untagged id goes in `index` until the key is untagged.
++  UntagRegionSmi(masm, index, region);
++  EmitRegionAccessCheck(masm, index, true, &slow, scratch1);
++  UntagRegionSmi(masm, index, key);
++  __ testl(index, index);
++  __ j(negative, &slow);
++  EmitRegionStorableCheck(masm, region, value, &slow, scratch1);
++  __ LoadTaggedField(scratch1, object, offsetof(JSRegionObject, keys_));
++  __ JumpIfNotRoot(scratch1, RootIndex::kUndefinedValue, &slow);
++  // In bounds, or one past the end while values() has room, as push() does.
++  __ LoadTaggedSignedField(scratch1, object,
++                           offsetof(JSRegionObject, array_length_));
++  UntagRegionSmi(masm, scratch1, scratch1);
++  __ cmpl(index, scratch1);
++  __ j(above, &slow);
++  __ LoadTaggedField(region, object, offsetof(JSRegionObject, values_));
++  __ cmpl(index, FieldOperand(region, FixedArrayBase::kLengthOffset));
++  __ j(above_equal, &slow);
++  // The new length goes in first: the write barrier below may clobber
++  // registers that are dead after this node, such as `object`.
++  __ cmpl(index, scratch1);
++  __ j(not_equal, &no_append);
++  __ leal(scratch1, Operand(index, 1));
++  __ shll(scratch1, Immediate(kSmiTagSize));
++  __ StoreTaggedSignedField(object, offsetof(JSRegionObject, array_length_),
++                            scratch1);
++  __ bind(&no_append);
++  __ StoreFixedArrayElementWithWriteBarrier(region, index, value,
++                                            register_snapshot());
++  __ LoadRoot(result, RootIndex::kTrueValue);
++  __ jmp(&done);
++  __ bind(&slow);
++  __ LoadRoot(result, RootIndex::kFalseValue);
++  __ bind(&done);
++}
++
++#endif  // V8_COMPRESS_POINTERS
++
+ }  // namespace maglev
+ }  // namespace internal
+ }  // namespace v8
 diff --git a/src/objects/all-objects.h b/src/objects/all-objects.h
 index 5a0a666c..473044be 100644
 --- a/src/objects/all-objects.h

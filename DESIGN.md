@@ -278,7 +278,7 @@ diverged from it, this section says so.
   to a clone of the original JS node, which keeps its feedback and is not specialized again (an ordinary
   IC call, without deoptimization; it throws the exceptions). Sites that see both region Maps and
   ordinary Maps are split by `CompareMaps`: ordinary ones go to the clone under `CheckMaps`, which is specialized
-  as usual. In Maglev these are nodes with the same names, with code generation only on arm64 (on other
+  as usual. In Maglev these are nodes with the same names, with code generation on arm64 and x64 (on other
   targets the IC call remains; Turbolev hands such functions to Turbofan). The
   `--no-inline-region-access` flag turns inlining off, and `tests/jit.js` compares the output with `--jitless`.
 - **Owner check once per loop.** An isolate's access to a region is changed only by the
@@ -470,7 +470,6 @@ All stages are done; what went into each release is in `CHANGELOG.md`.
   deoptimizes instead of making the fallback IC call, a separate
   `CheckRegionAccess` check stays valid until the first call, and `RedundancyElimination` removes
   repeated ones. The deoptimization marks the `JumpLoop` hints so as not to loop.
-- **Maglev fast path on targets other than arm64.**
 
 ## Criteria
 

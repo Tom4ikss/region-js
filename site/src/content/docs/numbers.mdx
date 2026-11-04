@@ -88,7 +88,7 @@ Individual accesses in Turbofan, in a loop of 10 million steps, nanoseconds per 
 | Indexed read | 1.5 ns | 2.5 ns | 5.7 ns |
 | Indexed write | 1.7 ns | 2.2 ns | 5.4 ns |
 
-Maglev only (`--no-turbofan`), region, inline cache call → inlined access: field read 3.6 → 2.2 ns, field write 3.7 → 2.8 ns, indexed read 6.9 → 4.8 ns, indexed write 6.7 → 4.5 ns. The Maglev fast path exists only on arm64 for now.
+Maglev only (`--no-turbofan`), region, inline cache call → inlined access: field read 3.6 → 2.2 ns, field write 3.7 → 2.8 ns, indexed read 6.9 → 4.8 ns, indexed write 6.7 → 4.5 ns. The Maglev fast path exists on arm64 and x64.
 
 Typed arrays in a region do not have this lag. When a field is read, the thread gets a regular typed array over the region's memory, and summing a million numbers over it takes the same 0.68 ms as over a plain `Float64Array`. Over an array of numbers in a region it takes 1.4 ms (measured in [practice 9](/region-js/practices/#typed)).
 
