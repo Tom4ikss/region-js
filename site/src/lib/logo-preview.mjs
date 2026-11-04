@@ -1,5 +1,5 @@
 // Temporary: logo candidates side by side on the real landing page. After the build, the landing
-// page is copied to /0/ … /3/ with the header logo and the favicon swapped for one candidate
+// page is copied to /0/ … /5/ with the header logo and the favicon swapped for one candidate
 // (files in public/logo-preview/). The root page keeps the current logo. The copies are noindex.
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
@@ -9,6 +9,8 @@ const VARIANTS = [
 	{ name: '1', dark: '1-dark.svg', light: '1-light.svg', favicon: '1-dark.svg' },
 	{ name: '2', dark: '2-dark.svg', light: '2-light.svg', favicon: '2-dark.svg' },
 	{ name: '3', dark: '3-dark.svg', light: '3-light.svg', favicon: '3-favicon.svg' },
+	{ name: '4', dark: '4.svg', light: '4.svg', favicon: '4-favicon.svg' },
+	{ name: '5', dark: '5-dark.svg', light: '5-light.svg', favicon: '5-favicon.svg' },
 ];
 
 const LOGO = /<img class="(astro-[\w-]+)" alt src="[^"]*\/_astro\/logo\.[\w-]+\.svg" width="32" height="32">/;
