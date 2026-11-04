@@ -1,0 +1,58 @@
+name: sanitizers
+
+# Builds d8 with the regions patch under ThreadSanitizer or AddressSanitizer on
+# Linux x64 and runs the tests once. Sanitizer reports show up in the test
+# summary; full outputs are kept as an artifact even if the job runs out of time.
+on:
+  workflow_dispatch:
+    inputs:
+      sanitizer:
+        description: Sanitizer
+        type: choice
+        options: [tsan, asan]
+        default: tsan
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sanitizers-${{ inputs.sanitizer }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 355
+    env:
+      SAN: ${{ inputs.sanitizer }}
+      # Leak checks report V8's intentional leaks at exit; races and memory errors are what we want.
+      ASAN_OPTIONS: detect_leaks=0
+      TSAN_OPTIONS: halt_on_error=0 second_deadlock_stack=1
+    steps:
+      - uses: actions/checkout@v4
+
+      # A V8 checkout and an instrumented build need more than the runner's free space.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          df -h /
+
+      - name: Fetch V8, apply the patch, build d8
+        timeout-minutes: 240
+        run: scripts/setup.sh "$SAN" "is_$SAN=true"
+
+      # Stops before the job limit so the logs below are still uploaded.
+      - name: Tests
+        timeout-minutes: 100
+        run: |
+          TIMEOUT=900 LOGS=test-logs scripts/run-tests.sh "v8-src/v8/out/$SAN/d8" | tee test-summary.txt
+          echo "::notice::$(tail -1 test-summary.txt)"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ${{ inputs.sanitizer }}-test-logs
+          path: |
+            test-summary.txt
+            test-logs/
+          if-no-files-found: ignore
