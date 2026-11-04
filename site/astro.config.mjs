@@ -37,7 +37,7 @@ export default defineConfig({
 		starlight({
 			title: { en: 'Ownership regions in V8', ru: 'Регионы владения в V8' },
 			description: 'region-js: a research fork of V8 with ownership regions. Parallel JavaScript without copies.',
-			logo: { src: './src/assets/logo.svg', alt: '' },
+			logo: { dark: './src/assets/logo-dark.svg', light: './src/assets/logo-light.svg', alt: '' },
 			favicon: '/favicon.svg',
 			defaultLocale: 'root',
 			locales: {
