@@ -8,6 +8,14 @@ import Default from '@astrojs/starlight/components/Head.astro';
 <Default />
 <script is:inline>
 	try {
+		// Logo accent for this page view: the inner lane of the R in one of three region colours.
+		var lanes = ['sun', 'pink', 'mint'];
+		var lane = lanes[Math.floor(Math.random() * lanes.length)];
+		document.documentElement.dataset.logo = lane;
+		var icon = document.querySelector('link[rel~="icon"][href$="/favicon.svg"]');
+		if (icon && lane !== 'sun') icon.href = icon.href.replace(/favicon\.svg$/, 'favicon-' + lane + '.svg');
+	} catch (e) {}
+	try {
 		if (!matchMedia('(prefers-reduced-motion: reduce)').matches && 'IntersectionObserver' in window) {
 			document.documentElement.classList.add('rj-motion');
 		}

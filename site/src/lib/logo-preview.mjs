@@ -9,9 +9,8 @@ const VARIANTS = [
 	{ name: '2', dark: '2-dark.svg', light: '2-light.svg', favicon: '2-favicon.svg' },
 ];
 
-// Starlight renders the dark and the light logo as two <img>s; only their src changes.
-const LOGO_DARK = /(<img class="light:sl-hidden[^"]*" alt src=")[^"]*\/_astro\/logo-dark\.[\w-]+\.svg"/;
-const LOGO_LIGHT = /(<img class="dark:sl-hidden[^"]*" alt src=")[^"]*\/_astro\/logo-light\.[\w-]+\.svg"/;
+// The header draws the logo inline (SiteTitle.astro); a preview swaps it for the candidate's files.
+const LOGO = /<svg class="rj-logo[^"]*"[^>]*>[\s\S]*?<\/svg>/;
 const FAVICON = /<link rel="shortcut icon" href="[^"]*" type="image\/svg\+xml"\/?>/;
 
 export default function logoPreview(base) {
@@ -21,15 +20,18 @@ export default function logoPreview(base) {
 			'astro:build:done': async ({ dir, logger }) => {
 				const root = fileURLToPath(dir);
 				const index = await readFile(`${root}index.html`, 'utf8');
-				if (!LOGO_DARK.test(index) || !LOGO_LIGHT.test(index) || !FAVICON.test(index)) {
+				if (!LOGO.test(index) || !FAVICON.test(index)) {
 					logger.warn('logo or favicon markup not found; preview pages not written');
 					return;
 				}
 				for (const v of VARIANTS) {
 					const src = (file) => `${base}/logo-preview/${file}`;
 					const page = index
-						.replace(LOGO_DARK, (_, head) => `${head}${src(v.dark)}"`)
-						.replace(LOGO_LIGHT, (_, head) => `${head}${src(v.light)}"`)
+						.replace(
+							LOGO,
+							`<img class="light:sl-hidden" alt src="${src(v.dark)}" width="32" height="32">` +
+								`<img class="dark:sl-hidden" alt src="${src(v.light)}" width="32" height="32">`,
+						)
 						.replace(FAVICON, `<link rel="icon" href="${src(v.favicon)}" type="image/svg+xml">`)
 						.replace('<head>', '<head><meta name="robots" content="noindex">');
 					await mkdir(`${root}${v.name}`, { recursive: true });

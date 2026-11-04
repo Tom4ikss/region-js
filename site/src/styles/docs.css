@@ -32,8 +32,33 @@ header.header {
 	letter-spacing: -0.01em;
 	color: var(--sl-color-white);
 }
-.site-title img {
+.site-title img,
+.site-title .rj-logo {
+	flex: none;
+	width: 2rem;
 	height: 2rem;
+}
+
+/* The logo: a violet R (the region) and an inner lane in one of three accents (the object it owns). */
+:root {
+	--rj-logo-region: #a184ff;
+	--rj-logo-lane: #ffd23f;
+}
+:root[data-theme='light'] {
+	--rj-logo-region: #7b4dff;
+	--rj-logo-lane: #f0a500;
+}
+:root[data-logo='pink'] {
+	--rj-logo-lane: var(--rj-pink);
+}
+:root[data-logo='mint'] {
+	--rj-logo-lane: var(--rj-mint);
+}
+.rj-logo-region {
+	fill: var(--rj-logo-region);
+}
+.rj-logo-lane {
+	fill: var(--rj-logo-lane);
 }
 
 /* ---------- Sidebar: numbered chapters, a pill for the current one ---------- */
