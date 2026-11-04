@@ -8,8 +8,9 @@
 #   scripts/test-variants.sh path/to/d8 [variant ...]
 #   TESTS="local-ref.js region-fn.js" scripts/test-variants.sh path/to/d8 jitless
 #
-# Without variants, runs all of them; that takes hours on a release build
-# with DCHECKs. Variants: jitless no-lfa sparkplug no-maglev stress-maglev
+# A test lists variants it is not meant for in a "// skip-variants: ..." line,
+# with the reason next to it. Without variants, runs all of them; that takes
+# hours on a release build with DCHECKs. Variants: jitless no-lfa sparkplug no-maglev stress-maglev
 # minor-ms stress-gc gc-interval single-threaded-gc concurrent-alloc
 # concurrent-inlining.
 set -uo pipefail
@@ -58,7 +59,7 @@ run() {
 
 normalize() {
   grep -vE '[0-9] ?(ms|мс|µs|us|ns|мкс)\b|took|elapsed|time' |
-    sed -E 's/region [0-9]+/region N/g; s/isolate [0-9]+/isolate N/g'
+    sed -E 's/region [0-9]+/region N/g; s/isolate [0-9]+/isolate N/g; s/markings [0-9]+ pages [0-9]+/markings N pages N/g'
 }
 
 BAD='Flag processing error|^FAIL|TIMEOUT|unhandled|Check failed|Fatal|Debug check|Received signal|Segmentation|AddressSanitizer|ThreadSanitizer'
@@ -66,7 +67,8 @@ BAD='Flag processing error|^FAIL|TIMEOUT|unhandled|Check failed|Fatal|Debug chec
 cd "$ROOT/tests"
 variants=("$@")
 failures=()
-for i in "${!variants[@]}"; do failures[$i]=0; done
+skipped=()
+for i in "${!variants[@]}"; do failures[$i]=0; skipped[$i]=0; done
 total=0
 # shellcheck disable=SC2086
 for test in ${TESTS:-*.js}; do
@@ -75,6 +77,7 @@ for test in ${TESTS:-*.js}; do
   esac
   flags=$(head -1 "$test" | sed -n 's|^// d8 \(.*\) [^ ]*\.js.*$|\1|p')
   [ -z "$flags" ] && flags="--harmony-regions"
+  skip=" $(sed -n 's|^// skip-variants: ||p' "$test" | head -1) "
   # Builds without DCHECKs have no --verify-heap.
   # shellcheck disable=SC2086
   if run $flags -e 0 | grep -q "Flag processing error"; then
@@ -85,6 +88,10 @@ for test in ${TESTS:-*.js}; do
   total=$((total + 1))
   for i in "${!variants[@]}"; do
     variant=${variants[$i]}
+    if [[ "$skip" == *" $variant "* ]]; then
+      skipped[$i]=$((skipped[$i] + 1))
+      continue
+    fi
     # shellcheck disable=SC2086
     actual=$(run $flags $(variant_flags "$variant") "$test" | normalize)
     bad=$(echo "$actual" | grep -E "$BAD" | head -3)
@@ -102,5 +109,6 @@ done
 
 echo
 for i in "${!variants[@]}"; do
-  echo "${variants[$i]}: ${failures[$i]} of $total differ"
+  ran=$((total - skipped[$i]))
+  echo "${variants[$i]}: ${failures[$i]} of $ran differ$([ "${skipped[$i]}" -gt 0 ] && echo ", ${skipped[$i]} skipped")"
 done

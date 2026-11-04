@@ -86,7 +86,15 @@ print('using with a moved region: no error');
     while (Date.now() - t < 50) {}
     return data.n;
   });
-  expectError('free while a task has it', () => region.free());
+  // Depending on timing the region is still on its way to the task or
+  // already the task's; either way it cannot be freed.
+  try {
+    region.free();
+    print('free while a task has it: NO ERROR');
+  } catch (e) {
+    const refused = /is being moved|is not owned by this isolate/.test(e.message);
+    print('free while a task has it:', refused ? 'refused' : e.message);
+  }
   print('task result:', await task);
 }
 

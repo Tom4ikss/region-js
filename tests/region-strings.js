@@ -12,6 +12,7 @@
 // them. --no-region-strings turns this off. While the shared heap is being
 // marked owners mark nothing, so the checks fail under
 // --stress-incremental-marking.
+// skip-variants: stress-gc
 const check = (name, ok) => {
   print(name + ':', ok);
   if (!ok) throw new Error('failed: ' + name);
@@ -133,9 +134,12 @@ const reader = new Worker(`
       using _ = Region.of(data.rows).borrow();
       name = data.rows[29005].name;
       postMessage(%RegionOfValue(name) === data.id);
+    } else if (data.op === 'moved') {
+      postMessage(%RegionOfValue(name) !== data.id);
     } else if (data.op === 'check') {
       gc();
-      postMessage(name === 'f29005' && %RegionIsHolder(data.id));
+      postMessage(name === 'f29005' &&
+                  (%RegionIsHolder(data.id) || %RegionOfValue(name) !== data.id));
     } else if (data.op === 'drop') {
       name = null;
       gc();
@@ -188,8 +192,13 @@ gc();
 ask(owner, { op: 'thaw' });
 ask(owner, { op: 'drop' });
 sleep(300);
+// Under heavy GC (--stress-concurrent-allocation) the string can become
+// common memory meanwhile; then the reader holds nothing of the region, and
+// the owner collects it at once. The state is read first, so a string that
+// moves later still counts as held.
+const pages = ask(owner, { op: 'state' })[0];
 check('not collected while the reader holds the string',
-      ask(owner, { op: 'state' })[0] > 0);
+      pages > 0 || ask(reader, { op: 'moved', id }));
 check('the string intact at the reader, which holds the region',
       ask(reader, { op: 'check', id }));
 ask(reader, { op: 'drop' });

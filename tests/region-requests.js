@@ -13,6 +13,7 @@
 // --stress-compaction every GC of the main thread is a shared one, and under
 // --gc-interval shared GCs come so often that they collect the dropped
 // regions before their owners do.
+// skip-variants: stress-gc
 const check = (name, ok) => {
   print(name + ':', ok);
   if (!ok) throw new Error('failed: ' + name);

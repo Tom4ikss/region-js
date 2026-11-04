@@ -86,7 +86,7 @@ spawn.poolSize = 1;
   await outcome(task);
   check('Promise.all and generator', [...log].sort().join(', ') ===
         'all: AbortError, for await: AbortError, generator finally, tick 1',
-        log.join(', '));
+        [...log].sort().join(', '));
 }
 
 // Code that a finished task left waiting is not kept once the task ends.

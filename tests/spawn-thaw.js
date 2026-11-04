@@ -168,17 +168,18 @@ const tryThaw = (region) => {
   const failed = await outcome((async () => spawn((cfg, f) => f, cfg, () => {}))());
   check('spawn() failed', failed.startsWith('TypeError'), failed);
   check('no borrow left', region.readers === 0, String(region.readers));
-  spawn.poolSize = 1;
-  const blocker = spawn(() => {
+  // The workers that earlier tasks started stay, whatever spawn.poolSize is
+  // now: a blocker for each keeps the task in the queue.
+  const blockers = Array.from({ length: spawn.poolSize }, () => spawn(() => {
     const end = performance.now() + 30;
     while (performance.now() < end);
-  });
+  }));
   const queued = spawn((cfg) => 1, cfg);
   queued.abort();
-  check('queued task aborted', (await outcome(queued)).startsWith('AbortError'));
+  const aborted = await outcome(queued);
+  check('queued task aborted', aborted.startsWith('AbortError'), aborted);
   check('its borrow given back', region.readers === 0, String(region.readers));
-  await blocker;
-  spawn.poolSize = 4;
+  await Promise.all(blockers);
   region.thaw();
 }
 

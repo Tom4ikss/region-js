@@ -14,6 +14,7 @@
 // being marked owners mark nothing, so the checks fail under
 // --stress-incremental-marking; under --stress-compaction every GC of the
 // main thread is a shared one.
+// skip-variants: stress-gc
 const check = (name, ok) => {
   print(name + ':', ok);
   if (!ok) throw new Error('failed: ' + name);

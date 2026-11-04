@@ -3030,10 +3030,10 @@ index 8aab5f56..0bc22f26 100644
        CheckValueInputIs(node, 1, Type::Any());
 diff --git a/src/d8/d8-channel.cc b/src/d8/d8-channel.cc
 new file mode 100644
-index 00000000..5524c08f
+index 00000000..e3f8a687
 --- /dev/null
 +++ b/src/d8/d8-channel.cc
-@@ -0,0 +1,1867 @@
+@@ -0,0 +1,1880 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -4722,7 +4722,8 @@ index 00000000..5524c08f
 +  size_t asleep = 0;
 +  // Timers that have not fired.
 +  int timers = 0;
-+  // Changes whenever a thread sleeps or wakes.
++  // Changes whenever a thread sleeps or wakes, except for quiet wakes of an
++  // event loop (LoopObserver).
 +  uint64_t epoch = 0;
 +  bool check_posted = false;
 +};
@@ -4808,11 +4809,13 @@ index 00000000..5524c08f
 +  FailDeadlockedWaits(epoch_);
 +}
 +
-+void SetAsleepLocked(Sleeper* sleeper, bool Sleeper::* flag, bool value) {
++// `quiet`: the change cannot wake anyone, so it keeps the epoch.
++void SetAsleepLocked(Sleeper* sleeper, bool Sleeper::* flag, bool value,
++                     bool quiet = false) {
 +  DeadlockState& s = Deadlock();
 +  bool was = sleeper->asleep();
 +  sleeper->*flag = value;
-+  s.epoch++;
++  if (!quiet) s.epoch++;
 +  if (was == sleeper->asleep()) return;
 +  if (was) {
 +    s.asleep--;
@@ -4825,16 +4828,26 @@ index 00000000..5524c08f
 +class LoopObserver
 +    : public platform::DefaultForegroundTaskRunner::SleepObserver {
 + public:
-+  void* Sleeping() override {
++  // A loop woken only by its own tasks or by the engine's threads, such as a
++  // GC that posts its next step, wakes and sleeps again without a new epoch:
++  // what it ran could wake another thread only by a channel, lock or task
++  // operation, which changes the epoch itself, or by posting to another
++  // loop, which makes that loop's wake count. Otherwise a GC that keeps
++  // posting tasks would hide a deadlock forever.
++  void* Sleeping(bool quiet) override {
 +    Sleeper* sleeper = current_sleeper;
 +    if (!sleeper) return nullptr;
 +    base::MutexGuard guard(deadlock_mutex.Pointer());
-+    SetAsleepLocked(sleeper, &Sleeper::in_loop, true);
++    SetAsleepLocked(sleeper, &Sleeper::in_loop, true, quiet);
 +    return sleeper;
 +  }
-+  void Woken(void* sleeper) override {
++  void Woken(void* sleeper, bool quiet) override {
 +    base::MutexGuard guard(deadlock_mutex.Pointer());
-+    SetAsleepLocked(static_cast<Sleeper*>(sleeper), &Sleeper::in_loop, false);
++    SetAsleepLocked(static_cast<Sleeper*>(sleeper), &Sleeper::in_loop, false,
++                    quiet);
++  }
++  bool PostedByOther(void* sleeper) override {
++    return current_sleeper != nullptr && current_sleeper != sleeper;
 +  }
 +};
 +
@@ -12111,7 +12124,7 @@ index cb1a6166..0a54d999 100644
    Result stack_push = StackPush(object, key);
    if (stack_push != SUCCESS) return stack_push;
 diff --git a/src/libplatform/default-foreground-task-runner.cc b/src/libplatform/default-foreground-task-runner.cc
-index 2ed5a034..9ace7e67 100644
+index 2ed5a034..7cada293 100644
 --- a/src/libplatform/default-foreground-task-runner.cc
 +++ b/src/libplatform/default-foreground-task-runner.cc
 @@ -4,8 +4,11 @@
@@ -12126,16 +12139,17 @@ index 2ed5a034..9ace7e67 100644
  
  namespace v8 {
  namespace platform {
-@@ -52,6 +55,8 @@ std::unique_ptr<Task> DefaultForegroundTaskRunner::PostTaskLocked(
+@@ -52,6 +55,9 @@ std::unique_ptr<Task> DefaultForegroundTaskRunner::PostTaskLocked(
    mutex_.AssertHeld();
    if (terminated_) return task;
    task_queue_.push_back(std::make_pair(nestability, std::move(task)));
 +  posted_.fetch_add(1, std::memory_order_release);
++  NotePostLocked();
 +  WakeSleeperLocked();
    event_loop_control_.NotifyOne();
    return {};
  }
-@@ -74,6 +79,7 @@ void DefaultForegroundTaskRunner::PostDelayedTaskLocked(
+@@ -74,6 +80,7 @@ void DefaultForegroundTaskRunner::PostDelayedTaskLocked(
    if (terminated_) return;
    double deadline = MonotonicallyIncreasingTime() + delay_in_seconds;
    delayed_task_queue_.push({deadline, nestability, std::move(task)});
@@ -12143,7 +12157,7 @@ index 2ed5a034..9ace7e67 100644
    event_loop_control_.NotifyOne();
  }
  
-@@ -196,8 +202,66 @@ std::unique_ptr<IdleTask> DefaultForegroundTaskRunner::PopTaskFromIdleQueue() {
+@@ -196,8 +203,78 @@ std::unique_ptr<IdleTask> DefaultForegroundTaskRunner::PopTaskFromIdleQueue() {
    return task;
  }
  
@@ -12163,10 +12177,20 @@ index 2ed5a034..9ace7e67 100644
 +  sleep_observer.store(observer, std::memory_order_release);
 +}
 +
++void DefaultForegroundTaskRunner::NotePostLocked() {
++  mutex_.AssertHeld();
++  if (posted_by_other_) return;
++  SleepObserver* observer = sleep_observer.load(std::memory_order_acquire);
++  if (observer && observer->PostedByOther(last_sleeper_)) {
++    posted_by_other_ = true;
++  }
++}
++
 +void DefaultForegroundTaskRunner::WakeSleeperLocked() {
 +  mutex_.AssertHeld();
 +  if (!sleeper_) return;
-+  sleep_observer.load(std::memory_order_acquire)->Woken(sleeper_);
++  sleep_observer.load(std::memory_order_acquire)
++      ->Woken(sleeper_, !posted_by_other_);
 +  sleeper_ = nullptr;
 +}
 +
@@ -12205,12 +12229,14 @@ index 2ed5a034..9ace7e67 100644
 +  // observer sees a wait for one as sleep too.
 +  if (SleepObserver* observer =
 +          sleep_observer.load(std::memory_order_acquire)) {
-+    sleeper_ = observer->Sleeping();
++    sleeper_ = observer->Sleeping(!posted_by_other_);
++    if (sleeper_) last_sleeper_ = sleeper_;
++    posted_by_other_ = false;
 +  }
    if (!delayed_task_queue_.empty()) {
      double now = MonotonicallyIncreasingTime();
      const DelayedEntry& entry = delayed_task_queue_.top();
-@@ -212,6 +276,7 @@ void DefaultForegroundTaskRunner::WaitForTaskLocked() {
+@@ -212,6 +289,7 @@ void DefaultForegroundTaskRunner::WaitForTaskLocked() {
    } else {
      event_loop_control_.Wait(&mutex_);
    }
@@ -12219,7 +12245,7 @@ index 2ed5a034..9ace7e67 100644
  
  }  // namespace platform
 diff --git a/src/libplatform/default-foreground-task-runner.h b/src/libplatform/default-foreground-task-runner.h
-index 6bfaf56f..17d8cee8 100644
+index 6bfaf56f..a2e81225 100644
 --- a/src/libplatform/default-foreground-task-runner.h
 +++ b/src/libplatform/default-foreground-task-runner.h
 @@ -5,6 +5,7 @@
@@ -12230,7 +12256,7 @@ index 6bfaf56f..17d8cee8 100644
  #include <memory>
  #include <queue>
  
-@@ -37,6 +38,22 @@ class V8_PLATFORM_EXPORT DefaultForegroundTaskRunner
+@@ -37,6 +38,28 @@ class V8_PLATFORM_EXPORT DefaultForegroundTaskRunner
  
    void Terminate();
  
@@ -12240,29 +12266,42 @@ index 6bfaf56f..17d8cee8 100644
 +
 +  // Sees event loops sleep until another thread posts a task. Sleeping() runs
 +  // on the waiting thread before a wait without a deadline; what it returns
-+  // is passed to Woken() when a task is posted or the wait ends. Both run with
-+  // the task runner's lock held and must not post tasks to task runners.
++  // is passed to Woken() when a task is posted or the wait ends.
++  // PostedByOther() runs on the posting thread for every task posted: whether
++  // the task comes from a thread the observer tells apart from the one
++  // `sleeper` (the last value Sleeping() returned, or nullptr) stands for.
++  // `quiet` tells Woken() and Sleeping() that no such task was posted since
++  // the thread last woke. All three run with the task runner's lock held and
++  // must not post tasks to task runners.
 +  class SleepObserver {
 +   public:
 +    virtual ~SleepObserver() = default;
-+    virtual void* Sleeping() = 0;
-+    virtual void Woken(void* sleeper) = 0;
++    virtual void* Sleeping(bool quiet) = 0;
++    virtual void Woken(void* sleeper, bool quiet) = 0;
++    virtual bool PostedByOther(void* sleeper) = 0;
 +  };
 +  static void SetSleepObserver(SleepObserver* observer);
 +
    std::unique_ptr<Task> PopTaskFromQueue(MessageLoopBehavior wait_for_work);
  
    std::unique_ptr<IdleTask> PopTaskFromIdleQueue();
-@@ -91,9 +108,17 @@ class V8_PLATFORM_EXPORT DefaultForegroundTaskRunner
+@@ -91,9 +114,24 @@ class V8_PLATFORM_EXPORT DefaultForegroundTaskRunner
    // terminated.
    std::vector<std::unique_ptr<Task>> MoveExpiredDelayedTasksLocked();
  
++  // Asks the sleep observer whose task was just posted.
++  void NotePostLocked();
 +  // Tells the sleep observer that the thread waiting for a task wakes up.
 +  void WakeSleeperLocked();
 +
    bool terminated_ = false;
 +  // What the sleep observer returned for the thread waiting now, if any.
 +  void* sleeper_ = nullptr;
++  // What it returned last time, kept while the thread is awake.
++  void* last_sleeper_ = nullptr;
++  // A task the observer counts as another thread's was posted since the
++  // thread last woke.
++  bool posted_by_other_ = false;
    base::Mutex mutex_;
    base::ConditionVariable event_loop_control_;
 +  // Counts posted tasks, so that a spinning thread sees new work without

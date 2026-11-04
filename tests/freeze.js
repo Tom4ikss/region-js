@@ -67,5 +67,13 @@ region.thaw();
 
 const w = workers[2];
 w.postMessage({ cmd: 'noop' }, [region]);
-expectError('access while in transit', () => config.name);
+// Depending on timing the region is still on its way or already the
+// worker's; either way this thread cannot read it.
+try {
+  print('access while in transit: NO ERROR ->', config.name);
+} catch (e) {
+  const refused = /has not been received yet|belongs to another thread/.test(e.message);
+  print('access while in transit:', refused ? 'refused' : e.message,
+        e.message.match(/\(sent at [^)]*\)/)?.[0] ?? '');
+}
 for (const worker of workers) worker.terminate();
