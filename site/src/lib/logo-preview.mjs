@@ -1,5 +1,5 @@
 // Temporary: logo candidates side by side on the real landing page. After the build, the landing
-// page is copied to /0/ … /5/ with the header logo and the favicon swapped for one candidate
+// page is copied to /0/ … /7/ with the header logo and the favicon swapped for one candidate
 // (files in public/logo-preview/). The root page keeps the current logo. The copies are noindex.
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
@@ -11,6 +11,8 @@ const VARIANTS = [
 	{ name: '3', dark: '3-dark.svg', light: '3-light.svg', favicon: '3-favicon.svg' },
 	{ name: '4', dark: '4.svg', light: '4.svg', favicon: '4-favicon.svg' },
 	{ name: '5', dark: '5-dark.svg', light: '5-light.svg', favicon: '5-favicon.svg' },
+	{ name: '6', dark: '6-dark.svg', light: '6-light.svg', favicon: '6-favicon.svg' },
+	{ name: '7', dark: '7-dark.svg', light: '7-light.svg', favicon: '7-favicon.svg' },
 ];
 
 // Starlight renders the dark and the light logo as two <img>s; only their src changes.
