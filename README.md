@@ -33,7 +33,7 @@ print('payload items:', await worker); // 3
 
 Работает только в тестовой оболочке движка `d8`, в браузер и Node это не попадает.
 
-**Документация:** https://tom4ikss.github.io/region-js/ru/ (английская версия: https://tom4ikss.github.io/region-js/) · **Релиз:** [v0.4.0-alpha](https://github.com/Tom4ikss/region-js/releases/tag/v0.4.0-alpha)
+**Документация:** https://tom4ikss.github.io/region-js/ru/ (английская версия: https://tom4ikss.github.io/region-js/) · **Релиз:** [v0.4.1-alpha](https://github.com/Tom4ikss/region-js/releases/tag/v0.4.1-alpha)
 
 ## Против воркеров и tokio
 
@@ -62,7 +62,9 @@ print('payload items:', await worker); // 3
 
 ## Как запустить
 
-Нужны macOS или Linux (подойдёт и WSL2), git, Python 3, около 15 ГБ места и терпение: V8 собирается долго.
+На Linux x64 (и в WSL2) собирать не обязательно: `scripts/get-d8.sh` скачивает готовый d8 из последнего релиза и ставит его в `~/.local/bin/d8` и `v8-src/v8/out/release/d8`. Тот же d8 есть в образе `docker run --rm -it ghcr.io/tom4ikss/region-js`.
+
+Собрать самому: нужны macOS или Linux (подойдёт и WSL2), git, Python 3, около 15 ГБ места и терпение: V8 собирается долго.
 
 ```sh
 scripts/setup.sh                     # depot_tools, V8 на нужном коммите, патч, сборка d8

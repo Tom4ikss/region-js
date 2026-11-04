@@ -13292,10 +13292,10 @@ index 00000000..5cf0a91e
 +#endif  // V8_OBJECTS_JS_REGION_INL_H_
 diff --git a/src/objects/js-region.cc b/src/objects/js-region.cc
 new file mode 100644
-index 00000000..d25552e4
+index 00000000..3b442a44
 --- /dev/null
 +++ b/src/objects/js-region.cc
-@@ -0,0 +1,4192 @@
+@@ -0,0 +1,4194 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -15383,6 +15383,8 @@ index 00000000..d25552e4
 +    state.wrappers.clear();
 +    state.made.clear();
 +    state.holder_map = state.symbol = state.prototype = nullptr;
++    // A new isolate at the same address registers its own callback.
++    state.epilogue = false;
 +  }
 +
 + private:
