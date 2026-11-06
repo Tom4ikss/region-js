@@ -49,7 +49,7 @@ if [ ! -f out/Release/build.ninja ]; then
     --v8-disable-temporal-support
 fi
 ninja ${JOBS:+-j "$JOBS"} -C out/Release node
-# A first cut of Region: create, enter, run, of, and moves between workers in
-# the transfer list of postMessage(). Freezing, spawn and channels are d8's
-# only so far.
+# A first cut of Region: create, enter, run, of, freeze and borrow, and moves
+# between workers in the transfer list of postMessage(). spawn and channels
+# are d8's only so far.
 out/Release/node --harmony-regions -p '"regions: " + typeof Region'

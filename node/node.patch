@@ -42,17 +42,17 @@ index 0f5aaf85..8908efbb 100644
        getOptionValue('--no-experimental-global-navigator')) {
 diff --git a/lib/internal/regions.js b/lib/internal/regions.js
 new file mode 100644
-index 00000000..b44c3739
+index 00000000..b7c120ef
 --- /dev/null
 +++ b/lib/internal/regions.js
-@@ -0,0 +1,170 @@
+@@ -0,0 +1,221 @@
 +'use strict';
 +
 +// Ownership regions (node --harmony-regions): a first cut of the Region class
 +// of region-js. It covers creating a region, making it current for #{} and #[]
-+// literals, finding the region of an object and moving a region to another
-+// thread in the transfer list of postMessage(). Freezing and borrowing, spawn
-+// and channels are not here yet.
++// literals, finding the region of an object, moving a region to another
++// thread in the transfer list of postMessage(), and freezing it so that other
++// threads can borrow and read it. spawn and channels are not here yet.
 +
 +const {
 +  SafeFinalizationRegistry,
@@ -98,6 +98,17 @@ index 00000000..b44c3739
 +  if (!binding.enter(id)) {
 +    throw ownershipError(id, 'Region is not owned by this thread');
 +  }
++}
++
++// A scope that runs exit once, by `using` or by a call.
++function scope(exit) {
++  let open = true;
++  const close = () => {
++    if (!open) return;
++    open = false;
++    exit();
++  };
++  return { __proto__: null, exit: close, [SymbolDispose]: close };
 +}
 +
 +function track(region, id) {
@@ -151,13 +162,53 @@ index 00000000..b44c3739
 +  enter() {
 +    const id = this.#id;
 +    enter(id);
-+    let open = true;
-+    const exit = () => {
-+      if (!open) return;
-+      open = false;
-+      binding.exit(id);
-+    };
-+    return { __proto__: null, exit, [SymbolDispose]: exit };
++    return scope(() => binding.exit(id));
++  }
++
++  get frozen() {
++    return binding.isFrozen(this.#id);
++  }
++
++  // The number of threads that borrow the frozen region.
++  get readers() {
++    return binding.readers(this.#id);
++  }
++
++  // Nobody may change the region from now on; other threads read it while
++  // they borrow it. Its objects can then go to them in messages, without a
++  // transfer list.
++  freeze() {
++    const id = this.#id;
++    if (!binding.freeze(id)) {
++      throw ownershipError(id, binding.isFrozen(id) ?
++        'Region is already frozen' : 'Region is not owned by this thread');
++    }
++  }
++
++  // Makes the thread that froze the region its owner again, once no other
++  // thread borrows it.
++  thaw() {
++    const id = this.#id;
++    const result = binding.thaw(id);
++    if (result === 1) {
++      const error = ownershipError(id, 'Region is still borrowed by ' +
++                                   `${binding.readers(id)} reader(s)`);
++      error.reason = 'borrowed';
++      throw error;
++    }
++    if (result === 2) {
++      throw ownershipError(id, 'Region is not frozen by this thread');
++    }
++  }
++
++  // Reads of the frozen region until the returned scope is disposed, as in
++  // `using _ = Region.of(rows).borrow()`.
++  borrow() {
++    const id = this.#id;
++    if (!binding.borrow(id)) {
++      throw ownershipError(id, 'Region must be frozen to borrow it');
++    }
++    return scope(() => binding.unborrow(id));
 +  }
 +
 +  // postMessage(value, [region]) moves the region: this thread gives it up
@@ -290,10 +341,18 @@ index abdf6a36..6591e8a9 100644
    V(task_queue)                                                                \
    V(tcp_wrap)                                                                  \
 diff --git a/src/node_file-inl.h b/src/node_file-inl.h
-index 9cc24732..70b44d8a 100644
+index 9cc24732..1ddd05d0 100644
 --- a/src/node_file-inl.h
 +++ b/src/node_file-inl.h
-@@ -362,6 +362,24 @@ FSReqBase* AsyncCall(Environment* env,
+@@ -5,6 +5,7 @@
+ 
+ #include "node_file.h"
+ #include "req_wrap-inl.h"
++#include "v8-regions.h"
+ 
+ #include <algorithm>
+ 
+@@ -362,6 +363,26 @@ FSReqBase* AsyncCall(Environment* env,
                         after, fn, fn_args...);
  }
  
@@ -302,6 +361,8 @@ index 9cc24732..70b44d8a 100644
 +// for this thread meanwhile. The call must not touch the V8 heap.
 +template <typename Call>
 +int CallWhileParked(v8::Isolate* isolate, Call call) {
++  // Only shared heap GCs wait for other threads.
++  if (!v8::experimental::Regions::IsEnabled(isolate)) return call();
 +  struct Data {
 +    Call* call;
 +    int result;
@@ -318,7 +379,7 @@ index 9cc24732..70b44d8a 100644
  // Template counterpart of SYNC_CALL, except that it only puts
  // the error number and the syscall in the context instead of
  // creating an error in the C++ land.
-@@ -374,7 +392,9 @@ v8::Maybe<int> SyncCall(Environment* env,
+@@ -374,7 +395,9 @@ v8::Maybe<int> SyncCall(Environment* env,
                          Func fn,
                          Args... args) {
    env->PrintSyncTrace();
@@ -329,7 +390,7 @@ index 9cc24732..70b44d8a 100644
    if (err < 0) {
      v8::Local<v8::Context> context = env->context();
      v8::Local<v8::Object> ctx_obj = ctx.As<v8::Object>();
-@@ -400,7 +420,9 @@ int SyncCallAndThrowIf(Predicate should_throw,
+@@ -400,7 +423,9 @@ int SyncCallAndThrowIf(Predicate should_throw,
                         Func fn,
                         Args... args) {
    env->PrintSyncTrace();
@@ -368,10 +429,10 @@ index c2cd5998..9896e6a5 100644
        // req will be cleaned up by scope leave.
 diff --git a/src/node_regions.cc b/src/node_regions.cc
 new file mode 100644
-index 00000000..d504a583
+index 00000000..2d7b1ffe
 --- /dev/null
 +++ b/src/node_regions.cc
-@@ -0,0 +1,115 @@
+@@ -0,0 +1,157 @@
 +// Ownership regions (node --harmony-regions): the binding behind the Region
 +// global of lib/internal/regions.js, on top of V8's experimental
 +// v8-regions.h. Regions need a shared heap, so they exist only in builds with
@@ -443,6 +504,36 @@ index 00000000..d504a583
 +      args.GetIsolate(), RegionArg(args), args[1].As<Int32>()->Value()));
 +}
 +
++// freeze(id): false when this thread does not own the region.
++static void Freeze(const FunctionCallbackInfo<Value>& args) {
++  args.GetReturnValue().Set(
++      Regions::Freeze(args.GetIsolate(), RegionArg(args)));
++}
++
++// thaw(id): 0 thawed, 1 still borrowed, 2 not frozen by this thread.
++static void Thaw(const FunctionCallbackInfo<Value>& args) {
++  args.GetReturnValue().Set(static_cast<int>(
++      Regions::Thaw(args.GetIsolate(), RegionArg(args))));
++}
++
++// borrow(id): false when the region is not frozen.
++static void Borrow(const FunctionCallbackInfo<Value>& args) {
++  args.GetReturnValue().Set(
++      Regions::Borrow(args.GetIsolate(), RegionArg(args)));
++}
++
++static void Unborrow(const FunctionCallbackInfo<Value>& args) {
++  Regions::Unborrow(args.GetIsolate(), RegionArg(args));
++}
++
++static void IsFrozen(const FunctionCallbackInfo<Value>& args) {
++  args.GetReturnValue().Set(Regions::IsFrozen(RegionArg(args)));
++}
++
++static void Readers(const FunctionCallbackInfo<Value>& args) {
++  args.GetReturnValue().Set(Regions::Readers(RegionArg(args)));
++}
++
 +// regionOf(value): the region of a region object, -1 for anything else.
 +static void RegionOf(const FunctionCallbackInfo<Value>& args) {
 +  args.GetReturnValue().Set(Regions::RegionOf(args[0]));
@@ -466,6 +557,12 @@ index 00000000..d504a583
 +  SetMethod(context, target, "exit", Exit);
 +  SetMethod(context, target, "release", Release);
 +  SetMethod(context, target, "claim", Claim);
++  SetMethod(context, target, "freeze", Freeze);
++  SetMethod(context, target, "thaw", Thaw);
++  SetMethod(context, target, "borrow", Borrow);
++  SetMethod(context, target, "unborrow", Unborrow);
++  SetMethodNoSideEffect(context, target, "isFrozen", IsFrozen);
++  SetMethodNoSideEffect(context, target, "readers", Readers);
 +  SetMethodNoSideEffect(context, target, "regionOf", RegionOf);
 +}
 +
@@ -478,6 +575,12 @@ index 00000000..d504a583
 +  registry->Register(Exit);
 +  registry->Register(Release);
 +  registry->Register(Claim);
++  registry->Register(Freeze);
++  registry->Register(Thaw);
++  registry->Register(Borrow);
++  registry->Register(Unborrow);
++  registry->Register(IsFrozen);
++  registry->Register(Readers);
 +  registry->Register(RegionOf);
 +}
 +

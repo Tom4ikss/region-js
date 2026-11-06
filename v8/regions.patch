@@ -95,10 +95,10 @@ index 16ad318d..2516dfc6 100644
     * eventually post a foreground task, like asynchronous WebAssembly
 diff --git a/include/v8-regions.h b/include/v8-regions.h
 new file mode 100644
-index 00000000..8de9c856
+index 00000000..312e63f6
 --- /dev/null
 +++ b/include/v8-regions.h
-@@ -0,0 +1,74 @@
+@@ -0,0 +1,102 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -151,19 +151,47 @@ index 00000000..8de9c856
 +
 +  /**
 +   * Gives up the ownership of |region| for a move to another isolate, which
-+   * takes it with Claim(). Views of the region's typed arrays here are
-+   * detached. The move holds one handle on the region until the claim.
-+   * Returns the generation to claim the region with, or -1 when |isolate|
-+   * does not own it or the region cannot move (sealed, or in an RwLock).
++   * takes it with Claim(). For a region that |isolate| froze, it gives up the
++   * right to thaw it. Views of the region's typed arrays here are detached.
++   * The move holds one handle on the region until the claim. Returns the
++   * generation to claim the region with, or -1 when |isolate| neither owns
++   * nor froze it, or the region cannot move (sealed, or in an RwLock).
 +   */
 +  static int Release(Isolate* isolate, int region);
 +
 +  /**
-+   * Makes |isolate| the owner of a region that Release() gave up. The handle
-+   * of the move becomes the caller's. Returns false when the region is not in
-+   * transit with this |generation|.
++   * Makes |isolate| the owner of a region that Release() gave up, or the
++   * isolate that may thaw it if it is frozen. The handle of the move becomes
++   * the caller's. Returns false when the region is not in transit with this
++   * |generation|.
 +   */
 +  static bool Claim(Isolate* isolate, int region, int generation);
++
++  /**
++   * Freezes |region|, which |isolate| owns: from now on no isolate may change
++   * it, and any isolate may read it while it borrows it. Only |isolate| reads
++   * it without a borrow and may thaw it. Returns false when |isolate| does
++   * not own it or it is in an RwLock.
++   */
++  static bool Freeze(Isolate* isolate, int region);
++
++  enum class ThawResult { kThawed, kBorrowed, kNotFrozenByIsolate };
++  /**
++   * Makes the isolate that froze |region| its owner again. kBorrowed: other
++   * isolates still borrow it, and it stays frozen.
++   */
++  static ThawResult Thaw(Isolate* isolate, int region);
++
++  /**
++   * Lets |isolate| read frozen |region| until Unborrow(). Returns false when
++   * the region is not frozen.
++   */
++  static bool Borrow(Isolate* isolate, int region);
++  static void Unborrow(Isolate* isolate, int region);
++
++  static bool IsFrozen(int region);
++  /** The number of borrows of a frozen region. */
++  static int Readers(int region);
 +
 +  /** The region of |value| if it is a region object, -1 otherwise. */
 +  static int RegionOf(Local<Value> value);
@@ -174,7 +202,7 @@ index 00000000..8de9c856
 +
 +#endif  // INCLUDE_V8_REGIONS_H_
 diff --git a/src/api/api.cc b/src/api/api.cc
-index d4db3562..cb523e25 100644
+index d4db3562..fcc60213 100644
 --- a/src/api/api.cc
 +++ b/src/api/api.cc
 @@ -29,6 +29,7 @@
@@ -201,7 +229,7 @@ index d4db3562..cb523e25 100644
  #include "src/objects/js-proxy-inl.h"
  #include "src/objects/js-regexp-inl.h"
  #include "src/objects/js-weak-refs-inl.h"
-@@ -10194,6 +10197,85 @@ void Isolate::RequestInterrupt(InterruptCallback callback, void* data) {
+@@ -10194,6 +10197,135 @@ void Isolate::RequestInterrupt(InterruptCallback callback, void* data) {
    i_isolate->RequestInterrupt(callback, data);
  }
  
@@ -260,11 +288,18 @@ index d4db3562..cb523e25 100644
 +
 +int Regions::Release(Isolate* isolate, int region) {
 +  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
-+  if (!i::RegionRegistry::IsOwner(region, i_isolate) ||
-+      i::RegionRegistry::IsSealed(region) ||
++  if (i::RegionRegistry::IsSealed(region) ||
 +      i::RegionRegistry::IsLocked(region)) {
 +    return -1;
 +  }
++  if (i::RegionRegistry::IsFrozenBy(region, i_isolate)) {
++    i::RegionRegistry::AddHandle(region);
++    CHECK(i::RegionRegistry::ReleaseFreeze(region, i_isolate));
++    // Without the right to thaw, views stay only while borrowed.
++    i::JSRegionObject::DetachFrozenViewsIfUnused(i_isolate, region);
++    return i::RegionRegistry::Generation(region);
++  }
++  if (!i::RegionRegistry::IsOwner(region, i_isolate)) return -1;
 +  i::RegionRegistry::AddHandle(region);
 +  i::JSRegionObject::DetachViews(i_isolate, region);
 +  CHECK(i::RegionRegistry::Release(region, i_isolate));
@@ -272,9 +307,52 @@ index d4db3562..cb523e25 100644
 +}
 +
 +bool Regions::Claim(Isolate* isolate, int region, int generation) {
-+  return i::RegionRegistry::Claim(region, generation,
-+                                  reinterpret_cast<i::Isolate*>(isolate));
++  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
++  return i::RegionRegistry::IsFrozen(region)
++             ? i::RegionRegistry::ClaimFreeze(region, generation, i_isolate)
++             : i::RegionRegistry::Claim(region, generation, i_isolate);
 +}
++
++bool Regions::Freeze(Isolate* isolate, int region) {
++  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
++  if (!i::RegionRegistry::IsOwner(region, i_isolate) ||
++      i::RegionRegistry::IsLocked(region)) {
++    return false;
++  }
++  // Writable typed array views would let the owner change frozen bytes.
++  i::JSRegionObject::DetachViews(i_isolate, region);
++  return i::RegionRegistry::Freeze(region, i_isolate);
++}
++
++Regions::ThawResult Regions::Thaw(Isolate* isolate, int region) {
++  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
++  switch (i::RegionRegistry::Thaw(region, i_isolate)) {
++    case i::RegionRegistry::ThawResult::kThawed:
++      // Views taken while frozen are immutable and would outlive the freeze.
++      i::JSRegionObject::DetachViews(i_isolate, region);
++      return ThawResult::kThawed;
++    case i::RegionRegistry::ThawResult::kBorrowed:
++      return ThawResult::kBorrowed;
++    case i::RegionRegistry::ThawResult::kNotFrozenByIsolate:
++      return ThawResult::kNotFrozenByIsolate;
++  }
++  UNREACHABLE();
++}
++
++bool Regions::Borrow(Isolate* isolate, int region) {
++  return i::RegionRegistry::Borrow(region,
++                                   reinterpret_cast<i::Isolate*>(isolate));
++}
++
++void Regions::Unborrow(Isolate* isolate, int region) {
++  i::RegionRegistry::Unborrow(region, reinterpret_cast<i::Isolate*>(isolate));
++}
++
++bool Regions::IsFrozen(int region) {
++  return i::RegionRegistry::IsFrozen(region);
++}
++
++int Regions::Readers(int region) { return i::RegionRegistry::Readers(region); }
 +
 +int Regions::RegionOf(Local<Value> value) {
 +  i::DirectHandle<i::Object> object = Utils::OpenDirectHandle(*value);
