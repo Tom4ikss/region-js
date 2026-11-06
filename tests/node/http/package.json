@@ -1,0 +1,10 @@
+{
+  "name": "region-js-http-bench",
+  "private": true,
+  "description": "HTTP benchmark of regions in Node.js: Fastify, cluster, piscina, spawn() and rhttp",
+  "license": "BSD-3-Clause",
+  "dependencies": {
+    "fastify": "^5.6.1",
+    "piscina": "^5.1.3"
+  }
+}
