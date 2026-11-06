@@ -131,8 +131,12 @@ const reader = new Worker(`
   let name = null;
   onmessage = ({ data }) => {
     if (data.op === 'read') {
-      using _ = Region.of(data.rows).borrow();
-      name = data.rows[29005].name;
+      // The borrow goes back before the answer, which the owner's thaw
+      // follows.
+      {
+        using _ = Region.of(data.rows).borrow();
+        name = data.rows[29005].name;
+      }
       postMessage(%RegionOfValue(name) === data.id);
     } else if (data.op === 'moved') {
       postMessage(%RegionOfValue(name) !== data.id);

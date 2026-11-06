@@ -1,0 +1,564 @@
+diff --git a/configure.py b/configure.py
+index d00bf6cf..461f9e61 100755
+--- a/configure.py
++++ b/configure.py
+@@ -2246,7 +2246,10 @@ def configure_v8(o, configs):
+   # Like V8's own default, the sandbox goes with the shared pointer compression
+   # cage. Multi-cage builds give every IsolateGroup its own sandbox, which the
+   # array buffer allocator does not know about yet.
+-  o['variables']['v8_enable_sandbox'] = 1 if options.pointer_compression_shared_cage else 0
++  # region-js: a shared cage without the sandbox. Node's buffers may point
++  # outside the sandbox, and src/ uses CppHeapPointerTag::kDefaultTag, which
++  # only exists without it.
++  o['variables']['v8_enable_sandbox'] = 0
+   o['variables']['v8_enable_pointer_compression_shared_cage'] = 1 if options.pointer_compression_shared_cage else 0
+   o['variables']['v8_enable_external_code_space'] = 1 if options.enable_pointer_compression else 0
+   o['variables']['v8_enable_31bit_smis_on_64bit_arch'] = 1 if options.enable_pointer_compression else 0
+diff --git a/lib/internal/process/pre_execution.js b/lib/internal/process/pre_execution.js
+index 0f5aaf85..8908efbb 100644
+--- a/lib/internal/process/pre_execution.js
++++ b/lib/internal/process/pre_execution.js
+@@ -122,6 +122,7 @@ function prepareExecution(options) {
+   setupWebStorage();
+   removeWebWorkersIfDisabled();
+   setupEventsource();
++  setupRegions();
+   setupCodeCoverage();
+   setupDebugEnv();
+   // Process initial diagnostic reporting configuration, if present.
+@@ -472,6 +473,13 @@ function setupEventsource() {
+ 
+ // TODO(aduh95): move this to internal/bootstrap/web/* when the CLI flag is
+ //               removed.
++// The Region class of region-js, with node --harmony-regions in a build that
++// has a shared heap.
++function setupRegions() {
++  if (!internalBinding('regions').enabled) return;
++  exposeLazyInterfaces(globalThis, 'internal/regions', ['Region']);
++}
++
+ function setupNavigator() {
+   if (getEmbedderOptions().noBrowserGlobals ||
+       getOptionValue('--no-experimental-global-navigator')) {
+diff --git a/lib/internal/regions.js b/lib/internal/regions.js
+new file mode 100644
+index 00000000..b44c3739
+--- /dev/null
++++ b/lib/internal/regions.js
+@@ -0,0 +1,170 @@
++'use strict';
++
++// Ownership regions (node --harmony-regions): a first cut of the Region class
++// of region-js. It covers creating a region, making it current for #{} and #[]
++// literals, finding the region of an object and moving a region to another
++// thread in the transfer list of postMessage(). Freezing and borrowing, spawn
++// and channels are not here yet.
++
++const {
++  SafeFinalizationRegistry,
++  SafeMap,
++  SafeWeakRef,
++  SymbolDispose,
++} = primordials;
++
++const binding = internalBinding('regions');
++const { validateFunction } = require('internal/validators');
++const {
++  kDeserialize,
++  kTransfer,
++  markTransferMode,
++} = require('internal/worker/js_transferable');
++
++// Region objects by id, so that Region.of() gives the same object every time.
++// Each one holds a handle on its region, which keeps the id valid.
++const handles = new SafeMap();
++const finalizer = new SafeFinalizationRegistry((id) => {
++  const ref = handles.get(id);
++  if (ref !== undefined && ref.deref() === undefined) handles.delete(id);
++  binding.removeHandle(id);
++});
++
++// What the constructor does instead of creating a region: kExisting for
++// Region.of(), which passes the id in existingId, and kReceiving for a region
++// that arrives in a message, which kDeserialize gets.
++const kCreate = 0;
++const kExisting = 1;
++const kReceiving = 2;
++let construct = kCreate;
++let existingId = -1;
++
++function ownershipError(id, message) {
++  // OwnershipError is a global of the engine with --harmony-regions.
++  const error = new globalThis.OwnershipError(message);
++  error.region = id;
++  return error;
++}
++
++function enter(id) {
++  if (!binding.enter(id)) {
++    throw ownershipError(id, 'Region is not owned by this thread');
++  }
++}
++
++function track(region, id) {
++  handles.set(id, new SafeWeakRef(region));
++  finalizer.register(region, id);
++}
++
++class Region {
++  #id = -1;
++
++  constructor() {
++    markTransferMode(this, false, true);
++    const how = construct;
++    construct = kCreate;
++    if (how === kReceiving) return;
++    let id;
++    if (how === kExisting) {
++      id = existingId;
++      binding.addHandle(id);
++    } else {
++      id = binding.create();
++      if (id < 0) throw new RangeError('Too many regions');
++    }
++    this.#id = id;
++    track(this, id);
++  }
++
++  get id() {
++    return this.#id;
++  }
++
++  get owned() {
++    return binding.isOwner(this.#id);
++  }
++
++  // Calls fn with the region current: the #{} and #[] literals of fn allocate
++  // in it.
++  run(fn) {
++    validateFunction(fn, 'fn');
++    const id = this.#id;
++    enter(id);
++    try {
++      return fn();
++    } finally {
++      binding.exit(id);
++    }
++  }
++
++  // Makes the region current until the returned scope is disposed, as in
++  // `using _ = region.enter()`.
++  enter() {
++    const id = this.#id;
++    enter(id);
++    let open = true;
++    const exit = () => {
++      if (!open) return;
++      open = false;
++      binding.exit(id);
++    };
++    return { __proto__: null, exit, [SymbolDispose]: exit };
++  }
++
++  // postMessage(value, [region]) moves the region: this thread gives it up
++  // and the receiving one owns it. Objects of the region in the message go by
++  // reference.
++  [kTransfer]() {
++    const id = this.#id;
++    const generation = binding.release(id);
++    if (generation < 0) {
++      throw ownershipError(id, binding.isOwner(id) ?
++        'Region cannot move: it is sealed or in an RwLock' :
++        'Region is not owned by this thread');
++    }
++    return {
++      data: { id, generation },
++      deserializeInfo: 'internal/regions:RegionReceiver',
++    };
++  }
++
++  [kDeserialize]({ id, generation }) {
++    if (!binding.claim(id, generation)) {
++      throw ownershipError(id, 'Region is not in transit');
++    }
++    this.#id = id;
++    track(this, id);
++  }
++
++  // The region of a region object.
++  static of(value) {
++    const id = binding.regionOf(value);
++    if (id < 0) {
++      throw new TypeError('Region.of() expects an object from a region');
++    }
++    const existing = handles.get(id)?.deref();
++    if (existing !== undefined) return existing;
++    construct = kExisting;
++    existingId = id;
++    return new Region();
++  }
++
++  static isRegionObject(value) {
++    return binding.regionOf(value) >= 0;
++  }
++}
++
++// The receiving end of postMessage(): a Region without a region yet, which
++// kDeserialize gives the moved one.
++function RegionReceiver() {
++  construct = kReceiving;
++  return new Region();
++}
++RegionReceiver.prototype = Region.prototype;
++
++module.exports = {
++  enabled: binding.enabled,
++  Region,
++  RegionReceiver,
++};
+diff --git a/node.gyp b/node.gyp
+index 714609b0..3da26eb4 100644
+--- a/node.gyp
++++ b/node.gyp
+@@ -161,6 +161,7 @@
+       'src/node_process_methods.cc',
+       'src/node_process_object.cc',
+       'src/node_realm.cc',
++      'src/node_regions.cc',
+       'src/node_report.cc',
+       'src/node_report_module.cc',
+       'src/node_report_utils.cc',
+diff --git a/src/inspector/main_thread_interface.cc b/src/inspector/main_thread_interface.cc
+index 0fca7483..e59e4267 100644
+--- a/src/inspector/main_thread_interface.cc
++++ b/src/inspector/main_thread_interface.cc
+@@ -1,6 +1,7 @@
+ #include "main_thread_interface.h"
+ 
+ #include "env-inl.h"
++#include "inspector_agent.h"
+ #include "simdutf.h"
+ #include "v8-inspector.h"
+ 
+@@ -224,11 +225,19 @@ bool MainThreadInterface::WaitForFrontendEvent() {
+   // as Runtime.evaluate
+   dispatching_messages_ = false;
+   if (dispatching_message_queue_.empty()) {
+-    Mutex::ScopedLock scoped_lock(requests_lock_);
+-    while (!stop_waiting_for_frontend_event_requested_ && requests_.empty()) {
+-      incoming_message_cond_.Wait(scoped_lock);
+-    }
+-    stop_waiting_for_frontend_event_requested_ = false;
++    // The wait can be long and runs no JS: parked, it does not hold up
++    // garbage collections of the shared heap.
++    agent_->env()->isolate()->ExecuteWhileParked(
++        [](void* data) {
++          MainThreadInterface* self = static_cast<MainThreadInterface*>(data);
++          Mutex::ScopedLock scoped_lock(self->requests_lock_);
++          while (!self->stop_waiting_for_frontend_event_requested_ &&
++                 self->requests_.empty()) {
++            self->incoming_message_cond_.Wait(scoped_lock);
++          }
++          self->stop_waiting_for_frontend_event_requested_ = false;
++        },
++        this);
+   }
+   return true;
+ }
+diff --git a/src/node_binding.cc b/src/node_binding.cc
+index 3c7dee9b..160545f6 100644
+--- a/src/node_binding.cc
++++ b/src/node_binding.cc
+@@ -90,6 +90,7 @@
+   V(pipe_wrap)                                                                 \
+   V(process_wrap)                                                              \
+   V(process_methods)                                                           \
++  V(regions)                                                                   \
+   V(report)                                                                    \
+   V(sea)                                                                       \
+   V(serdes)                                                                    \
+diff --git a/src/node_external_reference.h b/src/node_external_reference.h
+index abdf6a36..6591e8a9 100644
+--- a/src/node_external_reference.h
++++ b/src/node_external_reference.h
+@@ -95,6 +95,7 @@ class ExternalReferenceRegistry {
+   V(process_methods)                                                           \
+   V(process_object)                                                            \
+   V(process_wrap)                                                              \
++  V(regions)                                                                   \
+   V(report)                                                                    \
+   V(task_queue)                                                                \
+   V(tcp_wrap)                                                                  \
+diff --git a/src/node_file-inl.h b/src/node_file-inl.h
+index 9cc24732..70b44d8a 100644
+--- a/src/node_file-inl.h
++++ b/src/node_file-inl.h
+@@ -362,6 +362,24 @@ FSReqBase* AsyncCall(Environment* env,
+                        after, fn, fn_args...);
+ }
+ 
++// Runs a blocking libuv call with the isolate parked: a garbage collection
++// of the shared heap, which stops every isolate that uses it, does not wait
++// for this thread meanwhile. The call must not touch the V8 heap.
++template <typename Call>
++int CallWhileParked(v8::Isolate* isolate, Call call) {
++  struct Data {
++    Call* call;
++    int result;
++  } data = {&call, 0};
++  isolate->ExecuteWhileParked(
++      [](void* raw) {
++        Data* data = static_cast<Data*>(raw);
++        data->result = (*data->call)();
++      },
++      &data);
++  return data.result;
++}
++
+ // Template counterpart of SYNC_CALL, except that it only puts
+ // the error number and the syscall in the context instead of
+ // creating an error in the C++ land.
+@@ -374,7 +392,9 @@ v8::Maybe<int> SyncCall(Environment* env,
+                         Func fn,
+                         Args... args) {
+   env->PrintSyncTrace();
+-  int err = fn(env->event_loop(), &(req_wrap->req), args..., nullptr);
++  int err = CallWhileParked(env->isolate(), [&] {
++    return fn(env->event_loop(), &(req_wrap->req), args..., nullptr);
++  });
+   if (err < 0) {
+     v8::Local<v8::Context> context = env->context();
+     v8::Local<v8::Object> ctx_obj = ctx.As<v8::Object>();
+@@ -400,7 +420,9 @@ int SyncCallAndThrowIf(Predicate should_throw,
+                        Func fn,
+                        Args... args) {
+   env->PrintSyncTrace();
+-  int result = fn(nullptr, &(req_wrap->req), args..., nullptr);
++  int result = CallWhileParked(env->isolate(), [&] {
++    return fn(nullptr, &(req_wrap->req), args..., nullptr);
++  });
+   if (should_throw(result)) {
+     env->ThrowUVException(result,
+                           req_wrap->syscall_p,
+diff --git a/src/node_file.cc b/src/node_file.cc
+index c2cd5998..9896e6a5 100644
+--- a/src/node_file.cc
++++ b/src/node_file.cc
+@@ -3475,7 +3475,9 @@ static void ReadFileUtf8(const FunctionCallbackInfo<Value>& args) {
+     if (CheckOpenPermissions(env, path, flags).IsNothing()) return;
+ 
+     FS_SYNC_TRACE_BEGIN(open);
+-    file = uv_fs_open(nullptr, &req, *path, flags, 0666, nullptr);
++    file = CallWhileParked(env->isolate(), [&] {
++      return uv_fs_open(nullptr, &req, *path, flags, 0666, nullptr);
++    });
+     FS_SYNC_TRACE_END(open);
+     if (req.result < 0) {
+       uv_fs_req_cleanup(&req);
+@@ -3510,7 +3512,9 @@ static void ReadFileUtf8(const FunctionCallbackInfo<Value>& args) {
+ 
+   FS_SYNC_TRACE_BEGIN(read);
+   while (true) {
+-    auto r = uv_fs_read(nullptr, &req, file, &buf, 1, -1, nullptr);
++    auto r = CallWhileParked(env->isolate(), [&] {
++      return uv_fs_read(nullptr, &req, file, &buf, 1, -1, nullptr);
++    });
+     if (req.result < 0) {
+       FS_SYNC_TRACE_END(read);
+       // req will be cleaned up by scope leave.
+diff --git a/src/node_regions.cc b/src/node_regions.cc
+new file mode 100644
+index 00000000..d504a583
+--- /dev/null
++++ b/src/node_regions.cc
+@@ -0,0 +1,115 @@
++// Ownership regions (node --harmony-regions): the binding behind the Region
++// global of lib/internal/regions.js, on top of V8's experimental
++// v8-regions.h. Regions need a shared heap, so they exist only in builds with
++// a shared pointer compression cage.
++
++#include "env-inl.h"
++#include "node_binding.h"
++#include "node_external_reference.h"
++#include "util-inl.h"
++#include "v8-regions.h"
++
++namespace node {
++namespace regions {
++
++using v8::Boolean;
++using v8::Context;
++using v8::FunctionCallbackInfo;
++using v8::Int32;
++using v8::Isolate;
++using v8::Local;
++using v8::Object;
++using v8::Value;
++using v8::experimental::Regions;
++
++// create(): a new region owned by this thread with one handle on it, or -1.
++static void Create(const FunctionCallbackInfo<Value>& args) {
++  args.GetReturnValue().Set(Regions::Create(args.GetIsolate()));
++}
++
++static int RegionArg(const FunctionCallbackInfo<Value>& args) {
++  CHECK(args[0]->IsInt32());
++  return args[0].As<Int32>()->Value();
++}
++
++static void AddHandle(const FunctionCallbackInfo<Value>& args) {
++  Regions::AddHandle(RegionArg(args));
++}
++
++static void RemoveHandle(const FunctionCallbackInfo<Value>& args) {
++  Regions::RemoveHandle(RegionArg(args));
++}
++
++static void IsOwner(const FunctionCallbackInfo<Value>& args) {
++  args.GetReturnValue().Set(
++      Regions::IsOwner(args.GetIsolate(), RegionArg(args)));
++}
++
++// enter(id): makes the region current; false when this thread does not own
++// it.
++static void Enter(const FunctionCallbackInfo<Value>& args) {
++  args.GetReturnValue().Set(Regions::Enter(args.GetIsolate(), RegionArg(args)));
++}
++
++static void Exit(const FunctionCallbackInfo<Value>& args) {
++  Regions::Exit(args.GetIsolate(), RegionArg(args));
++}
++
++// release(id): gives the region up for a move to another thread; the
++// generation to claim it with, or -1.
++static void Release(const FunctionCallbackInfo<Value>& args) {
++  args.GetReturnValue().Set(
++      Regions::Release(args.GetIsolate(), RegionArg(args)));
++}
++
++// claim(id, generation): takes a region that another thread gave up.
++static void Claim(const FunctionCallbackInfo<Value>& args) {
++  CHECK(args[1]->IsInt32());
++  args.GetReturnValue().Set(Regions::Claim(
++      args.GetIsolate(), RegionArg(args), args[1].As<Int32>()->Value()));
++}
++
++// regionOf(value): the region of a region object, -1 for anything else.
++static void RegionOf(const FunctionCallbackInfo<Value>& args) {
++  args.GetReturnValue().Set(Regions::RegionOf(args[0]));
++}
++
++static void Initialize(Local<Object> target,
++                       Local<Value> unused,
++                       Local<Context> context,
++                       void* priv) {
++  Isolate* isolate = Isolate::GetCurrent();
++  target
++      ->Set(context,
++            FIXED_ONE_BYTE_STRING(isolate, "enabled"),
++            Boolean::New(isolate, Regions::IsEnabled(isolate)))
++      .Check();
++  SetMethod(context, target, "create", Create);
++  SetMethod(context, target, "addHandle", AddHandle);
++  SetMethod(context, target, "removeHandle", RemoveHandle);
++  SetMethodNoSideEffect(context, target, "isOwner", IsOwner);
++  SetMethod(context, target, "enter", Enter);
++  SetMethod(context, target, "exit", Exit);
++  SetMethod(context, target, "release", Release);
++  SetMethod(context, target, "claim", Claim);
++  SetMethodNoSideEffect(context, target, "regionOf", RegionOf);
++}
++
++static void RegisterExternalReferences(ExternalReferenceRegistry* registry) {
++  registry->Register(Create);
++  registry->Register(AddHandle);
++  registry->Register(RemoveHandle);
++  registry->Register(IsOwner);
++  registry->Register(Enter);
++  registry->Register(Exit);
++  registry->Register(Release);
++  registry->Register(Claim);
++  registry->Register(RegionOf);
++}
++
++}  // namespace regions
++}  // namespace node
++
++NODE_BINDING_CONTEXT_AWARE_INTERNAL(regions, node::regions::Initialize)
++NODE_BINDING_EXTERNAL_REFERENCE(regions,
++                                node::regions::RegisterExternalReferences)
+diff --git a/src/spawn_sync.cc b/src/spawn_sync.cc
+index 0358bb99..e3197da3 100644
+--- a/src/spawn_sync.cc
++++ b/src/spawn_sync.cc
+@@ -531,7 +531,19 @@ Maybe<void> SyncProcessRunner::TryInitializeAndRunLoop(Local<Value> options) {
+     }
+   }
+ 
+-  r = uv_run(uv_loop_, UV_RUN_DEFAULT);
++  // Parked while the child runs: garbage collections of the shared heap do
++  // not wait for it. The callbacks of this loop do not use V8.
++  struct RunData {
++    uv_loop_t* loop;
++    int result;
++  } run_data = {uv_loop_, 0};
++  env()->isolate()->ExecuteWhileParked(
++      [](void* raw) {
++        RunData* data = static_cast<RunData*>(raw);
++        data->result = uv_run(data->loop, UV_RUN_DEFAULT);
++      },
++      &run_data);
++  r = run_data.result;
+   if (r < 0)
+     // We can't handle uv_run failure.
+     ABORT();
+diff --git a/test/parallel/test-bootstrap-modules.js b/test/parallel/test-bootstrap-modules.js
+index e6a40d45..6c8d0670 100644
+--- a/test/parallel/test-bootstrap-modules.js
++++ b/test/parallel/test-bootstrap-modules.js
+@@ -113,6 +113,7 @@ expected.beforePreExec = new Set([
+ ]);
+ 
+ expected.atRunTime = new Set([
++  'Internal Binding regions',
+   'NativeModule internal/process/pre_execution',
+ ]);
+ 
+diff --git a/tools/v8_gypfiles/features.gypi b/tools/v8_gypfiles/features.gypi
+index 309b295e..e57c5ea8 100644
+--- a/tools/v8_gypfiles/features.gypi
++++ b/tools/v8_gypfiles/features.gypi
+@@ -314,6 +314,10 @@
+     # Sets --DV8_LITE_MODE.
+     'v8_enable_lite_mode%': 0,
+ 
++    # Allocate on black pages during marking, as V8's GN build does by
++    # default. Sets -dV8_ENABLE_BLACK_ALLOCATED_PAGES
++    'v8_enable_black_allocated_pages%': 1,
++
+     # Enable the Turbofan compiler.
+     # Sets -dV8_ENABLE_TURBOFAN
+     'v8_enable_turbofan%': 1,
+@@ -536,6 +540,9 @@
+       ['v8_enable_maglev==1', {
+         'defines': ['V8_ENABLE_MAGLEV',],
+       }],
++      ['v8_enable_black_allocated_pages==1', {
++        'defines': ['V8_ENABLE_BLACK_ALLOCATED_PAGES',],
++      }],
+       ['v8_enable_turbofan==1', {
+         'defines': ['V8_ENABLE_TURBOFAN',],
+       }],
+diff --git a/tools/v8_gypfiles/v8.gyp b/tools/v8_gypfiles/v8.gyp
+index 89582537..3c226af6 100644
+--- a/tools/v8_gypfiles/v8.gyp
++++ b/tools/v8_gypfiles/v8.gyp
+@@ -471,7 +471,7 @@
+                  'mksnapshot_flags': ['--no-native-code-counters'],
+                },
+              }],
+-            ['build_type=="Debug"', {
++            ['build_type=="Debug" or dcheck_always_on==1', {
+               'outputs': [
+                 '<(INTERMEDIATE_DIR)/src/builtins/builtins-effects.cc',
+               ],

@@ -1,5 +1,5 @@
 diff --git a/BUILD.gn b/BUILD.gn
-index 996ab14c..93344bb5 100644
+index 996ab14c..870e718d 100644
 --- a/BUILD.gn
 +++ b/BUILD.gn
 @@ -2430,6 +2430,7 @@ torque_files = [
@@ -18,7 +18,15 @@ index 996ab14c..93344bb5 100644
      "src/builtins/builtins-regexp-gen.h",
      "src/builtins/builtins-shadow-realm-gen.cc",
      "src/builtins/builtins-sharedarraybuffer-gen.cc",
-@@ -4927,6 +4929,8 @@ v8_header_set("v8_internal_headers") {
+@@ -4064,6 +4066,7 @@ v8_header_set("v8_headers") {
+     "include/v8-promise.h",
+     "include/v8-proxy.h",
+     "include/v8-regexp.h",
++    "include/v8-regions.h",
+     "include/v8-sandbox.h",
+     "include/v8-script.h",
+     "include/v8-snapshot.h",
+@@ -4927,6 +4930,8 @@ v8_header_set("v8_internal_headers") {
      "src/objects/js-segments.h",
      "src/objects/js-shadow-realm-inl.h",
      "src/objects/js-shadow-realm.h",
@@ -27,7 +35,7 @@ index 996ab14c..93344bb5 100644
      "src/objects/js-struct.h",
      "src/objects/js-temporal-helpers.h",
      "src/objects/js-weak-refs-inl.h",
-@@ -6740,6 +6744,7 @@ v8_cluster_source_set("v8_base_without_compiler") {
+@@ -6740,6 +6745,7 @@ v8_cluster_source_set("v8_base_without_compiler") {
      "src/objects/js-segment-iterator.cc",
      "src/objects/js-segmenter.cc",
      "src/objects/js-segments.cc",
@@ -35,7 +43,7 @@ index 996ab14c..93344bb5 100644
      "src/objects/js-struct.cc",
      "src/objects/js-temporal-helpers.cc",
      "src/objects/js-weak-refs.cc",
-@@ -9109,11 +9114,15 @@ v8_executable("d8") {
+@@ -9109,11 +9115,15 @@ v8_executable("d8") {
    sources = [
      "src/d8/async-hooks-wrapper.cc",
      "src/d8/async-hooks-wrapper.h",
@@ -64,6 +72,221 @@ index 0d0a6ec4..5844cdde 100644
  
  // Base class for the address block allocator compatible with standard
  // containers, which registers its allocated range as strong roots.
+diff --git a/include/v8-isolate.h b/include/v8-isolate.h
+index 16ad318d..2516dfc6 100644
+--- a/include/v8-isolate.h
++++ b/include/v8-isolate.h
+@@ -1342,6 +1342,16 @@ class V8_EXPORT Isolate {
+    */
+   void RequestInterrupt(InterruptCallback callback, void* data);
+ 
++  /**
++   * Runs |callback| with |data| while this thread is parked: garbage
++   * collections of the shared heap, which stop every isolate that uses it,
++   * do not wait for the thread meanwhile. Meant for blocking calls of the
++   * embedder, such as a synchronous file read in a worker. |callback| must
++   * not use V8 or access objects of the V8 heap. Must be called on the thread
++   * that has entered the isolate.
++   */
++  void ExecuteWhileParked(void (*callback)(void* data), void* data);
++
+   /**
+    * Returns true if there is ongoing background work within V8 that will
+    * eventually post a foreground task, like asynchronous WebAssembly
+diff --git a/include/v8-regions.h b/include/v8-regions.h
+new file mode 100644
+index 00000000..8de9c856
+--- /dev/null
++++ b/include/v8-regions.h
+@@ -0,0 +1,74 @@
++// Copyright 2026 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef INCLUDE_V8_REGIONS_H_
++#define INCLUDE_V8_REGIONS_H_
++
++#include "v8-local-handle.h"  // NOLINT(build/include_directory)
++#include "v8config.h"         // NOLINT(build/include_directory)
++
++namespace v8 {
++
++class Isolate;
++class Value;
++
++namespace experimental {
++
++/**
++ * Ownership regions (--harmony-regions) for embedders other than d8. This is
++ * a first cut: it grows, and may change, as the rest of d8's region layer
++ * moves behind it.
++ *
++ * A region is a number. Its objects, the #{} and #[] literals evaluated while
++ * it is the current region, live in the shared heap, and only the isolate
++ * that owns the region may use them. A region lives while it has handles or
++ * objects; the embedder holds a handle for each of its JS region objects.
++ */
++class V8_EXPORT Regions {
++ public:
++  /** Whether |isolate| has regions: --harmony-regions and a shared heap. */
++  static bool IsEnabled(Isolate* isolate);
++
++  /**
++   * Creates a region owned by |isolate| with one handle on it. Returns -1
++   * when no ids are left, even after a garbage collection.
++   */
++  static int Create(Isolate* isolate);
++
++  static void AddHandle(int region);
++  static void RemoveHandle(int region);
++
++  static bool IsOwner(Isolate* isolate, int region);
++
++  /**
++   * Makes |region| the current region of |isolate| until the matching Exit().
++   * Returns false, and changes nothing, when |isolate| does not own it.
++   */
++  static bool Enter(Isolate* isolate, int region);
++  static void Exit(Isolate* isolate, int region);
++
++  /**
++   * Gives up the ownership of |region| for a move to another isolate, which
++   * takes it with Claim(). Views of the region's typed arrays here are
++   * detached. The move holds one handle on the region until the claim.
++   * Returns the generation to claim the region with, or -1 when |isolate|
++   * does not own it or the region cannot move (sealed, or in an RwLock).
++   */
++  static int Release(Isolate* isolate, int region);
++
++  /**
++   * Makes |isolate| the owner of a region that Release() gave up. The handle
++   * of the move becomes the caller's. Returns false when the region is not in
++   * transit with this |generation|.
++   */
++  static bool Claim(Isolate* isolate, int region, int generation);
++
++  /** The region of |value| if it is a region object, -1 otherwise. */
++  static int RegionOf(Local<Value> value);
++};
++
++}  // namespace experimental
++}  // namespace v8
++
++#endif  // INCLUDE_V8_REGIONS_H_
+diff --git a/src/api/api.cc b/src/api/api.cc
+index d4db3562..cb523e25 100644
+--- a/src/api/api.cc
++++ b/src/api/api.cc
+@@ -29,6 +29,7 @@
+ #include "include/v8-platform.h"
+ #include "include/v8-primitive-object.h"
+ #include "include/v8-profiler.h"
++#include "include/v8-regions.h"
+ #include "include/v8-source-location.h"
+ #include "include/v8-template.h"
+ #include "include/v8-unwinder-state.h"
+@@ -79,6 +80,7 @@
+ #include "src/heap/heap-inl.h"
+ #include "src/heap/heap-layout-inl.h"
+ #include "src/heap/heap-write-barrier.h"
++#include "src/heap/local-heap-inl.h"
+ #include "src/heap/safepoint.h"
+ #include "src/heap/visit-object.h"
+ #include "src/init/bootstrapper.h"
+@@ -108,6 +110,7 @@
+ #include "src/objects/js-collection-inl.h"
+ #include "src/objects/js-objects.h"
+ #include "src/objects/js-promise-inl.h"
++#include "src/objects/js-region-inl.h"
+ #include "src/objects/js-proxy-inl.h"
+ #include "src/objects/js-regexp-inl.h"
+ #include "src/objects/js-weak-refs-inl.h"
+@@ -10194,6 +10197,85 @@ void Isolate::RequestInterrupt(InterruptCallback callback, void* data) {
+   i_isolate->RequestInterrupt(callback, data);
+ }
+ 
++void Isolate::ExecuteWhileParked(void (*callback)(void* data), void* data) {
++  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(this);
++  i_isolate->main_thread_local_heap()->ExecuteMainThreadWhileParked(
++      [callback, data]() { callback(data); });
++}
++
++namespace experimental {
++
++bool Regions::IsEnabled(Isolate* isolate) {
++  return i::v8_flags.harmony_regions &&
++         reinterpret_cast<i::Isolate*>(isolate)->has_shared_space();
++}
++
++int Regions::Create(Isolate* isolate) {
++  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
++  int region = i::RegionRegistry::Create(i_isolate);
++  if (region < 0) {
++    // Ids come back with the shared heap GC, which empty regions never
++    // trigger. Collect dead handles here, then the shared heap.
++    i_isolate->heap()->CollectAllGarbage(
++        i::GCFlag::kNoFlags,
++        i::GarbageCollectionReason::kExternalMemoryPressure);
++    i_isolate->heap()->CollectGarbageShared(
++        i_isolate->main_thread_local_heap(),
++        i::GarbageCollectionReason::kExternalMemoryPressure);
++    region = i::RegionRegistry::Create(i_isolate);
++  }
++  if (region >= 0) i::RegionRegistry::AddHandle(region);
++  return region;
++}
++
++void Regions::AddHandle(int region) { i::RegionRegistry::AddHandle(region); }
++
++void Regions::RemoveHandle(int region) {
++  i::RegionRegistry::RemoveHandle(region);
++}
++
++bool Regions::IsOwner(Isolate* isolate, int region) {
++  return i::RegionRegistry::IsOwner(region,
++                                    reinterpret_cast<i::Isolate*>(isolate));
++}
++
++bool Regions::Enter(Isolate* isolate, int region) {
++  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
++  if (!i::RegionRegistry::IsOwner(region, i_isolate)) return false;
++  i::JSRegionObject::PushCurrent(i_isolate, region);
++  return true;
++}
++
++void Regions::Exit(Isolate* isolate, int region) {
++  i::JSRegionObject::PopCurrent(reinterpret_cast<i::Isolate*>(isolate), region);
++}
++
++int Regions::Release(Isolate* isolate, int region) {
++  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
++  if (!i::RegionRegistry::IsOwner(region, i_isolate) ||
++      i::RegionRegistry::IsSealed(region) ||
++      i::RegionRegistry::IsLocked(region)) {
++    return -1;
++  }
++  i::RegionRegistry::AddHandle(region);
++  i::JSRegionObject::DetachViews(i_isolate, region);
++  CHECK(i::RegionRegistry::Release(region, i_isolate));
++  return i::RegionRegistry::Generation(region);
++}
++
++bool Regions::Claim(Isolate* isolate, int region, int generation) {
++  return i::RegionRegistry::Claim(region, generation,
++                                  reinterpret_cast<i::Isolate*>(isolate));
++}
++
++int Regions::RegionOf(Local<Value> value) {
++  i::DirectHandle<i::Object> object = Utils::OpenDirectHandle(*value);
++  if (!i::IsJSRegionObject(*object)) return -1;
++  return i::Cast<i::JSRegionObject>(*object)->region_id();
++}
++
++}  // namespace experimental
++
+ bool Isolate::HasPendingBackgroundTasks() {
+ #if V8_ENABLE_WEBASSEMBLY
+   i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(this);
 diff --git a/src/ast/ast.cc b/src/ast/ast.cc
 index a0fc663f..493208f9 100644
 --- a/src/ast/ast.cc
@@ -3030,10 +3253,10 @@ index 8aab5f56..0bc22f26 100644
        CheckValueInputIs(node, 1, Type::Any());
 diff --git a/src/d8/d8-channel.cc b/src/d8/d8-channel.cc
 new file mode 100644
-index 00000000..e3f8a687
+index 00000000..dd5515fc
 --- /dev/null
 +++ b/src/d8/d8-channel.cc
-@@ -0,0 +1,1880 @@
+@@ -0,0 +1,1882 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -3044,6 +3267,7 @@ index 00000000..e3f8a687
 +#include <atomic>
 +#include <cmath>
 +#include <deque>
++#include <map>
 +#include <optional>
 +#include <string>
 +#include <unordered_map>
@@ -3299,10 +3523,10 @@ index 00000000..e3f8a687
 +}
 +
 +// Thaw waits by region id, until the region has no readers. Guarded by the
-+// channels mutex.
-+std::unordered_multimap<int, std::shared_ptr<ChannelWaiter>>& ThawWaiters() {
-+  static base::LeakyObject<
-+      std::unordered_multimap<int, std::shared_ptr<ChannelWaiter>>>
++// channels mutex. A multimap keeps the waits of one region in the order they
++// came, so the first thawWhenFree() is the one that thaws.
++std::multimap<int, std::shared_ptr<ChannelWaiter>>& ThawWaiters() {
++  static base::LeakyObject<std::multimap<int, std::shared_ptr<ChannelWaiter>>>
 +      waiters;
 +  return *waiters.get();
 +}
@@ -4412,17 +4636,17 @@ index 00000000..e3f8a687
 +  ctor->SetClassName(String::NewFromUtf8Literal(isolate, "Channel"));
 +  ctor->InstanceTemplate()->SetInternalFieldCount(1);
 +  Local<Signature> signature = Signature::New(isolate, ctor);
-+  for (auto [name, callback] :
-+       {std::pair{"__send", ChannelSend}, std::pair{"__recv", ChannelRecv},
-+        std::pair{"close", ChannelClose}}) {
++  for (auto [name, callback] : {std::make_pair("__send", ChannelSend),
++                                std::make_pair("__recv", ChannelRecv),
++                                std::make_pair("close", ChannelClose)}) {
 +    ctor->PrototypeTemplate()->Set(
 +        String::NewFromUtf8(isolate, name).ToLocalChecked(),
 +        FunctionTemplate::New(isolate, callback, Local<Value>(), signature, 0,
 +                              ConstructorBehavior::kThrow));
 +  }
-+  for (auto [name, callback] :
-+       {std::pair{"capacity", ChannelCapacity}, std::pair{"size", ChannelSize},
-+        std::pair{"closed", ChannelClosed}}) {
++  for (auto [name, callback] : {std::make_pair("capacity", ChannelCapacity),
++                                std::make_pair("size", ChannelSize),
++                                std::make_pair("closed", ChannelClosed)}) {
 +    ctor->PrototypeTemplate()->SetAccessorProperty(
 +        String::NewFromUtf8(isolate, name).ToLocalChecked(),
 +        FunctionTemplate::New(isolate, callback, Local<Value>(), signature, 0,
@@ -4477,9 +4701,10 @@ index 00000000..e3f8a687
 +  ctor->SetClassName(String::NewFromUtf8Literal(isolate, "RwLock"));
 +  ctor->InstanceTemplate()->SetInternalFieldCount(1);
 +  Local<Signature> signature = Signature::New(isolate, ctor);
-+  for (auto [name, callback] : {std::pair{"__acquire", LockAcquire},
-+                                std::pair{"__release", LockRelease},
-+                                std::pair{"clearPoison", LockClearPoison}}) {
++  for (auto [name, callback] :
++       {std::make_pair("__acquire", LockAcquire),
++        std::make_pair("__release", LockRelease),
++        std::make_pair("clearPoison", LockClearPoison)}) {
 +    ctor->PrototypeTemplate()->Set(
 +        String::NewFromUtf8(isolate, name).ToLocalChecked(),
 +        FunctionTemplate::New(isolate, callback, Local<Value>(), signature, 0,
@@ -5000,10 +5225,10 @@ index 00000000..8fe0313f
 +#endif  // V8_D8_D8_CHANNEL_H_
 diff --git a/src/d8/d8-port.cc b/src/d8/d8-port.cc
 new file mode 100644
-index 00000000..08815a24
+index 00000000..f1888b85
 --- /dev/null
 +++ b/src/d8/d8-port.cc
-@@ -0,0 +1,1213 @@
+@@ -0,0 +1,1215 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -6060,12 +6285,14 @@ index 00000000..08815a24
 +  ctor->InstanceTemplate()->SetInternalFieldCount(1);
 +  Local<Signature> signature = Signature::New(isolate, ctor);
 +  for (auto [name, callback] :
-+       {std::pair{"serve", PortServe}, std::pair{"send", PortSend},
-+        std::pair{"reply", PortReply}, std::pair{"take", PortTake},
-+        std::pair{"listen", PortListen}, std::pair{"code", PortCode},
-+        std::pair{"expect", PortExpect}, std::pair{"gone", PortGone},
-+        std::pair{"abort", PortAbort}, std::pair{"aborted", PortAborted},
-+        std::pair{"deadline", PortDeadline}, std::pair{"ended", PortEnded}}) {
++       {std::make_pair("serve", PortServe), std::make_pair("send", PortSend),
++        std::make_pair("reply", PortReply), std::make_pair("take", PortTake),
++        std::make_pair("listen", PortListen), std::make_pair("code", PortCode),
++        std::make_pair("expect", PortExpect), std::make_pair("gone", PortGone),
++        std::make_pair("abort", PortAbort),
++        std::make_pair("aborted", PortAborted),
++        std::make_pair("deadline", PortDeadline),
++        std::make_pair("ended", PortEnded)}) {
 +    ctor->PrototypeTemplate()->Set(
 +        String::NewFromUtf8(isolate, name).ToLocalChecked(),
 +        FunctionTemplate::New(isolate, callback, Local<Value>(), signature, 0,
@@ -6314,7 +6541,7 @@ index 00000000..bd767012
 +
 +#endif  // V8_D8_D8_PORT_H_
 diff --git a/src/d8/d8.cc b/src/d8/d8.cc
-index b98eec11..66809e25 100644
+index b98eec11..d58abdc3 100644
 --- a/src/d8/d8.cc
 +++ b/src/d8/d8.cc
 @@ -14,6 +14,7 @@
@@ -6534,7 +6761,7 @@ index b98eec11..66809e25 100644
  
    // Prevent fuzzers from creating side effects.
    if (!i::v8_flags.fuzzing) {
-@@ -4856,73 +4966,1751 @@ Local<ObjectTemplate> Shell::GetOrCreateGlobalTemplate(Isolate* isolate) {
+@@ -4856,73 +4966,1754 @@ Local<ObjectTemplate> Shell::GetOrCreateGlobalTemplate(Isolate* isolate) {
    if (data->global_template_.IsEmpty()) {
      data->global_template_.Reset(isolate, CreateGlobalTemplate(isolate));
    }
@@ -6686,21 +6913,24 @@ index b98eec11..66809e25 100644
 +  region_template->Set(isolate, "__prepareSpawn",
 +                       FunctionTemplate::New(isolate, RegionPrepareSpawn));
 +  for (auto [name, callback] :
-+       {std::pair{"freeze", RegionFreeze}, std::pair{"seal", RegionSeal},
-+        std::pair{"thaw", RegionThaw},
-+        std::pair{"thawWhenFree", RegionThawWhenFree},
-+        std::pair{"borrow", RegionBorrow}, std::pair{"free", RegionFree},
-+        std::pair{"enter", RegionEnter},
-+        std::pair{"typedArray", RegionNewTypedArray}}) {
++       {std::make_pair("freeze", RegionFreeze),
++        std::make_pair("seal", RegionSeal), std::make_pair("thaw", RegionThaw),
++        std::make_pair("thawWhenFree", RegionThawWhenFree),
++        std::make_pair("borrow", RegionBorrow),
++        std::make_pair("free", RegionFree),
++        std::make_pair("enter", RegionEnter),
++        std::make_pair("typedArray", RegionNewTypedArray)}) {
 +    region_template->PrototypeTemplate()->Set(
 +        String::NewFromUtf8(isolate, name).ToLocalChecked(),
 +        FunctionTemplate::New(isolate, callback, Local<Value>(), signature, 0,
 +                              ConstructorBehavior::kThrow));
 +  }
-+  for (auto [name, callback] :
-+       {std::pair{"frozen", RegionFrozen}, std::pair{"readers", RegionReaders},
-+        std::pair{"frozenHere", RegionFrozenHere},
-+        std::pair{"sealed", RegionSealed}, std::pair{"freed", RegionFreed}, std::pair{"byteSize", RegionByteSize}}) {
++  for (auto [name, callback] : {std::make_pair("frozen", RegionFrozen),
++                                std::make_pair("readers", RegionReaders),
++                                std::make_pair("frozenHere", RegionFrozenHere),
++                                std::make_pair("sealed", RegionSealed),
++                                std::make_pair("freed", RegionFreed),
++                                std::make_pair("byteSize", RegionByteSize)}) {
 +    region_template->PrototypeTemplate()->SetAccessorProperty(
 +        String::NewFromUtf8(isolate, name).ToLocalChecked(),
 +        FunctionTemplate::New(isolate, callback, Local<Value>(), signature, 0,
@@ -8342,7 +8572,7 @@ index b98eec11..66809e25 100644
  }
  
  Local<ObjectTemplate> Shell::CreateAsyncHookTemplate(Isolate* isolate) {
-@@ -5403,9 +7191,1204 @@ MaybeLocal<Context> Shell::CreateEvaluationContext(Isolate* isolate) {
+@@ -5403,9 +7194,1204 @@ MaybeLocal<Context> Shell::CreateEvaluationContext(Isolate* isolate) {
    }
  #endif  // V8_ENABLE_HARDWARE_WATCHPOINT_SUPPORT
  
@@ -9547,7 +9777,7 @@ index b98eec11..66809e25 100644
  namespace {
  int LineFromOffset(Local<debug::Script> script, int offset) {
    debug::Location location = script->GetSourceLocation(offset);
-@@ -6565,6 +9548,7 @@ void SourceGroup::JoinThread(const i::ParkedScope& parked) {
+@@ -6565,6 +9551,7 @@ void SourceGroup::JoinThread(const i::ParkedScope& parked) {
  void SerializationDataQueue::Enqueue(std::unique_ptr<SerializationData> data) {
    base::MutexGuard lock_guard(&mutex_);
    data_.push_back(std::move(data));
@@ -9555,7 +9785,7 @@ index b98eec11..66809e25 100644
  }
  
  bool SerializationDataQueue::Dequeue(
-@@ -6574,6 +9558,7 @@ bool SerializationDataQueue::Dequeue(
+@@ -6574,6 +9561,7 @@ bool SerializationDataQueue::Dequeue(
    if (data_.empty()) return false;
    *out_data = std::move(data_[0]);
    data_.erase(data_.begin());
@@ -9563,7 +9793,7 @@ index b98eec11..66809e25 100644
    return true;
  }
  
-@@ -6585,6 +9570,7 @@ bool SerializationDataQueue::IsEmpty() {
+@@ -6585,6 +9573,7 @@ bool SerializationDataQueue::IsEmpty() {
  void SerializationDataQueue::Clear() {
    base::MutexGuard lock_guard(&mutex_);
    data_.clear();
@@ -9571,7 +9801,7 @@ index b98eec11..66809e25 100644
  }
  
  Worker::Worker(Isolate* parent_isolate, const char* script)
-@@ -6699,6 +9685,12 @@ std::unique_ptr<SerializationData> Worker::GetMessage(Isolate* requester) {
+@@ -6699,6 +9688,12 @@ std::unique_ptr<SerializationData> Worker::GetMessage(Isolate* requester) {
        out_queue_.Dequeue(&result);
        break;
      }
@@ -9584,7 +9814,7 @@ index b98eec11..66809e25 100644
      out_semaphore_.ParkedWait(
          reinterpret_cast<i::Isolate*>(requester)->main_thread_local_isolate());
    }
-@@ -6729,6 +9721,10 @@ void Worker::Terminate() {
+@@ -6729,6 +9724,10 @@ void Worker::Terminate() {
    base::MutexGuard lock_guard(&worker_mutex_);
    auto expected = State::kRunning;
    if (!state_.compare_exchange_strong(expected, State::kTerminating)) return;
@@ -9595,7 +9825,7 @@ index b98eec11..66809e25 100644
    std::unique_ptr<v8::Task> task(
        new TerminateTask(task_manager_, shared_from_this()));
    task_runner_->PostTask(std::move(task));
-@@ -6822,6 +9818,7 @@ Worker* Worker::GetCurrentWorker() { return current_worker_; }
+@@ -6822,6 +9821,7 @@ Worker* Worker::GetCurrentWorker() { return current_worker_; }
  void Worker::ExecuteInThread() {
    Isolate::CreateParams create_params = GetDefaultIsolateCreateParams();
    isolate_ = Isolate::New(create_params);
@@ -9603,7 +9833,7 @@ index b98eec11..66809e25 100644
  
    // TODO(mdanylo): can we omit dump disable here?
  #ifdef V8_DUMPLING
-@@ -6957,6 +9954,7 @@ void Worker::ExecuteInThread() {
+@@ -6957,6 +9957,7 @@ void Worker::ExecuteInThread() {
      platform::NotifyIsolateShutdown(g_default_platform, isolate_);
    }
  
@@ -9611,7 +9841,7 @@ index b98eec11..66809e25 100644
    isolate_->Dispose();
    isolate_ = nullptr;
  
-@@ -7221,6 +10219,10 @@ bool Shell::SetOptions(int argc, char* argv[]) {
+@@ -7221,6 +10222,10 @@ bool Shell::SetOptions(int argc, char* argv[]) {
        options.expected_to_throw = true;
      } else if (FlagMatches("--no-fail", &argv[i])) {
        options.no_fail = true;
@@ -9622,7 +9852,7 @@ index b98eec11..66809e25 100644
      } else if (FlagMatches("--dump-counters", &argv[i])) {
        options.dump_counters = true;
      } else if (FlagMatches("--dump-counters-nvp", &argv[i])) {
-@@ -7337,6 +10339,9 @@ bool Shell::SetOptions(int argc, char* argv[]) {
+@@ -7337,6 +10342,9 @@ bool Shell::SetOptions(int argc, char* argv[]) {
                                    argv, &i)) {
        // Value is expressed in MB.
        options.max_serializer_memory = atoi(flag_value) * i::MB;
@@ -9632,7 +9862,7 @@ index b98eec11..66809e25 100644
      } else if (FlagMatches("--bundle", &argv[i])) {
        options.bundle = true;
  #ifdef V8_FUZZILLI
-@@ -7972,6 +10977,27 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7972,6 +10980,27 @@ class Serializer : public ValueSerializer::Delegate {
      return true;
    }
  
@@ -9660,7 +9890,7 @@ index b98eec11..66809e25 100644
   private:
    Maybe<bool> PrepareTransfer(Local<Context> context, Local<Value> transfer) {
      if (transfer->IsArray()) {
-@@ -7980,6 +11006,22 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -7980,6 +11009,22 @@ class Serializer : public ValueSerializer::Delegate {
        for (uint32_t i = 0; i < length; ++i) {
          Local<Value> element;
          if (transfer_array->Get(context, i).ToLocal(&element)) {
@@ -9683,7 +9913,7 @@ index b98eec11..66809e25 100644
            if (!element->IsArrayBuffer()) {
              ThrowError(isolate_,
                         "Transfer array elements must be an ArrayBuffer");
-@@ -8012,7 +11054,64 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -8012,7 +11057,64 @@ class Serializer : public ValueSerializer::Delegate {
      }
    }
  
@@ -9748,7 +9978,7 @@ index b98eec11..66809e25 100644
      for (const auto& global_array_buffer : array_buffers_) {
        Local<ArrayBuffer> array_buffer =
            Local<ArrayBuffer>::New(isolate_, global_array_buffer);
-@@ -8038,6 +11137,7 @@ class Serializer : public ValueSerializer::Delegate {
+@@ -8038,6 +11140,7 @@ class Serializer : public ValueSerializer::Delegate {
    ValueSerializer serializer_;
    std::unique_ptr<SerializationData> data_;
    std::vector<Global<ArrayBuffer>> array_buffers_;
@@ -9756,7 +9986,7 @@ index b98eec11..66809e25 100644
    std::vector<Global<SharedArrayBuffer>> shared_array_buffers_;
    std::vector<Global<WasmModuleObject>> wasm_modules_;
    std::vector<std::shared_ptr<v8::BackingStore>> backing_stores_;
-@@ -8064,6 +11164,21 @@ class Deserializer : public ValueDeserializer::Delegate {
+@@ -8064,6 +11167,21 @@ class Deserializer : public ValueDeserializer::Delegate {
        return MaybeLocal<Value>();
      }
  
@@ -9778,7 +10008,7 @@ index b98eec11..66809e25 100644
      uint32_t index = 0;
      for (const auto& backing_store : data_->backing_stores()) {
        Local<ArrayBuffer> array_buffer =
-@@ -8100,6 +11215,21 @@ class Deserializer : public ValueDeserializer::Delegate {
+@@ -8100,6 +11218,21 @@ class Deserializer : public ValueDeserializer::Delegate {
      return nullptr;
    }
  
@@ -9800,7 +10030,7 @@ index b98eec11..66809e25 100644
   private:
    Isolate* isolate_;
    ValueDeserializer deserializer_;
-@@ -8368,9 +11498,13 @@ int Shell::Main(int argc, char* argv[]) {
+@@ -8368,9 +11501,13 @@ int Shell::Main(int argc, char* argv[]) {
    // The platform is owned by wrapper platform despite the `std::move` below.
    START_IGNORE_LIFETIME_SAFETY_WARNINGS()
    g_default_platform = g_platform.get();
@@ -9814,7 +10044,7 @@ index b98eec11..66809e25 100644
    }
    if (options.stress_delay_tasks) {
      int64_t random_seed = i::v8_flags.fuzzer_random_seed;
-@@ -8497,6 +11631,7 @@ int Shell::Main(int argc, char* argv[]) {
+@@ -8497,6 +11634,7 @@ int Shell::Main(int argc, char* argv[]) {
    }
  
    Isolate* isolate = Isolate::New(create_params);

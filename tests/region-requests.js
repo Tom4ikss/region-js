@@ -44,8 +44,14 @@ const builder = new Worker(`
   }
   onmessage = ({ data }) => {
     if (data.op === 'read') {
-      using _ = Region.of(data.rows).borrow();
-      postMessage(data.rows.reduce((sum, row) => sum + row.id, 0));
+      // The borrow goes back before the answer: the main thread asks the
+      // owner to thaw as soon as it has the answer.
+      let sum;
+      {
+        using _ = Region.of(data.rows).borrow();
+        sum = data.rows.reduce((sum, row) => sum + row.id, 0);
+      }
+      postMessage(sum);
       return;
     }
     const region = new Region();
