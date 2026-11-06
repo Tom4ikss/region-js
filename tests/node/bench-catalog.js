@@ -1,4 +1,4 @@
-// node --harmony-regions bench-catalog.js [rows] [copy|frozen]
+// node --harmony-regions bench-catalog.js [rows] [copy|frozen] [workers]
 // One catalog for 8 workers: as a copy in every worker (postMessage() with a
 // structured clone) and as one frozen region that the workers borrow. For
 // each: the time until every worker has the catalog, the memory of the
@@ -9,7 +9,7 @@ const { Worker } = require('node:worker_threads');
 const { once } = require('node:events');
 
 const count = Number(process.argv[2] ?? 300000);
-const workers = 8;
+const workers = Number(process.argv[4] ?? 8);
 
 function fill(rows) {
   for (let i = 0; i < count; i++) {
