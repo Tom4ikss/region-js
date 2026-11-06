@@ -97,4 +97,4 @@ sidebar:
 
 ### Где посмотреть код? {/* #where-is-the-code */}
 
-Изменения движка — патч `v8/regions.patch`, после `scripts/setup.sh` они лежат в `v8-src/v8`: объект региона в `src/objects/js-region.*`, API — в `src/d8/d8.cc`, порт задач и каналы — в `src/d8/d8-port.cc` и `src/d8/d8-channel.cc`. Решения и риски описаны в `DESIGN.ru.md`, что вошло в релиз — в `CHANGELOG.md`, тесты и замеры — в `tests/`, типы и правила линтеров — в `playground/`.
+Изменения движка — патч `v8/regions.patch`, после `scripts/setup.sh` они лежат в `v8-src/v8`: объект региона в `src/objects/js-region.*`; `Region` и `spawn` — в `src/regions/regions-globals.cc` и `regions-spawn.cc`, порт задач и каналы — в `regions-port.cc` и `regions-channel.cc`; API для эмбеддеров — в `include/v8-regions.h`. Сторона Node.js — патч `node/node.patch`. Решения и риски описаны в `DESIGN.ru.md`, что вошло в релиз — в `CHANGELOG.md`, тесты и замеры — в `tests/`, типы и правила линтеров — в `playground/`.

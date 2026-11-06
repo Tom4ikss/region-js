@@ -95,8 +95,8 @@ node scripts/run-examples.mjs        # перезапустить примеры
 
 | Папка | Что там |
 |---|---|
-| `v8/regions.patch` | Сам форк: патч поверх V8 `v8/BASE`, флаги сборки в `v8/args.gn` |
-| `node/` | Node.js с регионами: `node/node.patch` поверх `nodejs/node-v8` `node/BASE`, собирает `scripts/setup-node.sh` (Linux x64, первый вариант `Region`) |
+| `v8/regions.patch` | Сам форк: патч поверх V8 `v8/BASE`, флаги сборки в `v8/args.gn`; `Region`, каналы и `spawn` — в его `src/regions/` |
+| `node/` | Node.js с регионами: `node/node.patch` поверх `nodejs/node-v8` `node/BASE`, собирает `scripts/setup-node.sh` (Linux x64: `Region`, каналы и `spawn`, тот же рантайм, что в d8) |
 | `site/` | Сайт с документацией: страницы в `site/src/content/docs` (английский в корне, русский в `ru/`), примеры с сохранённым выводом в `site/examples/en` и `site/examples/ru` |
 | `tests/` | Тесты и бенчмарки регионов, `spawn`, каналов и `free()`, фаззер |
 | `playground/` | Типы, Biome, ESLint-плагин и примеры для VSCode |

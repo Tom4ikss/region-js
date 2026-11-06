@@ -97,4 +97,4 @@ That ordinary objects can be passed between threads without a copy, and that the
 
 ### Where is the code? {/* #where-is-the-code */}
 
-The engine changes are the `v8/regions.patch` patch; after `scripts/setup.sh` they are in `v8-src/v8`: the region object in `src/objects/js-region.*`, the API in `src/d8/d8.cc`, the task port and channels in `src/d8/d8-port.cc` and `src/d8/d8-channel.cc`. Decisions and risks are described in `DESIGN.md`, what went into the release in `CHANGELOG.md`, tests and measurements are in `tests/`, and types and linter rules are in `playground/`.
+The engine changes are the `v8/regions.patch` patch; after `scripts/setup.sh` they are in `v8-src/v8`: the region object in `src/objects/js-region.*`; `Region` and `spawn` in `src/regions/regions-globals.cc` and `regions-spawn.cc`, the task port and channels in `regions-port.cc` and `regions-channel.cc`; the API for embedders in `include/v8-regions.h`. The Node.js side is the `node/node.patch` patch. Decisions and risks are described in `DESIGN.md`, what went into the release in `CHANGELOG.md`, tests and measurements are in `tests/`, and types and linter rules are in `playground/`.

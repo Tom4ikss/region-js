@@ -15,7 +15,7 @@ index d00bf6cf..461f9e61 100755
    o['variables']['v8_enable_external_code_space'] = 1 if options.enable_pointer_compression else 0
    o['variables']['v8_enable_31bit_smis_on_64bit_arch'] = 1 if options.enable_pointer_compression else 0
 diff --git a/lib/internal/process/pre_execution.js b/lib/internal/process/pre_execution.js
-index 0f5aaf85..8908efbb 100644
+index 0f5aaf85..17a95980 100644
 --- a/lib/internal/process/pre_execution.js
 +++ b/lib/internal/process/pre_execution.js
 @@ -122,6 +122,7 @@ function prepareExecution(options) {
@@ -26,246 +26,65 @@ index 0f5aaf85..8908efbb 100644
    setupCodeCoverage();
    setupDebugEnv();
    // Process initial diagnostic reporting configuration, if present.
-@@ -472,6 +473,13 @@ function setupEventsource() {
+@@ -470,6 +471,13 @@ function setupEventsource() {
+   }
+ }
  
- // TODO(aduh95): move this to internal/bootstrap/web/* when the CLI flag is
- //               removed.
-+// The Region class of region-js, with node --harmony-regions in a build that
-+// has a shared heap.
++// The globals of ownership regions, with node --harmony-regions in a build
++// that has a shared heap.
 +function setupRegions() {
 +  if (!internalBinding('regions').enabled) return;
-+  exposeLazyInterfaces(globalThis, 'internal/regions', ['Region']);
++  require('internal/regions').setup();
 +}
 +
+ // TODO(aduh95): move this to internal/bootstrap/web/* when the CLI flag is
+ //               removed.
  function setupNavigator() {
-   if (getEmbedderOptions().noBrowserGlobals ||
-       getOptionValue('--no-experimental-global-navigator')) {
 diff --git a/lib/internal/regions.js b/lib/internal/regions.js
 new file mode 100644
-index 00000000..b7c120ef
+index 00000000..c30072d8
 --- /dev/null
 +++ b/lib/internal/regions.js
-@@ -0,0 +1,221 @@
+@@ -0,0 +1,40 @@
 +'use strict';
 +
-+// Ownership regions (node --harmony-regions): a first cut of the Region class
-+// of region-js. It covers creating a region, making it current for #{} and #[]
-+// literals, finding the region of an object, moving a region to another
-+// thread in the transfer list of postMessage(), and freezing it so that other
-+// threads can borrow and read it. spawn and channels are not here yet.
++// Ownership regions (node --harmony-regions): the globals of V8's region
++// runtime, the same as in d8: Region, Channel, RwLock, LocalRef, spawn() and
++// JoinSet. Regions move between threads in the transfer list of
++// postMessage(), and spawn() runs its tasks in worker_threads workers.
 +
 +const {
-+  SafeFinalizationRegistry,
-+  SafeMap,
-+  SafeWeakRef,
-+  SymbolDispose,
++  ObjectGetOwnPropertyNames,
 +} = primordials;
 +
 +const binding = internalBinding('regions');
-+const { validateFunction } = require('internal/validators');
-+const {
-+  kDeserialize,
-+  kTransfer,
-+  markTransferMode,
-+} = require('internal/worker/js_transferable');
 +
-+// Region objects by id, so that Region.of() gives the same object every time.
-+// Each one holds a handle on its region, which keeps the id valid.
-+const handles = new SafeMap();
-+const finalizer = new SafeFinalizationRegistry((id) => {
-+  const ref = handles.get(id);
-+  if (ref !== undefined && ref.deref() === undefined) handles.delete(id);
-+  binding.removeHandle(id);
-+});
++let exportPort;
 +
-+// What the constructor does instead of creating a region: kExisting for
-+// Region.of(), which passes the id in existingId, and kReceiving for a region
-+// that arrives in a message, which kDeserialize gets.
-+const kCreate = 0;
-+const kExisting = 1;
-+const kReceiving = 2;
-+let construct = kCreate;
-+let existingId = -1;
-+
-+function ownershipError(id, message) {
-+  // OwnershipError is a global of the engine with --harmony-regions.
-+  const error = new globalThis.OwnershipError(message);
-+  error.region = id;
-+  return error;
++// Starts a pool worker of spawn(). The worker gets the task port by number;
++// its message listener keeps it running, as a pool worker must. The pool
++// does not keep the process alive: a thread that waits for the reply of a
++// task does.
++function startWorker(source, port) {
++  const { Worker } = require('worker_threads');
++  const id = exportPort(port);
++  const worker = new Worker(`${source}
++require('worker_threads').parentPort.on('message', () => {});
++__start(Region.__importPort(${id}));`, { eval: true });
++  worker.unref();
++  return worker;
 +}
 +
-+function enter(id) {
-+  if (!binding.enter(id)) {
-+    throw ownershipError(id, 'Region is not owned by this thread');
-+  }
++function setup() {
++  binding.installGlobals();
++  exportPort = globalThis.Region.__exportPort;
++  // Before user code: these are the globals every thread has, which spawn()
++  // callbacks use without capturing them.
++  binding.installSpawn(startWorker, ObjectGetOwnPropertyNames(globalThis));
 +}
-+
-+// A scope that runs exit once, by `using` or by a call.
-+function scope(exit) {
-+  let open = true;
-+  const close = () => {
-+    if (!open) return;
-+    open = false;
-+    exit();
-+  };
-+  return { __proto__: null, exit: close, [SymbolDispose]: close };
-+}
-+
-+function track(region, id) {
-+  handles.set(id, new SafeWeakRef(region));
-+  finalizer.register(region, id);
-+}
-+
-+class Region {
-+  #id = -1;
-+
-+  constructor() {
-+    markTransferMode(this, false, true);
-+    const how = construct;
-+    construct = kCreate;
-+    if (how === kReceiving) return;
-+    let id;
-+    if (how === kExisting) {
-+      id = existingId;
-+      binding.addHandle(id);
-+    } else {
-+      id = binding.create();
-+      if (id < 0) throw new RangeError('Too many regions');
-+    }
-+    this.#id = id;
-+    track(this, id);
-+  }
-+
-+  get id() {
-+    return this.#id;
-+  }
-+
-+  get owned() {
-+    return binding.isOwner(this.#id);
-+  }
-+
-+  // Calls fn with the region current: the #{} and #[] literals of fn allocate
-+  // in it.
-+  run(fn) {
-+    validateFunction(fn, 'fn');
-+    const id = this.#id;
-+    enter(id);
-+    try {
-+      return fn();
-+    } finally {
-+      binding.exit(id);
-+    }
-+  }
-+
-+  // Makes the region current until the returned scope is disposed, as in
-+  // `using _ = region.enter()`.
-+  enter() {
-+    const id = this.#id;
-+    enter(id);
-+    return scope(() => binding.exit(id));
-+  }
-+
-+  get frozen() {
-+    return binding.isFrozen(this.#id);
-+  }
-+
-+  // The number of threads that borrow the frozen region.
-+  get readers() {
-+    return binding.readers(this.#id);
-+  }
-+
-+  // Nobody may change the region from now on; other threads read it while
-+  // they borrow it. Its objects can then go to them in messages, without a
-+  // transfer list.
-+  freeze() {
-+    const id = this.#id;
-+    if (!binding.freeze(id)) {
-+      throw ownershipError(id, binding.isFrozen(id) ?
-+        'Region is already frozen' : 'Region is not owned by this thread');
-+    }
-+  }
-+
-+  // Makes the thread that froze the region its owner again, once no other
-+  // thread borrows it.
-+  thaw() {
-+    const id = this.#id;
-+    const result = binding.thaw(id);
-+    if (result === 1) {
-+      const error = ownershipError(id, 'Region is still borrowed by ' +
-+                                   `${binding.readers(id)} reader(s)`);
-+      error.reason = 'borrowed';
-+      throw error;
-+    }
-+    if (result === 2) {
-+      throw ownershipError(id, 'Region is not frozen by this thread');
-+    }
-+  }
-+
-+  // Reads of the frozen region until the returned scope is disposed, as in
-+  // `using _ = Region.of(rows).borrow()`.
-+  borrow() {
-+    const id = this.#id;
-+    if (!binding.borrow(id)) {
-+      throw ownershipError(id, 'Region must be frozen to borrow it');
-+    }
-+    return scope(() => binding.unborrow(id));
-+  }
-+
-+  // postMessage(value, [region]) moves the region: this thread gives it up
-+  // and the receiving one owns it. Objects of the region in the message go by
-+  // reference.
-+  [kTransfer]() {
-+    const id = this.#id;
-+    const generation = binding.release(id);
-+    if (generation < 0) {
-+      throw ownershipError(id, binding.isOwner(id) ?
-+        'Region cannot move: it is sealed or in an RwLock' :
-+        'Region is not owned by this thread');
-+    }
-+    return {
-+      data: { id, generation },
-+      deserializeInfo: 'internal/regions:RegionReceiver',
-+    };
-+  }
-+
-+  [kDeserialize]({ id, generation }) {
-+    if (!binding.claim(id, generation)) {
-+      throw ownershipError(id, 'Region is not in transit');
-+    }
-+    this.#id = id;
-+    track(this, id);
-+  }
-+
-+  // The region of a region object.
-+  static of(value) {
-+    const id = binding.regionOf(value);
-+    if (id < 0) {
-+      throw new TypeError('Region.of() expects an object from a region');
-+    }
-+    const existing = handles.get(id)?.deref();
-+    if (existing !== undefined) return existing;
-+    construct = kExisting;
-+    existingId = id;
-+    return new Region();
-+  }
-+
-+  static isRegionObject(value) {
-+    return binding.regionOf(value) >= 0;
-+  }
-+}
-+
-+// The receiving end of postMessage(): a Region without a region yet, which
-+// kDeserialize gives the moved one.
-+function RegionReceiver() {
-+  construct = kReceiving;
-+  return new Region();
-+}
-+RegionReceiver.prototype = Region.prototype;
 +
 +module.exports = {
-+  enabled: binding.enabled,
-+  Region,
-+  RegionReceiver,
++  setup,
 +};
 diff --git a/node.gyp b/node.gyp
 index 714609b0..3da26eb4 100644
@@ -427,116 +246,258 @@ index c2cd5998..9896e6a5 100644
      if (req.result < 0) {
        FS_SYNC_TRACE_END(read);
        // req will be cleaned up by scope leave.
+diff --git a/src/node_messaging.cc b/src/node_messaging.cc
+index 9a36415a..d37c92f4 100644
+--- a/src/node_messaging.cc
++++ b/src/node_messaging.cc
+@@ -9,6 +9,7 @@
+ #include "node_external_reference.h"
+ #include "node_process-inl.h"
+ #include "util-inl.h"
++#include "v8-regions.h"
+ 
+ using node::contextify::ContextifyContext;
+ using node::errors::TryCatchScope;
+@@ -137,12 +138,29 @@ class DeserializerDelegate : public ValueDeserializer::Delegate {
+ 
+ }  // anonymous namespace
+ 
++Message::~Message() {
++  for (const MovedRegion& moved : regions_) {
++    if (!moved.claimed) v8::experimental::Regions::RemoveHandle(moved.id);
++  }
++}
++
+ MaybeLocal<Value> Message::Deserialize(Environment* env,
+                                        Local<Context> context,
+                                        Local<Value>* port_list) {
+   Context::Scope context_scope(context);
+ 
+   CHECK(!IsCloseMessage());
++  // The regions become this thread's before their objects are read.
++  for (MovedRegion& moved : regions_) {
++    if (!v8::experimental::Regions::Claim(
++            env->isolate(), moved.id, moved.generation)) {
++      v8::experimental::Regions::ThrowOwnershipError(
++          env->isolate(), moved.id, "Region is not in transit");
++      return {};
++    }
++    moved.claimed = true;
++    v8::experimental::Regions::RemoveHandle(moved.id);
++  }
+   if (port_list != nullptr && !transferables_.empty()) {
+     // Need to create this outside of the EscapableHandleScope, but inside
+     // the Context::Scope.
+@@ -487,6 +505,7 @@ Maybe<bool> Message::Serialize(Environment* env,
+   delegate.serializer = &serializer;
+ 
+   LocalVector<ArrayBuffer> array_buffers(env->isolate());
++  std::vector<int> regions;
+   for (uint32_t i = 0; i < transfer_list_v.length(); ++i) {
+     Local<Value> entry_val = transfer_list_v[i];
+     if (!entry_val->IsObject()) {
+@@ -494,6 +513,24 @@ Maybe<bool> Message::Serialize(Environment* env,
+       ThrowDataCloneException(context, env->clone_untransferable_str());
+       return Nothing<bool>();
+     }
++    // A Region, or an object of a region, moves the region. Checked first:
++    // the objects of a region another thread owns cannot be looked at.
++    int region =
++        v8::experimental::Regions::TransferredRegion(env->isolate(), entry_val);
++    if (region >= 0) {
++      if (std::ranges::find(regions, region) != regions.end()) {
++        ThrowDataCloneException(
++            context,
++            FIXED_ONE_BYTE_STRING(env->isolate(),
++                                  "Transfer list contains duplicate Region"));
++        return Nothing<bool>();
++      }
++      if (!v8::experimental::Regions::CheckTransfer(env->isolate(), region)) {
++        return Nothing<bool>();
++      }
++      regions.push_back(region);
++      continue;
++    }
+     Local<Object> entry = entry_val.As<Object>();
+     // See https://github.com/nodejs/node/pull/30339#issuecomment-552225353
+     // for details.
+@@ -607,6 +644,17 @@ Maybe<bool> Message::Serialize(Environment* env,
+     array_buffers_.emplace_back(std::move(backing_store));
+   }
+ 
++  for (int region : regions) {
++    int generation =
++        v8::experimental::Regions::Release(env->isolate(), region);
++    if (generation < 0) {
++      // The serialization ran code that moved or freed it.
++      v8::experimental::Regions::CheckTransfer(env->isolate(), region);
++      return Nothing<bool>();
++    }
++    regions_.push_back({region, generation, false});
++  }
++
+   if (delegate.Finish(context).IsNothing())
+     return Nothing<bool>();
+ 
+diff --git a/src/node_messaging.h b/src/node_messaging.h
+index 0abd7da3..4f8a5c46 100644
+--- a/src/node_messaging.h
++++ b/src/node_messaging.h
+@@ -49,7 +49,7 @@ class Message : public MemoryRetainer {
+   // V8 ValueSerializer API. If `payload` is empty, this message indicates
+   // that the receiving message port should close itself.
+   explicit Message(MallocedBuffer<char>&& payload = MallocedBuffer<char>());
+-  ~Message() = default;
++  ~Message();
+ 
+   Message(Message&& other) = default;
+   Message& operator=(Message&& other) = default;
+@@ -118,6 +118,15 @@ class Message : public MemoryRetainer {
+   std::vector<std::unique_ptr<TransferData>> transferables_;
+   std::vector<v8::CompiledWasmModule> wasm_modules_;
+   std::optional<v8::SharedValueConveyor> shared_value_conveyor_;
++  // Regions moved by the message (--harmony-regions). Until the receiver
++  // claims one, the message holds a handle to it, so that it is not freed in
++  // transit.
++  struct MovedRegion {
++    int id;
++    int generation;
++    bool claimed;
++  };
++  std::vector<MovedRegion> regions_;
+ 
+   friend class MessagePort;
+ };
 diff --git a/src/node_regions.cc b/src/node_regions.cc
 new file mode 100644
-index 00000000..2d7b1ffe
+index 00000000..508cfd5d
 --- /dev/null
 +++ b/src/node_regions.cc
-@@ -0,0 +1,157 @@
-+// Ownership regions (node --harmony-regions): the binding behind the Region
-+// global of lib/internal/regions.js, on top of V8's experimental
-+// v8-regions.h. Regions need a shared heap, so they exist only in builds with
-+// a shared pointer compression cage.
+@@ -0,0 +1,151 @@
++// Ownership regions (node --harmony-regions): the globals of V8's region
++// runtime, as d8 has them, on every thread. Regions need a shared heap, so
++// they exist only in builds with a shared pointer compression cage.
++
++#include <string>
++#include <vector>
 +
 +#include "env-inl.h"
 +#include "node_binding.h"
 +#include "node_external_reference.h"
 +#include "util-inl.h"
++#include "uv.h"
 +#include "v8-regions.h"
 +
 +namespace node {
 +namespace regions {
 +
++using v8::Array;
 +using v8::Boolean;
 +using v8::Context;
++using v8::Function;
 +using v8::FunctionCallbackInfo;
-+using v8::Int32;
 +using v8::Isolate;
 +using v8::Local;
++using v8::MaybeLocal;
 +using v8::Object;
++using v8::String;
++using v8::Undefined;
 +using v8::Value;
 +using v8::experimental::Regions;
 +
-+// create(): a new region owned by this thread with one handle on it, or -1.
-+static void Create(const FunctionCallbackInfo<Value>& args) {
-+  args.GetReturnValue().Set(Regions::Create(args.GetIsolate()));
++// installGlobals(): Region, Channel, RwLock and LocalRef.
++static void InstallGlobals(const FunctionCallbackInfo<Value>& args) {
++  Local<Context> context = args.GetIsolate()->GetCurrentContext();
++  USE(Regions::InstallGlobals(context));
 +}
 +
-+static int RegionArg(const FunctionCallbackInfo<Value>& args) {
-+  CHECK(args[0]->IsInt32());
-+  return args[0].As<Int32>()->Value();
++// The names of the globals that every thread has, for the probe context of
++// spawn(): callbacks use those without capturing them. One isolate per
++// thread.
++thread_local std::vector<std::string> global_names;
++
++static MaybeLocal<Context> NewProbeContext(Isolate* isolate) {
++  Local<Context> context = Context::New(isolate);
++  Context::Scope context_scope(context);
++  for (const std::string& name : global_names) {
++    Local<String> key;
++    if (!String::NewFromUtf8(isolate, name.c_str()).ToLocal(&key) ||
++        context->Global()->Set(context, key, Undefined(isolate)).IsNothing()) {
++      return {};
++    }
++  }
++  return context;
 +}
 +
-+static void AddHandle(const FunctionCallbackInfo<Value>& args) {
-+  Regions::AddHandle(RegionArg(args));
-+}
++// Keeps the event loop running while the thread waits for another one: for
++// a channel or lock operation, or for the reply of a spawn() task. The reply
++// comes as a platform task, which wakes the loop. The check handle is
++// referenced from when the runtime says that a wait may have started until
++// a turn of the loop finds none.
++class KeepAlive {
++ public:
++  explicit KeepAlive(Environment* env) : env_(env) {
++    CHECK_EQ(uv_check_init(env->event_loop(), &check_), 0);
++    CHECK_EQ(uv_check_start(&check_, OnCheck), 0);
++    uv_unref(reinterpret_cast<uv_handle_t*>(&check_));
++    Regions::SetPendingWorkCallback(env->isolate(), OnPendingWork, this);
++    env->AddCleanupHook(Close, this);
++  }
 +
-+static void RemoveHandle(const FunctionCallbackInfo<Value>& args) {
-+  Regions::RemoveHandle(RegionArg(args));
-+}
++ private:
++  static void OnPendingWork(Isolate* isolate, void* data) {
++    KeepAlive* keep_alive = static_cast<KeepAlive*>(data);
++    if (keep_alive->referenced_) return;
++    keep_alive->referenced_ = true;
++    uv_ref(reinterpret_cast<uv_handle_t*>(&keep_alive->check_));
++  }
 +
-+static void IsOwner(const FunctionCallbackInfo<Value>& args) {
-+  args.GetReturnValue().Set(
-+      Regions::IsOwner(args.GetIsolate(), RegionArg(args)));
-+}
++  static void OnCheck(uv_check_t* handle) {
++    KeepAlive* keep_alive = ContainerOf(&KeepAlive::check_, handle);
++    if (!keep_alive->referenced_ ||
++        Regions::HasPendingWork(keep_alive->env_->isolate())) {
++      return;
++    }
++    keep_alive->referenced_ = false;
++    uv_unref(reinterpret_cast<uv_handle_t*>(handle));
++  }
 +
-+// enter(id): makes the region current; false when this thread does not own
-+// it.
-+static void Enter(const FunctionCallbackInfo<Value>& args) {
-+  args.GetReturnValue().Set(Regions::Enter(args.GetIsolate(), RegionArg(args)));
-+}
++  static void Close(void* data) {
++    KeepAlive* keep_alive = static_cast<KeepAlive*>(data);
++    Regions::SetPendingWorkCallback(
++        keep_alive->env_->isolate(), nullptr, nullptr);
++    uv_close(reinterpret_cast<uv_handle_t*>(&keep_alive->check_),
++             [](uv_handle_t* handle) {
++               KeepAlive* closed = ContainerOf(
++                   &KeepAlive::check_, reinterpret_cast<uv_check_t*>(handle));
++               delete closed;
++             });
++  }
 +
-+static void Exit(const FunctionCallbackInfo<Value>& args) {
-+  Regions::Exit(args.GetIsolate(), RegionArg(args));
-+}
++  Environment* env_;
++  uv_check_t check_;
++  bool referenced_ = false;
++};
 +
-+// release(id): gives the region up for a move to another thread; the
-+// generation to claim it with, or -1.
-+static void Release(const FunctionCallbackInfo<Value>& args) {
-+  args.GetReturnValue().Set(
-+      Regions::Release(args.GetIsolate(), RegionArg(args)));
-+}
-+
-+// claim(id, generation): takes a region that another thread gave up.
-+static void Claim(const FunctionCallbackInfo<Value>& args) {
-+  CHECK(args[1]->IsInt32());
-+  args.GetReturnValue().Set(Regions::Claim(
-+      args.GetIsolate(), RegionArg(args), args[1].As<Int32>()->Value()));
-+}
-+
-+// freeze(id): false when this thread does not own the region.
-+static void Freeze(const FunctionCallbackInfo<Value>& args) {
-+  args.GetReturnValue().Set(
-+      Regions::Freeze(args.GetIsolate(), RegionArg(args)));
-+}
-+
-+// thaw(id): 0 thawed, 1 still borrowed, 2 not frozen by this thread.
-+static void Thaw(const FunctionCallbackInfo<Value>& args) {
-+  args.GetReturnValue().Set(static_cast<int>(
-+      Regions::Thaw(args.GetIsolate(), RegionArg(args))));
-+}
-+
-+// borrow(id): false when the region is not frozen.
-+static void Borrow(const FunctionCallbackInfo<Value>& args) {
-+  args.GetReturnValue().Set(
-+      Regions::Borrow(args.GetIsolate(), RegionArg(args)));
-+}
-+
-+static void Unborrow(const FunctionCallbackInfo<Value>& args) {
-+  Regions::Unborrow(args.GetIsolate(), RegionArg(args));
-+}
-+
-+static void IsFrozen(const FunctionCallbackInfo<Value>& args) {
-+  args.GetReturnValue().Set(Regions::IsFrozen(RegionArg(args)));
-+}
-+
-+static void Readers(const FunctionCallbackInfo<Value>& args) {
-+  args.GetReturnValue().Set(Regions::Readers(RegionArg(args)));
-+}
-+
-+// regionOf(value): the region of a region object, -1 for anything else.
-+static void RegionOf(const FunctionCallbackInfo<Value>& args) {
-+  args.GetReturnValue().Set(Regions::RegionOf(args[0]));
++// installSpawn(startWorker, globalNames): spawn(), spawn.scope() and JoinSet.
++// startWorker(source, port) starts a pool worker; globalNames are the
++// globals that every thread has.
++static void InstallSpawn(const FunctionCallbackInfo<Value>& args) {
++  Environment* env = Environment::GetCurrent(args);
++  Isolate* isolate = args.GetIsolate();
++  Local<Context> context = isolate->GetCurrentContext();
++  CHECK(args[0]->IsFunction());
++  CHECK(args[1]->IsArray());
++  Local<Array> names = args[1].As<Array>();
++  global_names.clear();
++  for (uint32_t i = 0; i < names->Length(); i++) {
++    Local<Value> name;
++    if (!names->Get(context, i).ToLocal(&name)) return;
++    if (!name->IsString()) continue;
++    global_names.emplace_back(*Utf8Value(isolate, name));
++  }
++  new KeepAlive(env);
++  Regions::InstallSpawn(context, args[0].As<Function>(), NewProbeContext);
 +}
 +
 +static void Initialize(Local<Object> target,
@@ -549,39 +510,13 @@ index 00000000..2d7b1ffe
 +            FIXED_ONE_BYTE_STRING(isolate, "enabled"),
 +            Boolean::New(isolate, Regions::IsEnabled(isolate)))
 +      .Check();
-+  SetMethod(context, target, "create", Create);
-+  SetMethod(context, target, "addHandle", AddHandle);
-+  SetMethod(context, target, "removeHandle", RemoveHandle);
-+  SetMethodNoSideEffect(context, target, "isOwner", IsOwner);
-+  SetMethod(context, target, "enter", Enter);
-+  SetMethod(context, target, "exit", Exit);
-+  SetMethod(context, target, "release", Release);
-+  SetMethod(context, target, "claim", Claim);
-+  SetMethod(context, target, "freeze", Freeze);
-+  SetMethod(context, target, "thaw", Thaw);
-+  SetMethod(context, target, "borrow", Borrow);
-+  SetMethod(context, target, "unborrow", Unborrow);
-+  SetMethodNoSideEffect(context, target, "isFrozen", IsFrozen);
-+  SetMethodNoSideEffect(context, target, "readers", Readers);
-+  SetMethodNoSideEffect(context, target, "regionOf", RegionOf);
++  SetMethod(context, target, "installGlobals", InstallGlobals);
++  SetMethod(context, target, "installSpawn", InstallSpawn);
 +}
 +
 +static void RegisterExternalReferences(ExternalReferenceRegistry* registry) {
-+  registry->Register(Create);
-+  registry->Register(AddHandle);
-+  registry->Register(RemoveHandle);
-+  registry->Register(IsOwner);
-+  registry->Register(Enter);
-+  registry->Register(Exit);
-+  registry->Register(Release);
-+  registry->Register(Claim);
-+  registry->Register(Freeze);
-+  registry->Register(Thaw);
-+  registry->Register(Borrow);
-+  registry->Register(Unborrow);
-+  registry->Register(IsFrozen);
-+  registry->Register(Readers);
-+  registry->Register(RegionOf);
++  registry->Register(InstallGlobals);
++  registry->Register(InstallSpawn);
 +}
 +
 +}  // namespace regions
@@ -590,6 +525,28 @@ index 00000000..2d7b1ffe
 +NODE_BINDING_CONTEXT_AWARE_INTERNAL(regions, node::regions::Initialize)
 +NODE_BINDING_EXTERNAL_REFERENCE(regions,
 +                                node::regions::RegisterExternalReferences)
+diff --git a/src/node_worker.cc b/src/node_worker.cc
+index 308d9876..cc32564f 100644
+--- a/src/node_worker.cc
++++ b/src/node_worker.cc
+@@ -12,6 +12,7 @@
+ #include "node_snapshot_builder.h"
+ #include "permission/permission.h"
+ #include "util-inl.h"
++#include "v8-regions.h"
+ #include "v8-cppgc.h"
+ #include "v8-profiler.h"
+ 
+@@ -1321,6 +1322,9 @@ void Worker::Exit(ExitCode code,
+   if (env_ != nullptr) {
+     exit_code_ = code;
+     Stop(env_);
++    // A worker blocked in a channel operation (--harmony-regions) returns
++    // from it.
++    v8::experimental::Regions::TerminateIsolate(env_->isolate());
+   } else {
+     stopped_ = true;
+   }
 diff --git a/src/spawn_sync.cc b/src/spawn_sync.cc
 index 0358bb99..e3197da3 100644
 --- a/src/spawn_sync.cc
@@ -616,17 +573,23 @@ index 0358bb99..e3197da3 100644
      // We can't handle uv_run failure.
      ABORT();
 diff --git a/test/parallel/test-bootstrap-modules.js b/test/parallel/test-bootstrap-modules.js
-index e6a40d45..6c8d0670 100644
+index e6a40d45..3333d741 100644
 --- a/test/parallel/test-bootstrap-modules.js
 +++ b/test/parallel/test-bootstrap-modules.js
-@@ -113,6 +113,7 @@ expected.beforePreExec = new Set([
+@@ -113,8 +113,13 @@ expected.beforePreExec = new Set([
  ]);
  
  expected.atRunTime = new Set([
 +  'Internal Binding regions',
    'NativeModule internal/process/pre_execution',
  ]);
++// With --harmony-regions, the runtime of ownership regions.
++if (process.execArgv.includes('--harmony-regions')) {
++  expected.atRunTime.add('NativeModule internal/regions');
++}
  
+ const { isMainThread } = require('worker_threads');
+ // Binaries built without the snapshot (e.g. cross-compiled) and
 diff --git a/tools/v8_gypfiles/features.gypi b/tools/v8_gypfiles/features.gypi
 index 309b295e..e57c5ea8 100644
 --- a/tools/v8_gypfiles/features.gypi

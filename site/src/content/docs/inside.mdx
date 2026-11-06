@@ -320,7 +320,7 @@ The main risk of this design is a missed fast path. If some builtin reads a regi
 
 ## Size of the changes {/* #size */}
 
-About 120 engine files were changed, with about 9,800 lines added; 5 of them are new: the region object, its table and the builtins for literals. `Region`, `spawn` and channels are implemented in d8, the test shell, in about 6,600 more lines. `Region`, the task port (`d8-port.cc`) and channels (`d8-channel.cc`) are written in C++. `spawn` is mostly JS on top of `Region`, `Worker` and the task port, with help from C++ for analyzing captures.
+About 120 engine files were changed, with about 9,900 lines added; 6 of them are new: the region object, its table, the builtins for literals and the API for embedders. `Region`, `spawn` and channels are about 7,200 more lines in the engine's `src/regions/`, which d8 and Node.js share. `Region`, the task port (`regions-port.cc`) and channels (`regions-channel.cc`) are written in C++. `spawn` is mostly JS on top of `Region`, the task port and the embedder's workers, with help from C++ for analyzing captures.
 
 :::note[Simplifications in the first version]
 In the original design, the region number is stored in the memory page header, and each region has its own pages and its own hidden classes. The first version was simpler: objects were mixed together in the ordinary shared heap. Now a region that has grown past 64 KB has its own pages with its number in the page header, and a smaller one lives in its own chunks of common pages ([garbage collection](#gc)). The region number is still written in each object, and fields are stored in arrays of names and values.

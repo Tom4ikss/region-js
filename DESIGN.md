@@ -94,7 +94,7 @@ diverged from it, this section says so.
   transfer list passes this right on. A `spawn` task finishes after its nested
   tasks, forgotten synchronous borrows are released at the end of the task, and `borrowWhile` holds the borrow
   until the promise settles. A task handle behaves like a promise: `join()` and `await` are repeatable.
-- **Channels** (`d8-channel.cc`): `new Channel(capacity)`, `send`/`recv`, `close`, `select`,
+- **Channels** (`src/regions/regions-channel.cc`): `new Channel(capacity)`, `send`/`recv`, `close`, `select`,
   async and blocking versions, `for await` and `for...of`. Primitives, strings, region objects
   and channels travel natively, as in the task port (see below); ordinary objects go through the `postMessage`
   serializer; the channel itself moves the regions that the value references directly.
@@ -106,7 +106,7 @@ diverged from it, this section says so.
   Messages are flat arrays, primitives travel without a region, and promises are created only for
   `await`. Before sleeping, threads spin for up to `--spin-wait-us` (50) in the platform task runner,
   `getMessage` and blocking channel operations: a wake-up through a condvar costs ≈5 µs.
-- **Task port** (`d8-port.cc`, ≈3.5 µs per `spawn(...).join()`). Tasks and replies go not through
+- **Task port** (`src/regions/regions-port.cc`, ≈3.5 µs per `spawn(...).join()`). Tasks and replies go not through
   `postMessage` but through a native port: a message is an array of primitives, strings, region objects
   and channels, copied into a C++ buffer without ValueSerializer; region objects in transit
   are held by persistent handles of the shared space isolate (like SharedValueConveyor), and regions from the transfer
@@ -146,8 +146,8 @@ diverged from it, this section says so.
 - **Channel queues:** receivers completed through another channel (`select`) or cancelled
   stay in the queue with `done` and are skipped; `ChannelState::stale` counts them, and the queue
   is cleaned when they make up half of it (amortized O(1) per delivery).
-- **Deadlock detection** (`Deadlocks` in `d8-channel.cc`): libplatform reports when an isolate's event
-  loop goes to sleep and wakes up (`DefaultForegroundTaskRunner::SleepObserver`);
+- **Deadlock detection** (`Deadlocks` in `src/regions/regions-channel.cc`): the embedder reports when an isolate's
+  event loop goes to sleep and wakes up; d8 does it through libplatform (`DefaultForegroundTaskRunner::SleepObserver`);
   blocking channel waits and `port.take()` mark themselves. A thread is woken by whoever posts
   it a task or signals it, under their own mutex, so “everyone is asleep” is never falsely true even for an instant.
   When all isolates are asleep and there are no `timeout()` timers, the check waits 50 ms on a
@@ -159,7 +159,7 @@ diverged from it, this section says so.
   isolates count. Such a loop can wake another thread only with a channel, lock or
   task operation, or with a task posted to another loop, and those change the epoch themselves. Otherwise a GC that keeps
   posting tasks would hide a deadlock forever.
-- **`RwLock`** (`d8-channel.cc`): a `ChannelState` with `LockData`, so that a lock travels like a channel.
+- **`RwLock`** (`src/regions/regions-channel.cc`): a `ChannelState` with `LockData`, so that a lock travels like a channel.
   The lock's region: `InTransit` while the lock is free; `Owned(writer)`; `Frozen(nobody, n)` for
   readers (`FreezeInTransit`/`ThawToTransit`). The grant is made under the channels mutex, and
   `Claim`/`Borrow` is done by the receiver's thread (`TakeGrant`); a grant that was not taken is returned
@@ -253,7 +253,7 @@ diverged from it, this section says so.
   indentation before each function, `//# sourceURL`), if all of it comes from one script and the functions
   are not nested in each other.
 - **Launch site in a task's error stack:** `spawn()` calls `Region.__callerStack()`
-  (`CallerStacks` in `d8.cc`), which walks the JS frames and finds a text number by their code and offset (like
+  (`CallerStacks` in `src/regions/regions-runtime.cc`), which walks the JS frames and finds a text number by their code and offset (like
   `ScriptLocations`, cached until the next collection); the text “`at spawn()` and
   frames with a script file, up to 10” is built the first time a set of frames is seen and is kept by
   number while the isolate is alive. The number is stored in the task; on an error reply the prelude appends
@@ -330,6 +330,20 @@ diverged from it, this section says so.
   appeared since that collection. An accounting error gives `the object of this LocalRef was released` rather than a dangling
   pointer: everything goes through the table.
 - **Not implemented:** region-local Maps with descriptors.
+- **Runtime for embedders** (`src/regions/`, `include/v8-regions.h`). `Region`, channels, `RwLock`,
+  the task port and `spawn` live in the engine, not in d8, so that d8 and Node.js run the same code. The
+  embedder installs the globals (`Regions::InstallGlobals`) and `spawn` (`Regions::InstallSpawn`) and
+  supplies three things: how to start a pool worker (`startWorker(source, port)`: d8 makes a `Worker`
+  and posts the port, Node makes a `worker_threads` worker and hands the port over by number,
+  `Region.__exportPort`/`__importPort`), the globals that every thread has (the probe context of the
+  capture analysis), and an event loop that keeps running while the thread waits for a reply
+  (`HasPendingWork`, `SetPendingWorkCallback`). The deadlock check needs the embedder to report when
+  its loop sleeps; d8 does it through libplatform, Node does not yet. Per-isolate state hangs off
+  `i::Isolate` and is released in `Isolate::Deinit` if the embedder did not do it. A `spawn` task's
+  id shares the continuation data with the embedder's own (Node's `AsyncContextFrame`): while task
+  code runs, the slot holds `[embedder data, task]`, and the API and the extras binding give the
+  embedder only its part. In Node, regions in the transfer list of `postMessage` are handled in
+  `node_messaging.cc` with `Regions::TransferredRegion`, `CheckTransfer`, `Release` and `Claim`.
 
 ## Decisions made
 

@@ -95,8 +95,8 @@ The playground: open the `playground/` folder in VSCode and run `npm install`; C
 
 | Folder | Contents |
 |---|---|
-| `v8/regions.patch` | The fork itself: a patch on top of V8 `v8/BASE`, build flags in `v8/args.gn` |
-| `node/` | Node.js with regions: `node/node.patch` on top of `nodejs/node-v8` `node/BASE`, built by `scripts/setup-node.sh` (Linux x64, a first cut of `Region`) |
+| `v8/regions.patch` | The fork itself: a patch on top of V8 `v8/BASE`, build flags in `v8/args.gn`; `Region`, channels and `spawn` are in its `src/regions/` |
+| `node/` | Node.js with regions: `node/node.patch` on top of `nodejs/node-v8` `node/BASE`, built by `scripts/setup-node.sh` (Linux x64: `Region`, channels and `spawn`, the same runtime as in d8) |
 | `site/` | The documentation site: pages in `site/src/content/docs` (English at the root, Russian in `ru/`), examples with saved output in `site/examples/en` and `site/examples/ru` |
 | `tests/` | Tests and benchmarks for regions, `spawn`, channels and `free()`, a fuzzer |
 | `playground/` | Types, Biome, the ESLint plugin and examples for VSCode |

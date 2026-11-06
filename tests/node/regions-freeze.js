@@ -7,6 +7,9 @@
 const { Worker } = require('node:worker_threads');
 const { once } = require('node:events');
 
+// The owner of a region is the id of its thread's isolate.
+const here = new Region().owner;
+
 const check = (name, ok) => {
   console.log('%s: %s', name, ok);
   if (!ok) process.exitCode = 1;
@@ -22,6 +25,8 @@ function table(region, count) {
 
 const readerSource = `
   const { parentPort } = require('node:worker_threads');
+  // The owner of a region is the id of its thread's isolate.
+  const here = new Region().owner;
   let rows;
   let borrow;
   parentPort.on('message', ({ op, data }) => {
@@ -37,13 +42,13 @@ const readerSource = `
       borrow = Region.of(rows).borrow();
       parentPort.postMessage(rows.reduce((sum, row) => sum + row.price, 0));
     } else if (op === 'release') {
-      borrow.exit();
+      borrow.release();
       parentPort.postMessage('released');
     } else if (op === 'thaw') {
       const region = Region.of(data);
       region.thaw();
       for (const row of data) row.price = 1;
-      parentPort.postMessage({ owned: region.owned, rows: data }, [region]);
+      parentPort.postMessage({ owned: region.owner === here, rows: data }, [region]);
     }
   });
 `;
@@ -88,7 +93,7 @@ async function main() {
   await Promise.all(workers.map((w) => ask(w, { op: 'release' })));
   check('no readers', region.readers === 0);
   region.thaw();
-  check('thawed', !region.frozen && region.owned);
+  check('thawed', !region.frozen && region.owner === here);
   rows[5].price = 50;
   check('the owner writes again', rows[5].price === 50);
 
@@ -97,7 +102,7 @@ async function main() {
   const answer = await ask(workers[1], { op: 'thaw', data: rows }, [region]);
   check('the worker that got it thaws and writes it',
         answer.owned && answer.rows === rows);
-  check('back with the main thread', region.owned &&
+  check('back with the main thread', region.owner === here &&
         rows.every((row) => row.price === 1));
 
   await Promise.all(workers.map((w) => w.terminate()));

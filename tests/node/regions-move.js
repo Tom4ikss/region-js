@@ -6,6 +6,9 @@
 const { Worker } = require('node:worker_threads');
 const { once } = require('node:events');
 
+// The owner of a region is the id of its thread's isolate.
+const here = new Region().owner;
+
 const check = (name, ok) => {
   console.log('%s: %s', name, ok);
   if (!ok) process.exitCode = 1;
@@ -22,10 +25,12 @@ function table(region, count) {
 // Adds one hit to every row and sends the region back.
 const worker = new Worker(`
   const { parentPort } = require('node:worker_threads');
+  // The owner of a region is the id of its thread's isolate.
+  const here = new Region().owner;
   parentPort.on('message', ({ rows, first }) => {
     const region = Region.of(rows);
     if (first) {
-      parentPort.postMessage({ owned: region.owned, same: rows[0] === first });
+      parentPort.postMessage({ owned: region.owner === here, same: rows[0] === first });
     }
     for (const row of rows) row.hits++;
     parentPort.postMessage({ rows }, [region]);
@@ -41,7 +46,7 @@ async function main() {
   const [{ owned, same }] = await once(worker, 'message');
   check('the worker owns the region', owned);
   check('the worker gets the same objects', same);
-  check('the main thread does not own it', !region.owned);
+  check('the main thread does not own it', region.owner !== here);
   let error;
   try {
     rows[0].hits;
@@ -51,7 +56,7 @@ async function main() {
   check('the main thread cannot read it', error instanceof OwnershipError);
 
   let [{ rows: back }] = await once(worker, 'message');
-  check('the main thread owns it again', region.owned);
+  check('the main thread owns it again', region.owner === here);
   check('the same rows come back', back === rows && back[0] === first);
 
   const rounds = 1000;

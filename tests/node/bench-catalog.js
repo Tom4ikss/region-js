@@ -55,7 +55,7 @@ const source = `
       sum = query();
       times.push(performance.now() - start);
     }
-    borrow?.exit();
+    borrow?.release();
     times.sort((a, b) => a - b);
     parentPort.postMessage({ sum, ms: times[4] });
   });
