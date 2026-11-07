@@ -568,10 +568,10 @@ index a0fc663f..493208f9 100644
    return scope_->is_hoisted_in_context();
  }
 diff --git a/src/ast/ast.h b/src/ast/ast.h
-index 2762ad61..b103ce08 100644
+index 2762ad61..9318076a 100644
 --- a/src/ast/ast.h
 +++ b/src/ast/ast.h
-@@ -1127,8 +1127,19 @@ class AggregateLiteral : public MaterializedLiteral {
+@@ -1127,8 +1127,27 @@ class AggregateLiteral : public MaterializedLiteral {
      kNeedsInitialAllocationSite = 1 << 2,
    };
  
@@ -583,15 +583,23 @@ index 2762ad61..b103ce08 100644
 +  void set_is_region_literal() {
 +    bit_field_ = IsRegionLiteralField::update(bit_field_, true);
 +  }
++  // A {} or [] in 'use region' code that #{} or #[] can't create, with a
++  // spread, a hole, a method or a computed key: it is created as usual and
++  // then copied into the current region, if there is one.
++  bool is_region_copy() const { return IsRegionCopyField::decode(bit_field_); }
++  void set_is_region_copy() {
++    bit_field_ = IsRegionCopyField::update(bit_field_, true);
++  }
 +
   protected:
    AggregateLiteral(int pos, NodeType type) : MaterializedLiteral(pos, type) {}
 +
 +  using IsRegionLiteralField = Expression::NextBitField<bool, 1>;
++  using IsRegionCopyField = IsRegionLiteralField::Next<bool, 1>;
  };
  
  // Base class for build literal boilerplate, providing common code for handling
-@@ -2359,6 +2370,7 @@ class FunctionLiteral final : public Expression {
+@@ -2359,6 +2378,7 @@ class FunctionLiteral final : public Expression {
    void set_raw_name(const AstConsString* name) { raw_name_ = name; }
    DeclarationScope* scope() const { return scope_; }
    bool is_hoisted_in_context() const;
@@ -975,10 +983,10 @@ index a23774e3..fa667ac1 100644
    void TryLookupOrderedHashTableIndex(const TNode<CollectionType> table,
                                        TVariable<JSAny>* key,
 diff --git a/src/builtins/builtins-definitions.h b/src/builtins/builtins-definitions.h
-index 34cc7706..72d9d441 100644
+index 34cc7706..650c7db5 100644
 --- a/src/builtins/builtins-definitions.h
 +++ b/src/builtins/builtins-definitions.h
-@@ -641,6 +641,11 @@ constexpr int kGearboxGenericBuiltinIdOffset = -2;
+@@ -641,6 +641,14 @@ constexpr int kGearboxGenericBuiltinIdOffset = -2;
    TFJ(ArrayPrototypePush, kDontAdaptArgumentsSentinel)                         \
    CPP(ArrayShift, kDontAdaptArgumentsSentinel)                                 \
    CPP(ArrayUnshift, kDontAdaptArgumentsSentinel)                               \
@@ -987,6 +995,9 @@ index 34cc7706..72d9d441 100644
 +  CPP(RegionObjectLiteralSlow, kDontAdaptArgumentsSentinel)                    \
 +  TFJ(RegionArrayLiteral, kDontAdaptArgumentsSentinel)                         \
 +  CPP(RegionArrayLiteralSlow, kDontAdaptArgumentsSentinel)                     \
++  TFJ(RegionHasCurrent, kDontAdaptArgumentsSentinel)                           \
++  TFJ(RegionCopy, kJSArgcReceiverSlots + 1, kReceiver, kValue)               \
++  TFJ(RegionClassThis, kJSArgcReceiverSlots + 1, kReceiver, kNewTarget)      \
    /* Support for Array.from and other array-copying idioms */                  \
    TFS(CloneFastJSArray, NeedsContext{true}, kSource)                           \
    TFS(CloneFastJSArrayFillingHoles, NeedsContext{true}, kSource)               \
@@ -1162,10 +1173,10 @@ index 7677d9c3..fc762f96 100644
  }  // namespace v8
 diff --git a/src/builtins/builtins-region-gen.cc b/src/builtins/builtins-region-gen.cc
 new file mode 100644
-index 00000000..6a3198bc
+index 00000000..857be429
 --- /dev/null
 +++ b/src/builtins/builtins-region-gen.cc
-@@ -0,0 +1,436 @@
+@@ -0,0 +1,479 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -1598,6 +1609,49 @@ index 00000000..6a3198bc
 +                    InvalidDispatchHandleConstant());
 +}
 +
++// Whether a region is current. {} and [] of 'use region' code are created
++// in it then, as #{} and #[], and are plain objects otherwise.
++TF_BUILTIN(RegionHasCurrent, CodeStubAssembler) {
++  auto argc = UncheckedParameter<Int32T>(Descriptor::kJSActualArgumentsCount);
++  CodeStubArguments args(this, argc);
++  TNode<IntPtrT> region_id = Load<IntPtrT>(
++      ExternalConstant(ExternalReference::current_region_address(isolate())));
++  args.PopAndReturn(SelectBooleanConstant(
++      IntPtrGreaterThanOrEqual(region_id, IntPtrConstant(0))));
++}
++
++// A {} or [] of 'use region' code that #{} or #[] can't create: copied into
++// the current region, as region.run() copies its result, or returned as it
++// is without one.
++TF_BUILTIN(RegionCopy, CodeStubAssembler) {
++  auto context = Parameter<Context>(Descriptor::kContext);
++  auto value = Parameter<JSAny>(Descriptor::kValue);
++  TNode<IntPtrT> region_id = Load<IntPtrT>(
++      ExternalConstant(ExternalReference::current_region_address(isolate())));
++  Label copy(this, Label::kDeferred);
++  GotoIf(IntPtrGreaterThanOrEqual(region_id, IntPtrConstant(0)), &copy);
++  Return(value);
++
++  BIND(&copy);
++  TailCallRuntime(Runtime::kCopyIntoCurrentRegion, context, value);
++}
++
++// What a base class constructor of Region.class() starts with: when a region
++// is current, its instance there, which replaces the plain object the
++// construct stub made. Undefined otherwise, to keep that object.
++TF_BUILTIN(RegionClassThis, CodeStubAssembler) {
++  auto context = Parameter<Context>(Descriptor::kContext);
++  auto new_target = Parameter<JSAny>(Descriptor::kNewTarget);
++  TNode<IntPtrT> region_id = Load<IntPtrT>(
++      ExternalConstant(ExternalReference::current_region_address(isolate())));
++  Label in_region(this, Label::kDeferred);
++  GotoIf(IntPtrGreaterThanOrEqual(region_id, IntPtrConstant(0)), &in_region);
++  Return(UndefinedConstant());
++
++  BIND(&in_region);
++  TailCallRuntime(Runtime::kNewRegionClassInstance, context, new_target);
++}
++
 +#include "src/codegen/undef-code-stub-assembler-macros.inc"
 +
 +}  // namespace internal
@@ -1687,7 +1741,7 @@ index 768997fd..6d0bc394 100644
      const asyncGen = %RawDownCast<JSAsyncGeneratorObject>(generator);
      AsyncGeneratorResumeNext(context, asyncGen);
 diff --git a/src/codegen/code-stub-assembler.cc b/src/codegen/code-stub-assembler.cc
-index 03e03f21..c50a9a92 100644
+index 03e03f21..8a085a8a 100644
 --- a/src/codegen/code-stub-assembler.cc
 +++ b/src/codegen/code-stub-assembler.cc
 @@ -40,6 +40,7 @@
@@ -1698,7 +1752,18 @@ index 03e03f21..c50a9a92 100644
  #include "src/objects/map.h"
  #include "src/objects/objects.h"
  #include "src/objects/oddball.h"
-@@ -18553,6 +18554,18 @@ TNode<Boolean> CodeStubAssembler::HasProperty(TNode<Context> context,
+@@ -13742,6 +13743,10 @@ TNode<Boolean> CodeStubAssembler::HasInPrototypeChain(TNode<Context> context,
+       // if we need to use the if_objectisspecial path in the runtime.
+       GotoIf(InstanceTypeEqual(object_instance_type, JS_PROXY_TYPE),
+              &return_runtime);
++      // A region object gets its prototype from the isolate that reads it.
++      GotoIf(IsInRange(object_instance_type, FIRST_JS_REGION_OBJECT_TYPE,
++                       LAST_JS_REGION_OBJECT_TYPE),
++             &return_runtime);
+       TNode<Int32T> object_bitfield = LoadMapBitField(object_map);
+       int mask = Map::Bits1::HasNamedInterceptorBit::kMask |
+                  Map::Bits1::IsAccessCheckNeededBit::kMask;
+@@ -18553,6 +18558,18 @@ TNode<Boolean> CodeStubAssembler::HasProperty(TNode<Context> context,
                           &return_true, &return_false, next_holder, if_bailout);
        };
  
@@ -1717,7 +1782,7 @@ index 03e03f21..c50a9a92 100644
    const bool kHandlePrivateNames = mode == HasPropertyLookupMode::kHasProperty;
    TryPrototypeChainLookup(object, object, key, lookup_property_in_holder,
                            lookup_element_in_holder, &return_false,
-@@ -21988,6 +22001,234 @@ void CodeStubAssembler::SharedValueBarrier(
+@@ -21988,6 +22005,234 @@ void CodeStubAssembler::SharedValueBarrier(
    BIND(&done);
  }
  
@@ -2012,6 +2077,34 @@ index 818f63b6..60e9a35c 100644
    TNode<WordT> TimesSystemPointerSize(TNode<WordT> value);
    TNode<IntPtrT> TimesSystemPointerSize(TNode<IntPtrT> value) {
      return Signed(TimesSystemPointerSize(implicit_cast<TNode<WordT>>(value)));
+diff --git a/src/codegen/compiler.cc b/src/codegen/compiler.cc
+index 714efdfb..e0f4d4fc 100644
+--- a/src/codegen/compiler.cc
++++ b/src/codegen/compiler.cc
+@@ -1782,6 +1782,7 @@ void SetScriptFieldsFromDetails(Isolate* isolate, Tagged<Script> script,
+       script->set_host_defined_options(Cast<FixedArray>(*host_defined_options));
+     }
+   }
++  if (script_details.region_class) script->set_is_region_class(true);
+ }
+ 
+ namespace {
+@@ -3961,6 +3962,7 @@ bool CanBackgroundCompile(const ScriptDetails& script_details,
+   // modules is supported.
+   return !script_details.origin_options.IsModule() && !extension &&
+          script_details.repl_mode == REPLMode::kNo &&
++         !script_details.region_class &&
+          (compile_options == ScriptCompiler::kNoCompileOptions) &&
+          natives == NOT_NATIVES_CODE;
+ }
+@@ -4188,6 +4190,7 @@ MaybeDirectHandle<SharedFunctionInfo> GetSharedFunctionInfoForScriptImpl(
+               script_details.repl_mode, script_type, v8_flags.lazy);
+ 
+       flags.set_is_eager(compile_options & ScriptCompiler::kEagerCompile);
++      flags.set_is_region_class(script_details.region_class);
+       flags.set_compile_hints_magic_enabled(
+           v8_flags.compile_hints_magic ||
+           (compile_options & ScriptCompiler::kFollowCompileHintsMagicComment));
 diff --git a/src/codegen/external-reference.cc b/src/codegen/external-reference.cc
 index b8aeff63..4c7f919a 100644
 --- a/src/codegen/external-reference.cc
@@ -2148,6 +2241,19 @@ index 8226ac48..dce2b131 100644
    V(address_of_double_abs_constant, "double_absolute_constant")                \
    V(address_of_double_neg_constant, "double_negate_constant")                  \
    V(address_of_enable_experimental_regexp_engine,                              \
+diff --git a/src/codegen/script-details.h b/src/codegen/script-details.h
+index 5d7e6486..63d0c7a6 100644
+--- a/src/codegen/script-details.h
++++ b/src/codegen/script-details.h
+@@ -33,6 +33,8 @@ struct ScriptDetails {
+   MaybeHandle<FixedArray> wrapped_arguments;
+   REPLMode repl_mode;
+   const ScriptOriginOptions origin_options;
++  // The source of a class of Region.class() (Script::is_region_class).
++  bool region_class = false;
+ };
+ 
+ void SetScriptFieldsFromDetails(Isolate* isolate, Tagged<Script> script,
 diff --git a/src/common/globals.h b/src/common/globals.h
 index e5692243..c8b31b1e 100644
 --- a/src/common/globals.h
@@ -2170,10 +2276,10 @@ index e5692243..c8b31b1e 100644
        UNREACHABLE();
    }
 diff --git a/src/common/message-template.h b/src/common/message-template.h
-index 57bd3a32..0678c9ef 100644
+index 57bd3a32..4f734704 100644
 --- a/src/common/message-template.h
 +++ b/src/common/message-template.h
-@@ -739,6 +739,45 @@ namespace internal {
+@@ -739,6 +739,52 @@ namespace internal {
    T(WasmSuspendJSFrames, "trying to suspend JS frames")                        \
    T(WasmExceptionError, "wasm exception")                                      \
    T(WasmObjectsAreOpaque, "WebAssembly objects are opaque")                    \
@@ -2216,6 +2322,13 @@ index 57bd3a32..0678c9ef 100644
 +    "object and send that")                                                    \
 +  T(RegionNotExtensible,                                                       \
 +    "Cannot add property %, region objects have a fixed shape")                \
++  T(RegionClassBase,                                                           \
++    "a class of Region.class() can extend only another class of "              \
++    "Region.class()")                                                          \
++  T(RegionTooMany, "Too many regions")                                         \
++  T(RegionClassUndeclaredField,                                                \
++    "Cannot add property % to an instance of %: declare the field in the "     \
++    "class")                                                                   \
    /* DataCloneError messages */                                                \
    T(DataCloneError, "% could not be cloned.")                                  \
    T(DataCloneErrorOutOfMemory, "Data cannot be cloned, out of memory.")        \
@@ -3658,16 +3771,17 @@ index e52c358e..d78f6cb4 100644
    return Type::NonInternal();
  }
 diff --git a/src/compiler/turbofan-types.cc b/src/compiler/turbofan-types.cc
-index f7525792..3d3506e0 100644
+index f7525792..74cc7b05 100644
 --- a/src/compiler/turbofan-types.cc
 +++ b/src/compiler/turbofan-types.cc
-@@ -268,6 +268,10 @@ Type::bitset BitsetType::Lub(MapRefLike map, JSHeapBroker* broker) {
+@@ -268,6 +268,11 @@ Type::bitset BitsetType::Lub(MapRefLike map, JSHeapBroker* broker) {
      case JS_ASYNC_GENERATOR_OBJECT_TYPE:
      case JS_MODULE_NAMESPACE_TYPE:
      case JS_DEFERRED_MODULE_NAMESPACE_TYPE:
 +    case JS_REGION_OBJECT_TYPE:
 +    case JS_REGION_TYPED_ARRAY_TYPE:
 +    case JS_REGION_FUNCTION_TYPE:
++    case JS_REGION_CLASS_TYPE:
 +    case JS_REGION_LOCAL_REF_TYPE:
      case JS_ARRAY_BUFFER_TYPE:
      case JS_ARRAY_ITERATOR_TYPE:
@@ -4955,7 +5069,7 @@ index b8e55445..c8b59d07 100644
    V(StoreToConstant, "Storing to a constant field")                            \
    V(StringTooLarge, "Result string larger than String::kMaxLength")            \
 diff --git a/src/diagnostics/objects-debug.cc b/src/diagnostics/objects-debug.cc
-index 48e1ddbc..68e3d6bd 100644
+index 48e1ddbc..f39495ef 100644
 --- a/src/diagnostics/objects-debug.cc
 +++ b/src/diagnostics/objects-debug.cc
 @@ -91,6 +91,7 @@
@@ -4966,7 +5080,7 @@ index 48e1ddbc..68e3d6bd 100644
  #include "src/objects/module-inl.h"
  #include "src/objects/oddball-inl.h"
  #include "src/objects/promise-inl.h"
-@@ -3111,6 +3112,67 @@ void JSModuleNamespace::JSModuleNamespaceVerify(Isolate* isolate) {
+@@ -3111,6 +3112,92 @@ void JSModuleNamespace::JSModuleNamespaceVerify(Isolate* isolate) {
    CHECK(IsModule(module()));
  }
  
@@ -4974,7 +5088,8 @@ index 48e1ddbc..68e3d6bd 100644
 +  JSObjectVerify(isolate);
 +  CHECK(HeapLayout::InWritableSharedSpace(this));
 +  CHECK(HeapLayout::InAnySharedSpace(map()));
-+  CHECK(IsNull(map()->prototype()));
++  // An instance of a class of Region.class() has the class as its prototype.
++  CHECK(IsNull(map()->prototype()) || IsJSRegionClass(map()->prototype()));
 +  CHECK_LE(0, region_id());
 +  CHECK_LT(region_id(), RegionRegistry::kMaxRegions);
 +  Object::VerifyPointer(isolate, values());
@@ -5006,6 +5121,30 @@ index 48e1ddbc..68e3d6bd 100644
 +  CHECK(IsString(script_name()) || IsUndefined(script_name()));
 +}
 +
++void JSRegionClass::JSRegionClassVerify(Isolate* isolate) {
++  JSObjectVerify(isolate);
++  CHECK(HeapLayout::InWritableSharedSpace(this));
++  CHECK(HeapLayout::InAnySharedSpace(map()));
++  CHECK(IsNull(map()->prototype()));
++  CHECK_LE(0, region_id());
++  CHECK_LT(region_id(), RegionRegistry::kMaxRegions);
++  CHECK_EQ(keys(), ReadOnlyRoots(isolate).empty_fixed_array());
++  CHECK_EQ(values(), ReadOnlyRoots(isolate).empty_fixed_array());
++  CHECK_LE(0, class_id());
++  CHECK(IsString(source()));
++  CHECK(HeapLayout::InAnySharedSpace(source()));
++  CHECK(IsString(script_name()) || IsUndefined(script_name()));
++  CHECK(HeapLayout::InAnySharedSpace(field_names()));
++  for (Tagged<Map> map : {instance_map(), sealed_instance_map()}) {
++    CHECK(HeapLayout::InAnySharedSpace(map));
++    CHECK_EQ(map->instance_type(), JS_REGION_OBJECT_TYPE);
++    CHECK_EQ(map->prototype(), Tagged<Object>(this));
++  }
++  CHECK(JSRegionObject::IsSealedPlainMap(sealed_instance_map()));
++  CHECK(HeapLayout::InAnySharedSpace(captures()));
++  CHECK_EQ(captures()->length() % 2, 0);
++}
++
 +void JSRegionLocalRef::JSRegionLocalRefVerify(Isolate* isolate) {
 +  JSObjectVerify(isolate);
 +  CHECK(HeapLayout::InWritableSharedSpace(this));
@@ -5035,7 +5174,7 @@ index 48e1ddbc..68e3d6bd 100644
      Isolate* isolate) {
    JSModuleNamespaceVerify(isolate);
 diff --git a/src/diagnostics/objects-printer.cc b/src/diagnostics/objects-printer.cc
-index 9facec51..ee3bdf27 100644
+index 9facec51..7672a39e 100644
 --- a/src/diagnostics/objects-printer.cc
 +++ b/src/diagnostics/objects-printer.cc
 @@ -31,6 +31,7 @@
@@ -5046,7 +5185,7 @@ index 9facec51..ee3bdf27 100644
  #include "src/objects/shared-function-info-inl.h"
  #include "src/objects/struct.h"
  #include "src/regexp/regexp.h"
-@@ -3049,6 +3050,41 @@ void JSModuleNamespace::JSModuleNamespacePrint(std::ostream& os) {
+@@ -3049,6 +3050,53 @@ void JSModuleNamespace::JSModuleNamespacePrint(std::ostream& os) {
    JSObjectPrintBody(os, this);
  }
  
@@ -5064,6 +5203,18 @@ index 9facec51..ee3bdf27 100644
 +  os << "\n - function id: " << function_id();
 +  os << "\n - script name: " << Brief(script_name());
 +  os << "\n - line: " << line() << ", column: " << column();
++  JSObjectPrintBody(os, this);
++}
++
++void JSRegionClass::JSRegionClassPrint(std::ostream& os) {
++  JSObjectPrintHeader(os, this, "JSRegionClass");
++  os << "\n - region: " << region_id();
++  os << "\n - class id: " << class_id();
++  os << "\n - script name: " << Brief(script_name());
++  os << "\n - line: " << line() << ", column: " << column();
++  os << "\n - field names: " << Brief(field_names());
++  os << "\n - instance map: " << Brief(instance_map());
++  os << "\n - captures: " << Brief(captures());
 +  JSObjectPrintBody(os, this);
 +}
 +
@@ -5331,13 +5482,14 @@ index 7b638d5e..8bf2a221 100644
      harmony_struct, false,
      "DEPRECATED. harmony structs, shared structs, and shared arrays")
 diff --git a/src/gen/intl-wasm/class-forward-declarations.h b/src/gen/intl-wasm/class-forward-declarations.h
-index ae217ce3..ae589c3e 100644
+index ae217ce3..d181dddc 100644
 --- a/src/gen/intl-wasm/class-forward-declarations.h
 +++ b/src/gen/intl-wasm/class-forward-declarations.h
-@@ -137,6 +137,10 @@ class JSReceiver;
+@@ -137,6 +137,11 @@ class JSReceiver;
  class JSRegExp;
  class JSRegExpResult;
  class JSRegExpStringIterator;
++class JSRegionClass;
 +class JSRegionFunction;
 +class JSRegionLocalRef;
 +class JSRegionObject;
@@ -5346,10 +5498,10 @@ index ae217ce3..ae589c3e 100644
  class JSSegmentDataObject;
  class JSSegmentDataObjectWithIsWordLike;
 diff --git a/src/gen/intl-wasm/instance-types.h b/src/gen/intl-wasm/instance-types.h
-index 8f144e35..1684f6de 100644
+index 8f144e35..04657150 100644
 --- a/src/gen/intl-wasm/instance-types.h
 +++ b/src/gen/intl-wasm/instance-types.h
-@@ -570,18 +570,30 @@
+@@ -570,18 +570,33 @@
          V(JS_OBJECT_TYPE, 1057) \
          V(FIRST_JS_CUSTOM_ELEMENTS_OBJECT_TYPE, 299) \
            V(FIRST_JS_SPECIAL_OBJECT_TYPE, 299) \
@@ -5367,53 +5519,58 @@ index 8f144e35..1684f6de 100644
 -            V(LAST_JS_GLOBAL_PROXY_TYPE, 302) \
 +            V(FIRST_JS_REGION_OBJECT_TYPE, 299) \
 +              V(JS_REGION_OBJECT_TYPE, 299) \
-+              V(FIRST_JS_REGION_FUNCTION_TYPE, 300) \
-+              V(JS_REGION_FUNCTION_TYPE, 300) \
-+              V(LAST_JS_REGION_FUNCTION_TYPE, 300) \
-+              V(FIRST_JS_REGION_LOCAL_REF_TYPE, 301) \
-+              V(JS_REGION_LOCAL_REF_TYPE, 301) \
-+              V(LAST_JS_REGION_LOCAL_REF_TYPE, 301) \
-+              V(FIRST_JS_REGION_TYPED_ARRAY_TYPE, 302) \
-+              V(JS_REGION_TYPED_ARRAY_TYPE, 302) \
-+              V(LAST_JS_REGION_TYPED_ARRAY_TYPE, 302) \
-+            V(LAST_JS_REGION_OBJECT_TYPE, 302) \
-+            V(FIRST_JS_MODULE_NAMESPACE_TYPE, 303) \
-+              V(JS_MODULE_NAMESPACE_TYPE, 303) \
-+              V(FIRST_JS_DEFERRED_MODULE_NAMESPACE_TYPE, 304) \
-+              V(JS_DEFERRED_MODULE_NAMESPACE_TYPE, 304) \
-+              V(LAST_JS_DEFERRED_MODULE_NAMESPACE_TYPE, 304) \
-+            V(LAST_JS_MODULE_NAMESPACE_TYPE, 304) \
-+            V(FIRST_JS_GLOBAL_OBJECT_TYPE, 305) \
-+            V(JS_GLOBAL_OBJECT_TYPE, 305) \
-+            V(LAST_JS_GLOBAL_OBJECT_TYPE, 305) \
-+            V(FIRST_JS_GLOBAL_PROXY_TYPE, 306) \
-+            V(JS_GLOBAL_PROXY_TYPE, 306) \
-+            V(LAST_JS_GLOBAL_PROXY_TYPE, 306) \
++              V(FIRST_JS_REGION_CLASS_TYPE, 300) \
++              V(JS_REGION_CLASS_TYPE, 300) \
++              V(LAST_JS_REGION_CLASS_TYPE, 300) \
++              V(FIRST_JS_REGION_FUNCTION_TYPE, 301) \
++              V(JS_REGION_FUNCTION_TYPE, 301) \
++              V(LAST_JS_REGION_FUNCTION_TYPE, 301) \
++              V(FIRST_JS_REGION_LOCAL_REF_TYPE, 302) \
++              V(JS_REGION_LOCAL_REF_TYPE, 302) \
++              V(LAST_JS_REGION_LOCAL_REF_TYPE, 302) \
++              V(FIRST_JS_REGION_TYPED_ARRAY_TYPE, 303) \
++              V(JS_REGION_TYPED_ARRAY_TYPE, 303) \
++              V(LAST_JS_REGION_TYPED_ARRAY_TYPE, 303) \
++            V(LAST_JS_REGION_OBJECT_TYPE, 303) \
++            V(FIRST_JS_MODULE_NAMESPACE_TYPE, 304) \
++              V(JS_MODULE_NAMESPACE_TYPE, 304) \
++              V(FIRST_JS_DEFERRED_MODULE_NAMESPACE_TYPE, 305) \
++              V(JS_DEFERRED_MODULE_NAMESPACE_TYPE, 305) \
++              V(LAST_JS_DEFERRED_MODULE_NAMESPACE_TYPE, 305) \
++            V(LAST_JS_MODULE_NAMESPACE_TYPE, 305) \
++            V(FIRST_JS_GLOBAL_OBJECT_TYPE, 306) \
++            V(JS_GLOBAL_OBJECT_TYPE, 306) \
++            V(LAST_JS_GLOBAL_OBJECT_TYPE, 306) \
++            V(FIRST_JS_GLOBAL_PROXY_TYPE, 307) \
++            V(JS_GLOBAL_PROXY_TYPE, 307) \
++            V(LAST_JS_GLOBAL_PROXY_TYPE, 307) \
              V(FIRST_JS_SPECIAL_API_OBJECT_TYPE, 1040) \
              V(JS_SPECIAL_API_OBJECT_TYPE, 1040) \
              V(LAST_JS_SPECIAL_API_OBJECT_TYPE, 1040) \
-@@ -1132,6 +1144,10 @@
+@@ -1132,6 +1147,11 @@
    V(WASM_STRUCT_TYPE) \
    V(JS_PROXY_TYPE) \
    V(JS_OBJECT_TYPE) \
 +  V(JS_REGION_OBJECT_TYPE) \
++  V(JS_REGION_CLASS_TYPE) \
 +  V(JS_REGION_FUNCTION_TYPE) \
 +  V(JS_REGION_LOCAL_REF_TYPE) \
 +  V(JS_REGION_TYPED_ARRAY_TYPE) \
    V(JS_MODULE_NAMESPACE_TYPE) \
    V(JS_DEFERRED_MODULE_NAMESPACE_TYPE) \
    V(JS_GLOBAL_OBJECT_TYPE) \
-@@ -1415,6 +1431,9 @@
+@@ -1415,6 +1435,10 @@
    V(WasmArray, WASM_ARRAY_TYPE) \
    V(WasmStruct, WASM_STRUCT_TYPE) \
    V(JSProxy, JS_PROXY_TYPE) \
++  V(JSRegionClass, JS_REGION_CLASS_TYPE) \
 +  V(JSRegionFunction, JS_REGION_FUNCTION_TYPE) \
 +  V(JSRegionLocalRef, JS_REGION_LOCAL_REF_TYPE) \
 +  V(JSRegionTypedArray, JS_REGION_TYPED_ARRAY_TYPE) \
    V(JSDeferredModuleNamespace, JS_DEFERRED_MODULE_NAMESPACE_TYPE) \
    V(JSGlobalObject, JS_GLOBAL_OBJECT_TYPE) \
    V(JSGlobalProxy, JS_GLOBAL_PROXY_TYPE) \
-@@ -1539,6 +1558,7 @@
+@@ -1539,6 +1563,7 @@
    V(WeakFixedArray, WEAK_FIXED_ARRAY_TYPE) \
    V(Map, MAP_TYPE) \
    V(JSObject, JS_OBJECT_TYPE) \
@@ -5421,7 +5578,7 @@ index 8f144e35..1684f6de 100644
    V(JSModuleNamespace, JS_MODULE_NAMESPACE_TYPE) \
    V(JSApiObject, JS_API_OBJECT_TYPE) \
    V(JSTypedArray, JS_TYPED_ARRAY_TYPE) \
-@@ -1583,6 +1603,7 @@
+@@ -1583,6 +1608,7 @@
    V(Map, FIRST_MAP_TYPE, LAST_MAP_TYPE) \
    V(Module, FIRST_MODULE_TYPE, LAST_MODULE_TYPE) \
    V(WasmObject, FIRST_WASM_OBJECT_TYPE, LAST_WASM_OBJECT_TYPE) \
@@ -5429,11 +5586,12 @@ index 8f144e35..1684f6de 100644
    V(JSModuleNamespace, FIRST_JS_MODULE_NAMESPACE_TYPE, LAST_JS_MODULE_NAMESPACE_TYPE) \
    V(JSSpecialObject, FIRST_JS_SPECIAL_OBJECT_TYPE, LAST_JS_SPECIAL_OBJECT_TYPE) \
    V(JSCustomElementsObject, FIRST_JS_CUSTOM_ELEMENTS_OBJECT_TYPE, LAST_JS_CUSTOM_ELEMENTS_OBJECT_TYPE) \
-@@ -1748,6 +1769,10 @@
+@@ -1748,6 +1774,11 @@
    V(WasmStruct, WASM_STRUCT_TYPE) \
    V(JSProxy, JS_PROXY_TYPE) \
    V(JSObject, JS_OBJECT_TYPE) \
 +  V(JSRegionObject, JS_REGION_OBJECT_TYPE) \
++  V(JSRegionClass, JS_REGION_CLASS_TYPE) \
 +  V(JSRegionFunction, JS_REGION_FUNCTION_TYPE) \
 +  V(JSRegionLocalRef, JS_REGION_LOCAL_REF_TYPE) \
 +  V(JSRegionTypedArray, JS_REGION_TYPED_ARRAY_TYPE) \
@@ -7070,7 +7228,7 @@ index 5883a357..530d069c 100644
    static inline Handle<Smi> StoreProxy(Isolate* isolate);
    static inline Tagged<Smi> StoreProxy();
 diff --git a/src/ic/ic.cc b/src/ic/ic.cc
-index 6f846a67..3c3c6718 100644
+index 6f846a67..7608b19b 100644
 --- a/src/ic/ic.cc
 +++ b/src/ic/ic.cc
 @@ -37,6 +37,7 @@
@@ -7189,18 +7347,16 @@ index 6f846a67..3c3c6718 100644
        case LookupIterator::INTERCEPTOR: {
          DirectHandle<JSObject> holder = it->GetHolder<JSObject>();
          Tagged<InterceptorInfo> info = holder->GetNamedInterceptor();
-@@ -2240,6 +2310,10 @@ Maybe<bool> DefineOwnDataProperty(LookupIterator* it,
+@@ -2240,6 +2310,8 @@ Maybe<bool> DefineOwnDataProperty(LookupIterator* it,
      case LookupIterator::WASM_OBJECT:
        RETURN_FAILURE(it->isolate(), kThrowOnError,
                       NewTypeError(MessageTemplate::kWasmObjectsAreOpaque));
 +    case LookupIterator::REGION_OBJECT:
-+      RETURN_FAILURE(it->isolate(), kThrowOnError,
-+                     NewTypeError(MessageTemplate::kRegionNotExtensible,
-+                                  it->GetName()));
++      return JSRegionObject::DefineOwnProperty(it, value, should_throw);
      // When lazy feedback is disabled, the original state could be different
      // while the object is already prepared for TRANSITION.
      case LookupIterator::TRANSITION: {
-@@ -2247,6 +2321,7 @@ Maybe<bool> DefineOwnDataProperty(LookupIterator* it,
+@@ -2247,6 +2319,7 @@ Maybe<bool> DefineOwnDataProperty(LookupIterator* it,
          case LookupIterator::MODULE_NAMESPACE:
          case LookupIterator::JSPROXY:
          case LookupIterator::WASM_OBJECT:
@@ -7208,7 +7364,18 @@ index 6f846a67..3c3c6718 100644
          case LookupIterator::TRANSITION:
          case LookupIterator::DATA:
          case LookupIterator::INTERCEPTOR:
-@@ -2750,6 +2825,16 @@ MaybeObjectHandle StoreIC::ComputeHandler(LookupIterator* lookup) {
+@@ -2361,7 +2434,10 @@ MaybeDirectHandle<Object> StoreIC::Store(Handle<JSAny> object,
+   // present. We can also skip this for private names since they are not
+   // bound by configurability or extensibility checks, and errors would've
+   // been thrown if the private field already exists in the object.
++  // Objects of regions check in DefineOwnDataProperty(): their fields are
++  // not configurable, but a field initializer of a class may define them.
+   if (IsAnyDefineOwn() && !name->IsAnyPrivateName() && IsJSObject(*object) &&
++      !IsJSRegionObject(*object) &&
+       !Cast<JSObject>(object)->HasNamedInterceptor()) {
+     Maybe<bool> can_define = JSObject::CheckIfCanDefineAsConfigurable(
+         isolate(), &it, value, Nothing<ShouldThrow>());
+@@ -2750,6 +2826,16 @@ MaybeObjectHandle StoreIC::ComputeHandler(LookupIterator* lookup) {
      case LookupIterator::MODULE_NAMESPACE:
      case LookupIterator::TYPED_ARRAY_INDEX_NOT_FOUND:
      case LookupIterator::ACCESS_CHECK:
@@ -7225,7 +7392,7 @@ index 6f846a67..3c3c6718 100644
      case LookupIterator::NOT_FOUND:
      case LookupIterator::WASM_OBJECT:
      case LookupIterator::STRING_LOOKUP_START_OBJECT:
-@@ -2901,6 +2986,10 @@ void KeyedStoreIC::UpdateStoreElement(Handle<Map> receiver_map,
+@@ -2901,6 +2987,10 @@ void KeyedStoreIC::UpdateStoreElement(Handle<Map> receiver_map,
  Handle<Object> KeyedStoreIC::StoreElementHandler(
      DirectHandle<Map> receiver_map, KeyedAccessStoreMode store_mode,
      MaybeDirectHandle<UnionOf<Smi, Cell>> prev_validity_cell) {
@@ -7236,7 +7403,7 @@ index 6f846a67..3c3c6718 100644
    if (!IsJSObjectMap(*receiver_map) || receiver_map->is_access_check_needed() ||
        receiver_map->has_indexed_interceptor() ||
        receiver_map->IsMapInArrayPrototypeChain(isolate())) {
-@@ -2996,9 +3085,11 @@ void KeyedStoreIC::StoreElementPolymorphicHandlers(
+@@ -2996,9 +3086,11 @@ void KeyedStoreIC::StoreElementPolymorphicHandlers(
      DirectHandle<Object> handler;
      DirectHandle<Map> transition;
  
@@ -7251,7 +7418,7 @@ index 6f846a67..3c3c6718 100644
        // TODO(mvstanton): Consider embedding store_mode in the state of the slow
        // keyed store ic for uniformity.
        TRACE_HANDLER_STATS(isolate(), KeyedStoreIC_SlowStub);
-@@ -4467,6 +4558,7 @@ bool MaybeCanCloneObjectForObjectAssign(DirectHandle<JSReceiver> source,
+@@ -4467,6 +4559,7 @@ bool MaybeCanCloneObjectForObjectAssign(DirectHandle<JSReceiver> source,
        case LookupIterator::ACCESS_CHECK:
        case LookupIterator::JSPROXY:
        case LookupIterator::WASM_OBJECT:
@@ -7272,7 +7439,7 @@ index c4045bb9..0620388f 100644
    friend class IC;
    friend class NamedLoadHandlerCompiler;
 diff --git a/src/init/bootstrapper.cc b/src/init/bootstrapper.cc
-index bba06cda..f951bcb8 100644
+index bba06cda..729b521d 100644
 --- a/src/init/bootstrapper.cc
 +++ b/src/init/bootstrapper.cc
 @@ -261,6 +261,7 @@ class Genesis {
@@ -7283,7 +7450,7 @@ index bba06cda..f951bcb8 100644
    // TODO(572988458): Remove harmony_struct initialization.
    void InitializeGlobal_harmony_struct();
  #if V8_ENABLE_WEBASSEMBLY
-@@ -4035,6 +4036,19 @@ void Genesis::InitializeGlobal(DirectHandle<JSGlobalObject> global_object,
+@@ -4035,6 +4036,33 @@ void Genesis::InitializeGlobal(DirectHandle<JSGlobalObject> global_object,
          Builtin::kArrayBufferConstructor_DoNotInitialize, 1, kDontAdapt);
      native_context()->set_array_buffer_noinit_fun(*array_buffer_noinit_fun);
  
@@ -7299,11 +7466,25 @@ index bba06cda..f951bcb8 100644
 +        Builtin::kRegionArrayLiteral, 0, kDontAdapt);
 +    region_array_literal->shared()->set_native(false);
 +    native_context()->set_region_array_literal(*region_array_literal);
++    // {} and [] of 'use region' code ask it which of the two they are.
++    DirectHandle<JSFunction> region_has_current = SimpleCreateFunction(
++        isolate_, factory->InternalizeUtf8String("regionHasCurrent"),
++        Builtin::kRegionHasCurrent, 0, kDontAdapt);
++    native_context()->set_region_has_current(*region_has_current);
++    DirectHandle<JSFunction> region_class_this = SimpleCreateFunction(
++        isolate_, factory->InternalizeUtf8String("regionClassThis"),
++        Builtin::kRegionClassThis, 1, kAdapt);
++    native_context()->set_region_class_this(*region_class_this);
++    DirectHandle<JSFunction> region_copy = SimpleCreateFunction(
++        isolate_, factory->InternalizeUtf8String("regionCopy"),
++        Builtin::kRegionCopy, 1, kAdapt);
++    region_copy->shared()->set_native(false);
++    native_context()->set_region_copy(*region_copy);
 +
      DirectHandle<JSObject> array_buffer_prototype(
          Cast<JSObject>(array_buffer_fun->instance_prototype()), isolate_);
      SimpleInstallGetter(isolate_, array_buffer_prototype,
-@@ -5208,6 +5222,7 @@ void Genesis::InitializeExperimentalGlobal() {
+@@ -5208,6 +5236,7 @@ void Genesis::InitializeExperimentalGlobal() {
  #undef IGNORE_FEATURE
    InitializeGlobal_regexp_linear_flag();
    InitializeGlobal_sharedarraybuffer();
@@ -7311,7 +7492,7 @@ index bba06cda..f951bcb8 100644
  
    InitializeGlobal_queueMicrotask();
  }
-@@ -5819,6 +5834,43 @@ void Genesis::InitializeGlobal_sharedarraybuffer() {
+@@ -5819,6 +5848,43 @@ void Genesis::InitializeGlobal_sharedarraybuffer() {
                          isolate()->shared_array_buffer_fun(), DONT_ENUM);
  }
  
@@ -7356,51 +7537,242 @@ index bba06cda..f951bcb8 100644
  
  
 diff --git a/src/interpreter/bytecode-generator.cc b/src/interpreter/bytecode-generator.cc
-index 43fdddaf..a36183ed 100644
+index 43fdddaf..1d44bd5e 100644
 --- a/src/interpreter/bytecode-generator.cc
 +++ b/src/interpreter/bytecode-generator.cc
-@@ -4204,6 +4204,22 @@ void BytecodeGenerator::BuildCreateObjectLiteral(Register literal,
+@@ -1820,6 +1820,8 @@ void BytecodeGenerator::GenerateBaseConstructorBody() {
+ 
+   FunctionLiteral* literal = info()->literal();
+ 
++  if (IsRegionClassConstructor()) BuildRegionClassThis();
++
+   // The derived constructor case is handled in VisitCallSuper.
+   if (literal->class_scope_has_private_brand()) {
+     ClassScope* scope = info()->scope()->outer_scope()->AsClassScope();
+@@ -2075,7 +2077,42 @@ void BytecodeGenerator::AllocateTopLevelRegisters() {
+     } else {
+       incoming_new_target_or_generator_ = register_allocator()->NewRegister();
+     }
++  } else if (IsRegionClassConstructor()) {
++    // BuildRegionClassThis() needs the new target.
++    incoming_new_target_or_generator_ = register_allocator()->NewRegister();
++  }
++}
++
++// The base class constructor of a class of Region.class(), compiled from the
++// script of the class: it creates its instance in the current region. The
++// script has no other classes.
++bool BytecodeGenerator::IsRegionClassConstructor() const {
++  return IsBaseConstructor(function_kind()) && info()->flags().is_region_class();
++}
++
++// The start of a base class constructor of Region.class(): in the current
++// region, `this` becomes the instance there, with every field of the class
++// of new.target, and the constructor returns it (BuildReturn) instead of the
++// plain object the construct stub made.
++void BytecodeGenerator::BuildRegionClassThis() {
++  DCHECK(incoming_new_target_or_generator_.is_valid());
++  BytecodeLabel plain;
++  RegisterAllocationScope register_scope(this);
++  // Through a register the bytecode writes: the register optimizer counts
++  // only those in the frame size, and the entry trampoline writes the
++  // incoming new target.
++  Register new_target = register_allocator()->NewRegister();
++  builder()
++      ->MoveRegister(incoming_new_target_or_generator_, new_target)
++      .CallJSRuntime(Context::REGION_CLASS_THIS_INDEX, RegisterList(new_target))
++      .JumpIfUndefined(&plain)
++      .StoreAccumulatorInRegister(builder()->Receiver());
++  DeclarationScope* scope = closure_scope();
++  if (scope->has_this_declaration() && scope->receiver()->IsContextSlot()) {
++    builder()->StoreContextSlot(execution_context()->reg(), scope->receiver(),
++                                0);
+   }
++  builder()->Bind(&plain);
  }
  
- void BytecodeGenerator::VisitObjectLiteral(ObjectLiteral* expr) {
-+  // A {} in 'use region' code is #{}: keys and values interleaved, for the
-+  // same builtin. The parser allowed only `name: value` and `name`.
-+  if (expr->is_region_literal()) {
+ void BytecodeGenerator::BuildGeneratorPrologue() {
+@@ -3873,6 +3910,16 @@ void BytecodeGenerator::VisitClassLiteral(ClassLiteral* expr, Register name) {
+   } else {
+     BuildClassLiteral(expr, name);
+   }
++  // A class in 'use region' code is a class of Region.class(), except in
++  // the script of such a class, which compiles the class itself.
++  if (info()->literal()->region_literals() &&
++      !info()->flags().is_region_class()) {
 +    RegisterAllocationScope register_scope(this);
-+    RegisterList args = register_allocator()->NewGrowableRegisterList();
-+    for (ObjectLiteralProperty* property : *expr->properties()) {
-+      Register key = register_allocator()->GrowRegisterList(&args);
-+      builder()
-+          ->LoadLiteral(property->key()->AsLiteral()->AsRawPropertyName())
-+          .StoreAccumulatorInRegister(key);
-+      VisitAndPushIntoRegisterList(property->value(), &args);
++    Register constructor = register_allocator()->NewRegister();
++    builder()
++        ->StoreAccumulatorInRegister(constructor)
++        .CallRuntime(Runtime::kMakeRegionClass, constructor);
++  }
+ }
+ 
+ void BytecodeGenerator::BuildClassProperty(ClassLiteral::Property* property) {
+@@ -4203,7 +4250,83 @@ void BytecodeGenerator::BuildCreateObjectLiteral(Register literal,
+       .StoreAccumulatorInRegister(literal);
+ }
+ 
++// A {} in 'use region' code is #{} while a region is current: keys and
++// values interleaved, for the same builtin. Otherwise it is a plain object,
++// so that the code runs outside regions too. The values are evaluated once,
++// before the choice. The parser allowed only `name: value` and `name`.
++void BytecodeGenerator::BuildRegionObjectLiteral(ObjectLiteral* expr) {
++  RegisterAllocationScope register_scope(this);
++  RegisterList args = register_allocator()->NewGrowableRegisterList();
++  for (ObjectLiteralProperty* property : *expr->properties()) {
++    Register key = register_allocator()->GrowRegisterList(&args);
++    builder()
++        ->LoadLiteral(property->key()->AsLiteral()->AsRawPropertyName())
++        .StoreAccumulatorInRegister(key);
++    VisitAndPushIntoRegisterList(property->value(), &args);
++  }
++  BytecodeLabel plain, done;
++  builder()
++      ->CallJSRuntime(Context::REGION_HAS_CURRENT_INDEX, RegisterList())
++      .JumpIfFalse(ToBooleanMode::kConvertToBoolean, &plain);
++  builder()->SetExpressionPosition(expr);
++  builder()
++      ->CallJSRuntime(Context::REGION_OBJECT_LITERAL_INDEX, args)
++      .Jump(&done);
++
++  // The plain object: the boilerplate holds the keys and the constants.
++  builder()->Bind(&plain);
++  expr->builder()->InitDepthAndFlags();
++  if (expr->builder()->IsEmptyObjectLiteral()) {
++    builder()->CreateEmptyObjectLiteral();
++  } else {
++    uint8_t flags = CreateObjectLiteralFlags::Encode(
++        expr->builder()->ComputeFlags(),
++        expr->builder()->IsFastCloningSupported());
++    Register literal = register_allocator()->NewRegister();
++    size_t entry;
++    if (expr->builder()->properties_count() == 0) {
++      entry = builder()->EmptyObjectBoilerplateDescriptionConstantPoolEntry();
++    } else {
++      entry = builder()->AllocateDeferredConstantPoolEntry();
++      object_literals_.push_back(std::make_pair(expr->builder(), entry));
 +    }
-+    builder()->SetExpressionPosition(expr);
-+    builder()->CallJSRuntime(Context::REGION_OBJECT_LITERAL_INDEX, args);
++    BuildCreateObjectLiteral(literal, flags, entry);
++    for (int i = 0; i < expr->properties()->length(); i++) {
++      ObjectLiteral::Property* property = expr->properties()->at(i);
++      if (!property->emit_store() || property->IsCompileTimeValue()) continue;
++      FeedbackSlot slot = feedback_spec()->AddDefineNamedOwnICSlot();
++      builder()
++          ->LoadAccumulatorWithRegister(args[2 * i + 1])
++          .DefineNamedOwnPropertyInLiteral(
++              literal, property->key()->AsLiteral()->AsRawPropertyName(),
++              feedback_index(slot));
++    }
++    builder()->LoadAccumulatorWithRegister(literal);
++  }
++  builder()->Bind(&done);
++}
++
+ void BytecodeGenerator::VisitObjectLiteral(ObjectLiteral* expr) {
++  if (expr->is_region_literal()) {
++    BuildRegionObjectLiteral(expr);
 +    return;
 +  }
++  BuildObjectLiteral(expr);
++  if (expr->is_region_copy()) BuildCopyIntoCurrentRegion();
++}
++
++// A {} or [] in 'use region' code that #{} or #[] can't create, which is in
++// the accumulator: a copy of it in the current region, or itself without
++// one.
++void BytecodeGenerator::BuildCopyIntoCurrentRegion() {
++  RegisterAllocationScope register_scope(this);
++  Register value = register_allocator()->NewRegister();
++  builder()
++      ->StoreAccumulatorInRegister(value)
++      .CallJSRuntime(Context::REGION_COPY_INDEX, RegisterList(value));
++}
++
++void BytecodeGenerator::BuildObjectLiteral(ObjectLiteral* expr) {
    expr->builder()->InitDepthAndFlags();
  
    // Fast path for the empty object literal which doesn't need an
-@@ -4680,6 +4696,17 @@ void BytecodeGenerator::BuildCreateArrayLiteral(
+@@ -4679,9 +4802,62 @@ void BytecodeGenerator::BuildCreateArrayLiteral(
+   builder()->LoadAccumulatorWithRegister(array);
  }
  
++// A [] in 'use region' code is #[] while a region is current, and a plain
++// array otherwise, as for {}. The parser allowed no holes or spread.
++void BytecodeGenerator::BuildRegionArrayLiteral(ArrayLiteral* expr) {
++  RegisterAllocationScope register_scope(this);
++  RegisterList args = register_allocator()->NewGrowableRegisterList();
++  for (Expression* value : *expr->values()) {
++    VisitAndPushIntoRegisterList(value, &args);
++  }
++  BytecodeLabel plain, done;
++  builder()
++      ->CallJSRuntime(Context::REGION_HAS_CURRENT_INDEX, RegisterList())
++      .JumpIfFalse(ToBooleanMode::kConvertToBoolean, &plain);
++  builder()->SetExpressionPosition(expr);
++  builder()
++      ->CallJSRuntime(Context::REGION_ARRAY_LITERAL_INDEX, args)
++      .Jump(&done);
++
++  // The plain array: the boilerplate holds the constants.
++  builder()->Bind(&plain);
++  expr->builder()->InitDepthAndFlags();
++  Register array = register_allocator()->NewRegister();
++  int literal_index = feedback_index(feedback_spec()->AddLiteralSlot());
++  if (expr->values()->is_empty()) {
++    builder()->CreateEmptyArrayLiteral(literal_index);
++  } else {
++    uint8_t flags = CreateArrayLiteralFlags::Encode(
++        expr->builder()->IsFastCloningSupported(),
++        expr->builder()->ComputeFlags());
++    size_t entry = builder()->AllocateDeferredConstantPoolEntry();
++    array_literals_.push_back(std::make_pair(expr->builder(), entry));
++    builder()->CreateArrayLiteral(entry, literal_index, flags);
++  }
++  builder()->StoreAccumulatorInRegister(array);
++  Register index = register_allocator()->NewRegister();
++  SharedFeedbackSlot element_slot(feedback_spec(),
++                                  FeedbackSlotKind::kStoreInArrayLiteral);
++  for (int i = 0; i < expr->values()->length(); i++) {
++    if (expr->values()->at(i)->IsCompileTimeValue()) continue;
++    builder()
++        ->LoadLiteral(Smi::FromInt(i))
++        .StoreAccumulatorInRegister(index)
++        .LoadAccumulatorWithRegister(args[i])
++        .StoreInArrayLiteral(array, index, feedback_index(element_slot.Get()));
++  }
++  builder()->LoadAccumulatorWithRegister(array);
++  builder()->Bind(&done);
++}
++
  void BytecodeGenerator::VisitArrayLiteral(ArrayLiteral* expr) {
-+  // A [] in 'use region' code is #[]. The parser allowed no holes or spread.
 +  if (expr->is_region_literal()) {
-+    RegisterAllocationScope register_scope(this);
-+    RegisterList args = register_allocator()->NewGrowableRegisterList();
-+    for (Expression* value : *expr->values()) {
-+      VisitAndPushIntoRegisterList(value, &args);
-+    }
-+    builder()->SetExpressionPosition(expr);
-+    builder()->CallJSRuntime(Context::REGION_ARRAY_LITERAL_INDEX, args);
++    BuildRegionArrayLiteral(expr);
 +    return;
 +  }
    expr->builder()->InitDepthAndFlags();
    BuildCreateArrayLiteral(expr->values(), expr);
++  if (expr->is_region_copy()) BuildCopyIntoCurrentRegion();
  }
-@@ -7420,6 +7447,16 @@ void BytecodeGenerator::VisitCallRuntime(CallRuntime* expr) {
+ 
+ void BytecodeGenerator::VisitVariableProxy(VariableProxy* proxy) {
+@@ -4848,6 +5024,15 @@ void BytecodeGenerator::BuildVariableLoadForAccumulatorValue(
+ }
+ 
+ void BytecodeGenerator::BuildReturn(int source_position) {
++  if (IsRegionClassConstructor()) {
++    // The construct stub would return its plain object for anything but an
++    // object; the instance may be another one (BuildRegionClassThis).
++    BytecodeLabel done;
++    builder()
++        ->JumpIfJSReceiver(&done)
++        .LoadAccumulatorWithRegister(builder()->Receiver())
++        .Bind(&done);
++  }
+   if (v8_flags.trace) {
+     RegisterAllocationScope register_scope(this);
+     Register result = register_allocator()->NewRegister();
+@@ -7420,6 +7605,16 @@ void BytecodeGenerator::VisitCallRuntime(CallRuntime* expr) {
    RegisterList args = register_allocator()->NewGrowableRegisterList();
    VisitArguments(expr->arguments(), &args);
    Runtime::FunctionId function_id = expr->function()->function_id;
@@ -7417,6 +7789,23 @@ index 43fdddaf..a36183ed 100644
    builder()->CallRuntime(function_id, args);
  }
  
+diff --git a/src/interpreter/bytecode-generator.h b/src/interpreter/bytecode-generator.h
+index 6e6505dd..80727983 100644
+--- a/src/interpreter/bytecode-generator.h
++++ b/src/interpreter/bytecode-generator.h
+@@ -404,6 +404,12 @@ class BytecodeGenerator final : public AstVisitor<BytecodeGenerator> {
+   void BuildCreateArrayLiteral(const ZonePtrList<Expression>* elements,
+                                ArrayLiteral* expr);
+   void BuildCreateObjectLiteral(Register literal, uint8_t flags, size_t entry);
++  void BuildObjectLiteral(ObjectLiteral* expr);
++  void BuildRegionObjectLiteral(ObjectLiteral* expr);
++  void BuildCopyIntoCurrentRegion();
++  bool IsRegionClassConstructor() const;
++  void BuildRegionClassThis();
++  void BuildRegionArrayLiteral(ArrayLiteral* expr);
+   void AllocateTopLevelRegisters();
+   void VisitArgumentsObject(Variable* variable);
+   void VisitRestArgumentsArray(Variable* rest);
 diff --git a/src/json/json-stringifier.cc b/src/json/json-stringifier.cc
 index cb1a6166..0a54d999 100644
 --- a/src/json/json-stringifier.cc
@@ -8629,15 +9018,18 @@ index 5a0a666c..473044be 100644
  #ifdef V8_TEMPORAL_SUPPORT
  #include "src/objects/js-temporal-objects.h"
 diff --git a/src/objects/contexts.h b/src/objects/contexts.h
-index 1859939e..33da1da7 100644
+index 1859939e..f4eeec9f 100644
 --- a/src/objects/contexts.h
 +++ b/src/objects/contexts.h
-@@ -319,6 +319,19 @@ enum ContextLookupFlags {
+@@ -319,6 +319,22 @@ enum ContextLookupFlags {
    V(REGEXP_RESULT_INDICES_MAP_INDEX, Map, regexp_result_indices_map)           \
    V(REGEXP_SEARCH_FUNCTION_INDEX, JSFunction, regexp_search_function)          \
    V(REGEXP_SPLIT_FUNCTION_INDEX, JSFunction, regexp_split_function)            \
 +  /* #[] and #{}: the builtins, and the shapes of #{} seen in this context */  \
 +  V(REGION_ARRAY_LITERAL_INDEX, JSFunction, region_array_literal)              \
++  V(REGION_CLASS_THIS_INDEX, JSFunction, region_class_this)                    \
++  V(REGION_COPY_INDEX, JSFunction, region_copy)                                \
++  V(REGION_HAS_CURRENT_INDEX, JSFunction, region_has_current)                  \
 +  V(REGION_LITERAL_CACHE_INDEX, Object, region_literal_cache)                  \
 +  V(REGION_OBJECT_LITERAL_INDEX, JSFunction, region_object_literal)            \
 +  /* Errors of ownership regions; undefined without --harmony-regions */      \
@@ -8667,7 +9059,7 @@ index bd619242..f1682638 100644
      return false;
  
 diff --git a/src/objects/instance-type.h b/src/objects/instance-type.h
-index 8c0ceaba..f557d3c5 100644
+index 8c0ceaba..304da5ea 100644
 --- a/src/objects/instance-type.h
 +++ b/src/objects/instance-type.h
 @@ -207,6 +207,10 @@ enum InstanceType : uint16_t {
@@ -8681,24 +9073,26 @@ index 8c0ceaba..f557d3c5 100644
  
    // Convenient names for things where the generated name is awkward:
    FIRST_TYPE = FIRST_HEAP_OBJECT_TYPE,
-@@ -272,6 +276,10 @@ static_assert(JS_CLASS_CONSTRUCTOR_TYPE < FIRST_CALLABLE_JS_FUNCTION_TYPE ||
+@@ -272,6 +276,11 @@ static_assert(JS_CLASS_CONSTRUCTOR_TYPE < FIRST_CALLABLE_JS_FUNCTION_TYPE ||
                   TYPE == JS_GLOBAL_PROXY_TYPE ||                           \
                   TYPE == JS_MODULE_NAMESPACE_TYPE ||                       \
                   TYPE == JS_DEFERRED_MODULE_NAMESPACE_TYPE ||              \
 +                 TYPE == JS_REGION_OBJECT_TYPE ||                          \
 +                 TYPE == JS_REGION_TYPED_ARRAY_TYPE ||                     \
 +                 TYPE == JS_REGION_FUNCTION_TYPE ||                        \
++                 TYPE == JS_REGION_CLASS_TYPE ||                           \
 +                 TYPE == JS_REGION_LOCAL_REF_TYPE ||                       \
                   TYPE == JS_SPECIAL_API_OBJECT_TYPE));                     \
    static_assert((TYPE >= FIRST_JS_RECEIVER_TYPE &&                         \
                   TYPE <= LAST_CUSTOM_ELEMENTS_RECEIVER) ==                 \
-@@ -282,6 +290,10 @@ static_assert(JS_CLASS_CONSTRUCTOR_TYPE < FIRST_CALLABLE_JS_FUNCTION_TYPE ||
+@@ -282,6 +291,11 @@ static_assert(JS_CLASS_CONSTRUCTOR_TYPE < FIRST_CALLABLE_JS_FUNCTION_TYPE ||
                   TYPE == JS_MODULE_NAMESPACE_TYPE ||                       \
                   TYPE == JS_DEFERRED_MODULE_NAMESPACE_TYPE ||              \
                   TYPE == JS_SPECIAL_API_OBJECT_TYPE ||                     \
 +                 TYPE == JS_REGION_OBJECT_TYPE ||                          \
 +                 TYPE == JS_REGION_TYPED_ARRAY_TYPE ||                     \
 +                 TYPE == JS_REGION_FUNCTION_TYPE ||                        \
++                 TYPE == JS_REGION_CLASS_TYPE ||                           \
 +                 TYPE == JS_REGION_LOCAL_REF_TYPE ||                       \
                   TYPE == JS_PRIMITIVE_WRAPPER_TYPE));
  // clang-format on
@@ -8718,7 +9112,7 @@ index 7527a26b..798a1147 100644
    inline void set_detach_key(Tagged<Cell> value,
                               WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
 diff --git a/src/objects/js-objects.cc b/src/objects/js-objects.cc
-index 331e03e6..f27ecc07 100644
+index 331e03e6..f26ad258 100644
 --- a/src/objects/js-objects.cc
 +++ b/src/objects/js-objects.cc
 @@ -62,6 +62,7 @@
@@ -8806,7 +9200,7 @@ index 331e03e6..f27ecc07 100644
        case LookupIterator::JSPROXY:
        case LookupIterator::MODULE_NAMESPACE:
        case LookupIterator::DATA:
-@@ -2821,6 +2843,14 @@ int JSObject::GetHeaderSize(InstanceType type) {
+@@ -2821,6 +2843,16 @@ int JSObject::GetHeaderSize(InstanceType type) {
        return JSModuleNamespace::kHeaderSize;
      case JS_DEFERRED_MODULE_NAMESPACE_TYPE:
        return JSDeferredModuleNamespace::kHeaderSize;
@@ -8816,22 +9210,50 @@ index 331e03e6..f27ecc07 100644
 +      return JSRegionTypedArray::kHeaderSize;
 +    case JS_REGION_FUNCTION_TYPE:
 +      return JSRegionFunction::kHeaderSize;
++    case JS_REGION_CLASS_TYPE:
++      return JSRegionClass::kHeaderSize;
 +    case JS_REGION_LOCAL_REF_TYPE:
 +      return JSRegionLocalRef::kHeaderSize;
      case JS_SHARED_STRUCT_TYPE:
        return JSSharedStruct::kHeaderSize;
  #ifdef V8_TEMPORAL_SUPPORT
-@@ -3937,6 +3967,10 @@ Maybe<bool> JSObject::DefineOwnPropertyIgnoreAttributes(
+@@ -3937,6 +3969,8 @@ Maybe<bool> JSObject::DefineOwnPropertyIgnoreAttributes(
          UNREACHABLE();
        case LookupIterator::WASM_OBJECT:
          continue;  // {AddDataProperty} will throw if no other case is hit.
 +      case LookupIterator::REGION_OBJECT:
-+        RETURN_FAILURE(it->isolate(), kThrowOnError,
-+                       NewTypeError(MessageTemplate::kRegionNotExtensible,
-+                                    it->GetName()));
++        return JSRegionObject::DefineOwnProperty(it, value, should_throw);
  
        case LookupIterator::ACCESS_CHECK:
          if (!it->HasAccess()) {
+@@ -4425,6 +4459,10 @@ Maybe<bool> JSObject::CreateDataProperty(Isolate* isolate,
+                                          PropertyKey key,
+                                          DirectHandle<Object> value,
+                                          Maybe<ShouldThrow> should_throw) {
++  if (V8_UNLIKELY(IsJSRegionObject(*object))) {
++    LookupIterator it(isolate, object, key, LookupIterator::OWN);
++    return JSRegionObject::DefineOwnProperty(&it, value, should_throw);
++  }
+   if (!key.is_element()) {
+     if (TryFastAddDataProperty(isolate, object, key.name(), value, NONE)) {
+       return Just(true);
+@@ -5578,6 +5616,16 @@ Maybe<bool> JSObject::SetPrototype(Isolate* isolate,
+   }
+   DirectHandle<Map> map(real_receiver->map(), isolate);
+ 
++  // A region object keeps the prototype it gets from the reading isolate.
++  if (V8_UNLIKELY(IsJSRegionObject(*real_receiver))) {
++    if (JSRegionObject::PrototypeOf(isolate, *real_receiver) == *value) {
++      return Just(true);
++    }
++    RETURN_FAILURE(isolate, should_throw,
++                   NewTypeError(MessageTemplate::kImmutablePrototypeSet,
++                                object));
++  }
++
+   // Nothing to do if prototype is already set.
+   if (map->prototype() == *value) return Just(true);
+ 
 diff --git a/src/objects/js-promise.h b/src/objects/js-promise.h
 index 9c6f4043..0e1c4b10 100644
 --- a/src/objects/js-promise.h
@@ -8848,10 +9270,10 @@ index 9c6f4043..0e1c4b10 100644
                                                  DirectHandle<Object> reactions,
 diff --git a/src/objects/js-region-inl.h b/src/objects/js-region-inl.h
 new file mode 100644
-index 00000000..99e3fe03
+index 00000000..bb663750
 --- /dev/null
 +++ b/src/objects/js-region-inl.h
-@@ -0,0 +1,132 @@
+@@ -0,0 +1,171 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -8940,6 +9362,45 @@ index 00000000..99e3fe03
 +  column_.store(this, Smi::FromInt(column));
 +}
 +
++DEF_CAST_TRAITS(JSRegionClass)
++
++int JSRegionClass::class_id() const { return class_id_.load().value(); }
++Tagged<String> JSRegionClass::source() const { return source_.load(); }
++Tagged<Union<String, Undefined>> JSRegionClass::script_name() const {
++  return script_name_.load();
++}
++int JSRegionClass::line() const { return line_.load().value(); }
++int JSRegionClass::column() const { return column_.load().value(); }
++Tagged<FixedArray> JSRegionClass::field_names() const {
++  return field_names_.load();
++}
++void JSRegionClass::set_field_names(Tagged<FixedArray> value) {
++  field_names_.store(this, value);
++}
++Tagged<Map> JSRegionClass::instance_map() const { return instance_map_.load(); }
++Tagged<Map> JSRegionClass::sealed_instance_map() const {
++  return sealed_instance_map_.load();
++}
++Tagged<FixedArray> JSRegionClass::captures() const { return captures_.load(); }
++
++void JSRegionClass::Initialize(int class_id, Tagged<String> source,
++                               Tagged<Union<String, Undefined>> script_name,
++                               int line, int column,
++                               Tagged<FixedArray> field_names,
++                               Tagged<Map> instance_map,
++                               Tagged<Map> sealed_instance_map,
++                               Tagged<FixedArray> captures) {
++  class_id_.store(this, Smi::FromInt(class_id));
++  source_.store(this, source);
++  script_name_.store(this, script_name);
++  line_.store(this, Smi::FromInt(line));
++  column_.store(this, Smi::FromInt(column));
++  field_names_.store(this, field_names);
++  instance_map_.store(this, instance_map);
++  sealed_instance_map_.store(this, sealed_instance_map);
++  captures_.store(this, captures);
++}
++
 +DEF_CAST_TRAITS(JSRegionLocalRef)
 +
 +int JSRegionLocalRef::ref_id() const { return ref_id_.load().value(); }
@@ -8986,10 +9447,10 @@ index 00000000..99e3fe03
 +#endif  // V8_OBJECTS_JS_REGION_INL_H_
 diff --git a/src/objects/js-region.cc b/src/objects/js-region.cc
 new file mode 100644
-index 00000000..9b0ea7ba
+index 00000000..a7995496
 --- /dev/null
 +++ b/src/objects/js-region.cc
-@@ -0,0 +1,4615 @@
+@@ -0,0 +1,5129 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -9040,6 +9501,7 @@ index 00000000..9b0ea7ba
 +#include "src/objects/keys.h"
 +#include "src/objects/lookup-inl.h"
 +#include "src/objects/objects-inl.h"
++#include "src/strings/string-builder-inl.h"
 +#include "src/utils/identity-map.h"
 +
 +namespace v8 {
@@ -10613,9 +11075,8 @@ index 00000000..9b0ea7ba
 +LookupIterator PrototypeLookup(Isolate* isolate,
 +                               DirectHandle<JSRegionObject> object,
 +                               LookupIterator* it) {
-+  DirectHandle<JSObject> prototype = object->is_array()
-+                                         ? isolate->initial_array_prototype()
-+                                         : isolate->initial_object_prototype();
++  DirectHandle<JSObject> prototype(JSRegionObject::PrototypeOf(isolate, *object),
++                                   isolate);
 +  if (it->IsElement()) {
 +    return LookupIterator(isolate, it->GetReceiver(), it->index(), prototype);
 +  }
@@ -10986,6 +11447,247 @@ index 00000000..9b0ea7ba
 +    // The private symbol functions keep their descriptor under.
 +    Address* symbol = nullptr;
 +  };
++
++  static DirectHandle<class Symbol> Symbol(Isolate* isolate) {
++    State& state = Of(isolate);
++    if (state.symbol == nullptr) {
++      state.symbol = isolate->global_handles()
++                         ->Create(*isolate->factory()->NewPrivateSymbol())
++                         .location();
++    }
++    return DirectHandle<class Symbol>(
++        Cast<class Symbol>(Tagged<Object>(*state.symbol)), isolate);
++  }
++
++  static State& Of(Isolate* isolate) {
++    thread_local Isolate* cached_isolate = nullptr;
++    thread_local State* cached_state = nullptr;
++    if (cached_isolate == isolate) return *cached_state;
++    base::MutexGuard guard(Mutex());
++    cached_isolate = isolate;
++    cached_state = &(*All())[isolate];
++    return *cached_state;
++  }
++
++  static base::Mutex& Mutex() {
++    static base::LeakyObject<base::Mutex> mutex;
++    return *mutex.get();
++  }
++  static std::unordered_map<Isolate*, State>* All() {
++    static base::LeakyObject<std::unordered_map<Isolate*, State>> all;
++    return all.get();
++  }
++};
++
++// Classes of Region.class(). A class is its source, known by a class id:
++// every holder with that id is the same class. Each isolate that uses the
++// class compiles the source once into a class of its own, which is what JS
++// sees there: its constructor and its prototype, both frozen, as the class
++// never changes. Objects of regions that are instances of the class have a
++// map whose prototype is the holder; their prototype in JS is the prototype
++// of this isolate's class.
++class RegionClasses {
++ public:
++  static int NewId() {
++    static std::atomic<int> next{0};
++    int id = next.fetch_add(1, std::memory_order_relaxed);
++    CHECK_LT(id, Smi::kMaxValue);
++    return id;
++  }
++
++  // The holder of `value` if it is a class this isolate compiled from one.
++  static MaybeDirectHandle<JSRegionClass> HolderOf(Isolate* isolate,
++                                                   DirectHandle<Object> value) {
++    if (!IsJSFunction(*value) ||
++        !IsClassConstructor(Cast<JSFunction>(*value)->shared()->kind())) {
++      return {};
++    }
++    DirectHandle<Object> holder = JSReceiver::GetDataProperty(
++        isolate, Cast<JSFunction>(value), Symbol(isolate));
++    if (!IsJSRegionClass(*holder)) return {};
++    return Cast<JSRegionClass>(holder);
++  }
++
++  // This isolate's class of `id`, if JS still refers to it.
++  static MaybeDirectHandle<JSFunction> Find(Isolate* isolate, int id) {
++    Tagged<Object> known = FindRaw(isolate, id);
++    if (!IsJSFunction(known)) return {};
++    return DirectHandle<JSFunction>(Cast<JSFunction>(known), isolate);
++  }
++
++  // The prototype of this isolate's class of `holder`, or Smi zero if the
++  // isolate has none. Does not allocate.
++  static Tagged<Object> KnownPrototype(Isolate* isolate,
++                                       Tagged<JSRegionClass> holder) {
++    Tagged<Object> known = FindRaw(isolate, holder->class_id());
++    if (!IsJSFunction(known)) return Smi::zero();
++    return Cast<JSFunction>(known)->instance_prototype();
++  }
++
++  // This isolate's class of `holder`, compiled now if needed.
++  static MaybeDirectHandle<JSFunction> Constructor(
++      Isolate* isolate, DirectHandle<JSRegionClass> holder) {
++    DirectHandle<JSFunction> known;
++    if (Find(isolate, holder->class_id()).ToHandle(&known)) return known;
++    StackLimitCheck check(isolate);
++    if (check.HasOverflowed()) {
++      isolate->StackOverflow();
++      return {};
++    }
++
++    // What the source refers to, as this isolate sees it.
++    Factory* factory = isolate->factory();
++    DirectHandle<FixedArray> captures(holder->captures(), isolate);
++    int count = static_cast<int>(captures->ulength().value()) / 2;
++    DirectHandleVector<Object> values(isolate);
++    IncrementalStringBuilder parameters(isolate);
++    for (int i = 0; i < count; i++) {
++      if (i > 0) parameters.AppendCharacter(',');
++      parameters.AppendString(
++          direct_handle(Cast<String>(captures->get(2 * i)), isolate));
++      Handle<Object> value(captures->get(2 * i + 1), isolate);
++      if (IsJSRegionClass(*value)) {
++        DirectHandle<JSFunction> constructor;
++        if (!Constructor(isolate, Cast<JSRegionClass>(value))
++                 .ToHandle(&constructor)) {
++          return {};
++        }
++        values.push_back(constructor);
++      } else {
++        DirectHandle<Object> local;
++        if (!JSRegionObject::ToJSValue(isolate, value).ToHandle(&local)) {
++          return {};
++        }
++        values.push_back(local);
++      }
++    }
++
++    // As an expression, the way Function.prototype.toString() gave it, in
++    // 'use region' code: {} and [] of the class are created in the current
++    // region. With captures, a function takes them as its arguments. The
++    // comment at the end keeps the compilation cache from giving the script
++    // to other code with the same source.
++    IncrementalStringBuilder wrapped(isolate);
++    wrapped.AppendCStringLiteral("'use region';(");
++    if (count > 0) {
++      wrapped.AppendCStringLiteral("function(");
++      DirectHandle<String> names;
++      ASSIGN_RETURN_ON_EXCEPTION(isolate, names, parameters.Finish());
++      wrapped.AppendString(names);
++      wrapped.AppendCStringLiteral("){return(");
++    }
++    int prefix_length = wrapped.Length();
++    wrapped.AppendString(direct_handle(holder->source(), isolate));
++    if (count > 0) {
++      wrapped.AppendCStringLiteral("\n)})");
++    } else {
++      wrapped.AppendCStringLiteral("\n)");
++    }
++    wrapped.AppendCStringLiteral("/* Region.class */");
++    DirectHandle<String> source;
++    ASSIGN_RETURN_ON_EXCEPTION(isolate, source, wrapped.Finish());
++
++    ScriptDetails details(handle(holder->script_name(), isolate),
++                          ScriptOriginOptions(false, false));
++    details.line_offset = holder->line();
++    details.column_offset = std::max(0, holder->column() - prefix_length);
++    details.region_class = true;
++    ScriptCompiler::CompilationDetails compilation_details;
++    DirectHandle<SharedFunctionInfo> shared;
++    ASSIGN_RETURN_ON_EXCEPTION(
++        isolate, shared,
++        Compiler::GetSharedFunctionInfoForScript(
++            isolate, handle(*source, isolate), details,
++            ScriptCompiler::kNoCompileOptions,
++            ScriptCompiler::kNoCacheNoReason, NOT_NATIVES_CODE,
++            &compilation_details));
++    DirectHandle<JSFunction> script =
++        Factory::JSFunctionBuilder{isolate, shared, isolate->native_context()}
++            .Build();
++    DirectHandle<Object> result;
++    ASSIGN_RETURN_ON_EXCEPTION(
++        isolate, result,
++        Execution::CallScript(isolate, script, isolate->global_proxy(),
++                              factory->empty_fixed_array()));
++    if (count > 0) {
++      CHECK(IsJSFunction(*result));
++      ASSIGN_RETURN_ON_EXCEPTION(
++          isolate, result,
++          Execution::Call(isolate, result, factory->undefined_value(),
++                          base::VectorOf(values)));
++    }
++    CHECK(IsJSFunction(*result));
++    DirectHandle<JSFunction> constructor = Cast<JSFunction>(result);
++    CHECK(IsClassConstructor(constructor->shared()->kind()));
++    // The class may have used its own name in the meantime (a static field
++    // that creates an instance): it got plain objects then.
++    if (Find(isolate, holder->class_id()).ToHandle(&known)) return known;
++
++    JSObject::AddProperty(isolate, constructor, Symbol(isolate), holder,
++                          DONT_ENUM);
++    JSFunction::EnsureHasInitialMap(isolate, constructor);
++    DirectHandle<JSReceiver> prototype(
++        Cast<JSReceiver>(constructor->instance_prototype()), isolate);
++    if (JSReceiver::SetIntegrityLevel(isolate, prototype, FROZEN,
++                                      kThrowOnError)
++            .IsNothing() ||
++        JSReceiver::SetIntegrityLevel(isolate, constructor, FROZEN,
++                                      kThrowOnError)
++            .IsNothing()) {
++      return {};
++    }
++    Address*& location = Of(isolate).classes[holder->class_id()];
++    if (location != nullptr) GlobalHandles::Destroy(location);
++    location = isolate->global_handles()->Create(*constructor).location();
++    GlobalHandles::MakeWeak(&location);
++    return constructor;
++  }
++
++  // The map of holders, the same for every class of this isolate.
++  static DirectHandle<Map> HolderMap(Isolate* isolate) {
++    State& state = Of(isolate);
++    if (state.holder_map == nullptr) {
++      state.holder_map =
++          isolate->global_handles()
++              ->Create(*NewRegionMapFor(isolate, JS_REGION_CLASS_TYPE,
++                                        JSRegionClass::kHeaderSize))
++              .location();
++    }
++    return DirectHandle<Map>(Cast<Map>(Tagged<Object>(*state.holder_map)),
++                             isolate);
++  }
++
++  static void Forget(Isolate* isolate) {
++    base::MutexGuard guard(Mutex());
++    auto it = All()->find(isolate);
++    if (it == All()->end()) return;
++    for (auto& [id, location] : it->second.classes) {
++      if (location != nullptr) GlobalHandles::Destroy(location);
++    }
++    if (it->second.holder_map) GlobalHandles::Destroy(it->second.holder_map);
++    if (it->second.symbol) GlobalHandles::Destroy(it->second.symbol);
++    // Keep the entry: a thread may still have it cached.
++    it->second.classes.clear();
++    it->second.holder_map = nullptr;
++    it->second.symbol = nullptr;
++  }
++
++ private:
++  struct State {
++    // Weak global handles by class id; GC clears them. Entries are never
++    // erased while the isolate lives, so the addresses stay valid.
++    std::unordered_map<int, Address*> classes;
++    Address* holder_map = nullptr;
++    // The private symbol classes keep their holder under.
++    Address* symbol = nullptr;
++  };
++
++  static Tagged<Object> FindRaw(Isolate* isolate, int id) {
++    State& state = Of(isolate);
++    auto it = state.classes.find(id);
++    if (it == state.classes.end() || it->second == nullptr) return Smi::zero();
++    return Tagged<Object>(*it->second);
++  }
 +
 +  static DirectHandle<class Symbol> Symbol(Isolate* isolate) {
 +    State& state = Of(isolate);
@@ -11548,9 +12250,11 @@ index 00000000..9b0ea7ba
 +        ASSIGN_RETURN_ON_EXCEPTION(isolate_, value,
 +                                   Object::GetElement(isolate_, source, i));
 +      } else {
++        // A key may be an index: {0: x}.
 +        DirectHandle<Name> key(Cast<Name>(source_keys->get(i)), isolate_);
 +        ASSIGN_RETURN_ON_EXCEPTION(
-+            isolate_, value, JSReceiver::GetProperty(isolate_, source, key));
++            isolate_, value,
++            Object::GetPropertyOrElement(isolate_, source, key));
 +      }
 +      DirectHandle<Object> copy;
 +      ASSIGN_RETURN_ON_EXCEPTION(isolate_, copy, Copy(value));
@@ -11907,6 +12611,7 @@ index 00000000..9b0ea7ba
 +void ForgetRegionLiterals(Isolate* isolate) { RegionLiterals::Forget(isolate); }
 +void ForgetRegionFunctions(Isolate* isolate) {
 +  RegionFunctions::Forget(isolate);
++  RegionClasses::Forget(isolate);
 +}
 +void ForgetRegionLocalRefs(Isolate* isolate) {
 +  RegionLocalRefs::Forget(isolate);
@@ -12093,6 +12798,194 @@ index 00000000..9b0ea7ba
 +  descriptor->set(RegionFunctions::kLine, Smi::FromInt(line));
 +  descriptor->set(RegionFunctions::kColumn, Smi::FromInt(column));
 +  return RegionFunctions::Function(isolate, descriptor);
++}
++
++// static
++MaybeDirectHandle<JSFunction> JSRegionObject::NewClass(
++    Isolate* isolate, DirectHandle<String> source,
++    DirectHandle<Object> script_name, int line, int column,
++    DirectHandle<FixedArray> own_fields, DirectHandle<FixedArray> captures) {
++  Factory* factory = isolate->factory();
++  DirectHandle<Object> shared_source;
++  ASSIGN_RETURN_ON_EXCEPTION(isolate, shared_source,
++                             ShareValue(isolate, -1, source));
++  DirectHandle<Object> shared_name = factory->undefined_value();
++  if (IsString(*script_name)) {
++    ASSIGN_RETURN_ON_EXCEPTION(isolate, shared_name,
++                               ShareValue(isolate, -1, script_name));
++  }
++  int region = RegionRegistry::Create(isolate);
++  if (region < 0) {
++    THROW_NEW_ERROR(isolate, NewRangeError(MessageTemplate::kRegionTooMany));
++  }
++  // Keeps the id until the holder is there and sealed; the holder keeps it
++  // after that, while the class or an instance lives.
++  RegionRegistry::AddHandle(region);
++  struct RegionHandleGuard {
++    int region;
++    ~RegionHandleGuard() { RegionRegistry::RemoveHandle(region); }
++  } handle_guard{region};
++
++  // Captures, as other isolates read them: classes and Region.fn functions
++  // as their holders, other values shared.
++  DirectHandle<FixedArray> shared_captures =
++      factory->NewFixedArray(static_cast<int>(captures->ulength().value()), AllocationType::kSharedOld);
++  for (int i = 0; i < static_cast<int>(captures->ulength().value()); i += 2) {
++    DirectHandle<Object> name;
++    ASSIGN_RETURN_ON_EXCEPTION(
++        isolate, name,
++        ShareValue(isolate, -1, direct_handle(captures->get(i), isolate)));
++    Cast<String>(*name)->EnsureHash();
++    shared_captures->set(i, *name);
++    DirectHandle<Object> value(captures->get(i + 1), isolate);
++    DirectHandle<JSRegionClass> class_holder;
++    DirectHandle<FixedArray> descriptor;
++    if (RegionClasses::HolderOf(isolate, value).ToHandle(&class_holder)) {
++      shared_captures->set(i + 1, *class_holder);
++    } else if (RegionFunctions::DescriptorOf(isolate, value)
++                   .ToHandle(&descriptor)) {
++      shared_captures->set(
++          i + 1, *RegionFunctions::NewHolder(isolate, region, descriptor));
++    } else {
++      DirectHandle<Object> shared;
++      ASSIGN_RETURN_ON_EXCEPTION(isolate, shared,
++                                 ShareValue(isolate, -1, value));
++      shared_captures->set(i + 1, *shared);
++    }
++  }
++
++  // The holder, and the maps of instances, whose prototype it is.
++  DirectHandle<Map> instance_map = NewRegionMapFor(
++      isolate, JS_REGION_OBJECT_TYPE, JSRegionObject::kHeaderSize);
++  DirectHandle<Map> sealed_instance_map = NewRegionMapFor(
++      isolate, JS_REGION_OBJECT_TYPE, JSRegionObject::kHeaderSize);
++  MarkSealedPlainMap(*sealed_instance_map);
++  DirectHandle<FixedArray> no_fields = factory->empty_fixed_array();
++  DirectHandle<JSRegionClass> holder;
++  {
++    DirectHandle<Map> holder_map = RegionClasses::HolderMap(isolate);
++    SharedObjectSafePublishGuard publish_guard;
++    holder = Cast<JSRegionClass>(factory->NewJSObjectFromMapInRegion(
++        holder_map, region, 0,
++        NewJSObjectType::kMaybeEmbedderFieldsAndApiWrapper));
++    DisallowGarbageCollection no_gc;
++    Tagged<FixedArray> empty = ReadOnlyRoots(isolate).empty_fixed_array();
++    holder->set_region_id(region);
++    holder->set_keys(empty);
++    holder->set_values(empty);
++    holder->set_array_length(0);
++    holder->Initialize(
++        RegionClasses::NewId(), Cast<String>(*shared_source),
++        IsString(*shared_name)
++            ? Tagged<Union<String, Undefined>>(Cast<String>(*shared_name))
++            : Tagged<Union<String, Undefined>>(
++                  ReadOnlyRoots(isolate).undefined_value()),
++        line, column, *no_fields, *instance_map, *sealed_instance_map,
++        *shared_captures);
++    instance_map->set_prototype(*holder);
++    sealed_instance_map->set_prototype(*holder);
++  }
++
++  // This isolate's class. A class it extends must be one of Region.class()
++  // too: its fields come first.
++  DirectHandle<JSFunction> constructor;
++  if (!RegionClasses::Constructor(isolate, holder).ToHandle(&constructor)) {
++    return {};
++  }
++  DirectHandle<FixedArray> base_fields = no_fields;
++  Tagged<JSPrototype> base = constructor->map()->prototype();
++  if (base != isolate->native_context()->function_prototype()) {
++    DirectHandle<JSRegionClass> base_holder;
++    if (!RegionClasses::HolderOf(isolate, direct_handle(base, isolate))
++             .ToHandle(&base_holder)) {
++      THROW_NEW_ERROR(isolate,
++                      NewTypeError(MessageTemplate::kRegionClassBase));
++    }
++    base_fields = direct_handle(base_holder->field_names(), isolate);
++  }
++  int length = static_cast<int>(base_fields->ulength().value());
++  DirectHandle<FixedArray> fields =
++      factory->NewFixedArray(length + static_cast<int>(own_fields->ulength().value()),
++                             AllocationType::kSharedOld);
++  for (int i = 0; i < length; i++) fields->set(i, base_fields->get(i));
++  for (int i = 0; i < static_cast<int>(own_fields->ulength().value()); i++) {
++    DirectHandle<Object> name;
++    ASSIGN_RETURN_ON_EXCEPTION(
++        isolate, name,
++        ShareValue(isolate, -1, direct_handle(own_fields->get(i), isolate)));
++    // A field declared again keeps its place.
++    bool known = false;
++    for (int j = 0; j < length && !known; j++) {
++      known = Cast<String>(fields->get(j))->Equals(Cast<String>(*name));
++    }
++    if (known) continue;
++    Cast<String>(*name)->EnsureHash();
++    fields->set(length++, *name);
++  }
++  fields = FixedArray::RightTrimOrEmpty(isolate, fields, length);
++  holder->set_field_names(*fields);
++  CHECK(RegionRegistry::Seal(region, isolate));
++  return constructor;
++}
++
++// static
++MaybeDirectHandle<Object> JSRegionObject::NewClassInstance(
++    Isolate* isolate, DirectHandle<Object> new_target) {
++  Factory* factory = isolate->factory();
++  int region = Current(isolate);
++  DirectHandle<JSRegionClass> holder;
++  if (region < 0 ||
++      !RegionClasses::HolderOf(isolate, new_target).ToHandle(&holder)) {
++    return factory->undefined_value();
++  }
++  if (!RegionRegistry::IsOwner(region, isolate)) {
++    ThrowAccessError(isolate, region, Access::kWrite);
++    return {};
++  }
++  DirectHandle<FixedArray> fields(holder->field_names(), isolate);
++  int length = static_cast<int>(fields->ulength().value());
++  DirectHandle<FixedArray> values =
++      factory->NewFixedArrayInRegion(length, region, 0);
++  DirectHandle<Map> map(holder->instance_map(), isolate);
++  SharedObjectSafePublishGuard publish_guard;
++  DirectHandle<JSRegionObject> object =
++      Cast<JSRegionObject>(factory->NewJSObjectFromMapInRegion(
++          map, region, 0, NewJSObjectType::kMaybeEmbedderFieldsAndApiWrapper));
++  DisallowGarbageCollection no_gc;
++  object->set_region_id(region);
++  object->set_keys(*fields);
++  object->set_values(*values);
++  object->set_array_length(static_cast<uint32_t>(length));
++  RegionRegistry::AddBytes(region, kHeaderSize + FixedArray::SizeFor(length));
++  return object;
++}
++
++// static
++bool JSRegionObject::IsClass(Isolate* isolate, DirectHandle<Object> value) {
++  return !RegionClasses::HolderOf(isolate, value).is_null();
++}
++
++// static
++bool JSRegionObject::IsSharedFunction(Isolate* isolate,
++                                      DirectHandle<Object> value) {
++  return !RegionFunctions::DescriptorOf(isolate, value).is_null();
++}
++
++namespace {
++std::atomic<JSRegionObject::MakeClassHook> make_class_hook{nullptr};
++}  // namespace
++
++// static
++void JSRegionObject::SetMakeClassHook(MakeClassHook hook) {
++  make_class_hook.store(hook, std::memory_order_relaxed);
++}
++
++// static
++MaybeDirectHandle<Object> JSRegionObject::MakeClass(
++    Isolate* isolate, DirectHandle<Object> value) {
++  MakeClassHook hook = make_class_hook.load(std::memory_order_relaxed);
++  if (hook == nullptr || IsClass(isolate, value)) return value;
++  return hook(isolate, value);
 +}
 +
 +// static
@@ -12350,10 +13243,46 @@ index 00000000..9b0ea7ba
 +      IsArrayLength(isolate, *object, it) || FindIndex(object, it) >= 0) {
 +    return {};
 +  }
++  Tagged<Object> holder = object->map()->prototype();
++  if (IsJSRegionClass(holder)) {
++    // The initial map of this isolate's class, once it has one.
++    DirectHandle<JSFunction> constructor;
++    if (!RegionClasses::Find(isolate, Cast<JSRegionClass>(holder)->class_id())
++             .ToHandle(&constructor) ||
++        !constructor->has_initial_map()) {
++      return {};
++    }
++    return direct_handle(constructor->initial_map(), isolate);
++  }
 +  Tagged<JSFunction> constructor = object->is_array()
 +                                       ? *isolate->array_function()
 +                                       : *isolate->object_function();
 +  return direct_handle(constructor->initial_map(), isolate);
++}
++
++// static
++Tagged<JSObject> JSRegionObject::PrototypeOf(Isolate* isolate,
++                                             Tagged<HeapObject> object) {
++  Tagged<Object> holder = object->map()->prototype();
++  if (IsJSRegionClass(holder)) {
++    // Object.prototype until this isolate compiled the class (EnsureClass).
++    Tagged<Object> prototype =
++        RegionClasses::KnownPrototype(isolate, Cast<JSRegionClass>(holder));
++    if (IsJSObject(prototype)) return Cast<JSObject>(prototype);
++  }
++  return Cast<JSRegionObject>(object)->is_array()
++             ? *isolate->initial_array_prototype()
++             : *isolate->initial_object_prototype();
++}
++
++// static
++bool JSRegionObject::EnsureClass(Isolate* isolate,
++                                 DirectHandle<HeapObject> object) {
++  Tagged<Object> holder = object->map()->prototype();
++  if (!IsJSRegionClass(holder)) return true;
++  return !RegionClasses::Constructor(
++              isolate, direct_handle(Cast<JSRegionClass>(holder), isolate))
++              .is_null();
 +}
 +
 +// static
@@ -12364,6 +13293,7 @@ index 00000000..9b0ea7ba
 +  if (IsArrayLength(isolate, *object, it) || FindIndex(object, it) >= 0) {
 +    return ReadOwnedProperty(isolate, object, it);
 +  }
++  if (!EnsureClass(isolate, object)) return {};
 +  LookupIterator prototype_it = PrototypeLookup(isolate, object, it);
 +  return Object::GetProperty(&prototype_it);
 +}
@@ -12392,6 +13322,7 @@ index 00000000..9b0ea7ba
 +  if (IsArrayLength(isolate, *object, it) || FindIndex(object, it) >= 0) {
 +    return Just(true);
 +  }
++  if (!EnsureClass(isolate, object)) return Nothing<bool>();
 +  LookupIterator prototype_it = PrototypeLookup(isolate, object, it);
 +  return JSReceiver::HasProperty(&prototype_it);
 +}
@@ -12411,6 +13342,44 @@ index 00000000..9b0ea7ba
 +}
 +
 +// static
++namespace {
++
++// A write of `name`, which `object` does not have.
++Maybe<bool> NotExtensibleError(Isolate* isolate,
++                               DirectHandle<JSRegionObject> object,
++                               DirectHandle<Name> name) {
++  Tagged<Object> holder = object->map()->prototype();
++  DirectHandle<JSFunction> constructor;
++  if (IsJSRegionClass(holder) &&
++      RegionClasses::Find(isolate, Cast<JSRegionClass>(holder)->class_id())
++          .ToHandle(&constructor)) {
++    RETURN_FAILURE(
++        isolate, kThrowOnError,
++        NewTypeError(MessageTemplate::kRegionClassUndeclaredField, name,
++                     JSFunction::GetName(isolate, constructor)));
++  }
++  RETURN_FAILURE(isolate, kThrowOnError,
++                 NewTypeError(MessageTemplate::kRegionNotExtensible, name));
++}
++
++}  // namespace
++
++// static
++Maybe<bool> JSRegionObject::DefineOwnProperty(LookupIterator* it,
++                                              DirectHandle<Object> value,
++                                              Maybe<ShouldThrow> should_throw) {
++  Isolate* isolate = it->isolate();
++  DirectHandle<JSRegionObject> object = it->GetHolder<JSRegionObject>();
++  // A field initializer of a class of Region.class() defines a field its
++  // instance has from the start; a write does the same.
++  if (it->IsElement() || IsArrayLength(isolate, *object, it) ||
++      FindIndex(object, it) < 0) {
++    if (!CheckAccess(isolate, *object, Access::kWrite)) return Nothing<bool>();
++    return NotExtensibleError(isolate, object, it->GetName());
++  }
++  return SetProperty(it, value, should_throw);
++}
++
 +Maybe<bool> JSRegionObject::SetProperty(LookupIterator* it,
 +                                        DirectHandle<Object> value,
 +                                        Maybe<ShouldThrow> should_throw) {
@@ -12442,9 +13411,7 @@ index 00000000..9b0ea7ba
 +  bool append = index < 0 && object->is_array() && it->IsElement() &&
 +                it->index() < static_cast<size_t>(FixedArray::kMaxLength);
 +  if (index < 0 && !append) {
-+    RETURN_FAILURE(isolate, kThrowOnError,
-+                   NewTypeError(MessageTemplate::kRegionNotExtensible,
-+                                it->GetName()));
++    return NotExtensibleError(isolate, object, it->GetName());
 +  }
 +  DirectHandle<FixedArray> descriptor;
 +  bool is_function =
@@ -13051,7 +14018,6 @@ index 00000000..9b0ea7ba
 +  // made by other isolates keep their maps.
 +  std::unordered_map<Address, Tagged<Map>> sealed_maps =
 +      RegionLiterals::SealedPlainMaps(isolate, no_gc);
-+  if (sealed_maps.empty()) return;
 +  auto use = [&](Tagged<HeapObject> object) {
 +    if (IsFreeSpaceOrFiller(object)) return;
 +    Tagged<Map> map = object->map();
@@ -13059,8 +14025,17 @@ index 00000000..9b0ea7ba
 +    if (map->instance_type() != JS_REGION_OBJECT_TYPE) return;
 +    Tagged<JSRegionObject> region_object = Cast<JSRegionObject>(object);
 +    if (region_object->region_id() != region) return;
-+    auto it = sealed_maps.find(map.ptr());
-+    if (it == sealed_maps.end()) return;
++    // Instances of a class of Region.class() find theirs in the class, also
++    // those of classes from other isolates.
++    Tagged<Map> sealed_map;
++    if (auto it = sealed_maps.find(map.ptr()); it != sealed_maps.end()) {
++      sealed_map = it->second;
++    } else if (IsJSRegionClass(map->prototype()) &&
++               Cast<JSRegionClass>(map->prototype())->instance_map() == map) {
++      sealed_map = Cast<JSRegionClass>(map->prototype())->sealed_instance_map();
++    } else {
++      return;
++    }
 +    Tagged<FixedArray> values = region_object->values();
 +    for (uint32_t i = 0; i < values->ulength().value(); i++) {
 +      Tagged<Object> value = values->get(i);
@@ -13073,7 +14048,7 @@ index 00000000..9b0ea7ba
 +    }
 +    // Readers of the frozen region may be running: the layout stays, and
 +    // their code still checks the old map.
-+    object->set_map_safe_transition(isolate, it->second, kReleaseStore);
++    object->set_map_safe_transition(isolate, sealed_map, kReleaseStore);
 +  };
 +  for (NormalPage* page : pages) {
 +    for (Tagged<HeapObject> object : HeapObjectRange(page)) use(object);
@@ -13607,10 +14582,10 @@ index 00000000..9b0ea7ba
 +}  // namespace v8
 diff --git a/src/objects/js-region.h b/src/objects/js-region.h
 new file mode 100644
-index 00000000..34a8fcca
+index 00000000..3cfe015d
 --- /dev/null
 +++ b/src/objects/js-region.h
-@@ -0,0 +1,726 @@
+@@ -0,0 +1,816 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -14100,6 +15075,11 @@ index 00000000..34a8fcca
 +  static Maybe<PropertyAttributes> GetPropertyAttributes(LookupIterator* it);
 +  static Maybe<bool> SetProperty(LookupIterator* it, DirectHandle<Object> value,
 +                                 Maybe<ShouldThrow> should_throw);
++  // Defining a property the object has is writing it, as the field
++  // initializers of a class of Region.class() do. Others can't be added.
++  static Maybe<bool> DefineOwnProperty(LookupIterator* it,
++                                       DirectHandle<Object> value,
++                                       Maybe<ShouldThrow> should_throw);
 +
 +  // A map of objects of a sealed region whose values are all plain: none is a
 +  // holder of a typed array, a function or a LocalRef. Such an object never
@@ -14117,6 +15097,19 @@ index 00000000..34a8fcca
 +      Isolate* isolate, int region, const std::vector<NormalPage*>& pages,
 +      const std::vector<std::pair<Address, Address>>& chunks,
 +      const std::vector<Address>& objects);
++
++  // The prototype JS sees: Array.prototype or Object.prototype of the
++  // current native context, or for an instance of a class of
++  // Region.class() the prototype of this isolate's class. Region maps are
++  // shared by all isolates: those of instances have the class holder as
++  // their prototype, the others none. Object.prototype for an instance of a
++  // class that this isolate did not compile yet (EnsureClass).
++  static Tagged<JSObject> PrototypeOf(Isolate* isolate,
++                                      Tagged<HeapObject> object);
++  // Compiles the class of `object` in this isolate, if it is an instance of
++  // a class of Region.class() that the isolate has not compiled yet. Returns
++  // false with an exception pending if that fails.
++  static bool EnsureClass(Isolate* isolate, DirectHandle<HeapObject> object);
 +
 +  // For inline caches: index of the named property in values(),
 +  // kArrayLengthIndex for `length` of an array, or kNotFound when the access
@@ -14185,6 +15178,38 @@ index 00000000..34a8fcca
 +  static MaybeDirectHandle<JSFunction> NewFunction(
 +      Isolate* isolate, DirectHandle<String> source,
 +      DirectHandle<Object> script_name, int line, int column);
++
++  // Region.class(): a class whose instances regions can hold, made from
++  // `source`, the text of a class that refers to nothing but globals and
++  // `captures`: names and values interleaved, the values primitives, other
++  // such classes and Region.fn() functions. `own_fields` are the names of
++  // the instance fields the class declares. Its holder (JSRegionClass) lives
++  // in a new sealed region; every isolate that uses the class compiles the
++  // source into a class of its own, frozen. The result is this isolate's.
++  // In the current region, `new` of such a class creates the instance there,
++  // with every field of the class and the classes it extends, which must be
++  // such classes too; elsewhere it creates a plain object.
++  static MaybeDirectHandle<JSFunction> NewClass(
++      Isolate* isolate, DirectHandle<String> source,
++      DirectHandle<Object> script_name, int line, int column,
++      DirectHandle<FixedArray> own_fields, DirectHandle<FixedArray> captures);
++  // What a base class constructor of NewClass() starts with: the instance of
++  // `new_target` in the current region, its fields undefined. Undefined if
++  // no region is current or `new_target` is not such a class.
++  static MaybeDirectHandle<Object> NewClassInstance(
++      Isolate* isolate, DirectHandle<Object> new_target);
++  // Whether `value` is a class of NewClass() in this isolate.
++  static bool IsClass(Isolate* isolate, DirectHandle<Object> value);
++  // Whether `value` is a function of NewFunction() in this isolate.
++  static bool IsSharedFunction(Isolate* isolate, DirectHandle<Object> value);
++  // A class declared in 'use region' code becomes a class of Region.class():
++  // `hook` makes it, set by the code that installs the Region global, which
++  // analyzes the source. Without a hook the class stays as it is.
++  using MakeClassHook = MaybeDirectHandle<Object> (*)(
++      Isolate* isolate, DirectHandle<Object> value);
++  static void SetMakeClassHook(MakeClassHook hook);
++  static MaybeDirectHandle<Object> MakeClass(Isolate* isolate,
++                                             DirectHandle<Object> value);
 +
 +  // Region.localRef(): a LocalRef of `target`, an object of this isolate,
 +  // that objects of any region can hold. Storing it stores a holder
@@ -14313,6 +15338,46 @@ index 00000000..34a8fcca
 +
 +inline constexpr int JSRegionFunction::kHeaderSize = sizeof(JSRegionFunction);
 +
++V8_OBJECT class JSRegionClass : public JSRegionObject {
++ public:
++  inline int class_id() const;
++  inline Tagged<String> source() const;
++  inline Tagged<Union<String, Undefined>> script_name() const;
++  inline int line() const;
++  inline int column() const;
++  inline Tagged<FixedArray> field_names() const;
++  // Set once, after the class extended has been compiled.
++  inline void set_field_names(Tagged<FixedArray> value);
++  inline Tagged<Map> instance_map() const;
++  inline Tagged<Map> sealed_instance_map() const;
++  inline Tagged<FixedArray> captures() const;
++  inline void Initialize(int class_id, Tagged<String> source,
++                         Tagged<Union<String, Undefined>> script_name,
++                         int line, int column, Tagged<FixedArray> field_names,
++                         Tagged<Map> instance_map,
++                         Tagged<Map> sealed_instance_map,
++                         Tagged<FixedArray> captures);
++
++  DECL_PRINTER(JSRegionClass)
++  DECL_VERIFIER(JSRegionClass)
++
++  static const int kHeaderSize;
++
++ public:
++  TaggedMember<Smi> class_id_;
++  TaggedMember<String> source_;
++  TaggedMember<Union<String, Undefined>> script_name_;
++  // Where the source starts in its script, 0-based.
++  TaggedMember<Smi> line_;
++  TaggedMember<Smi> column_;
++  TaggedMember<FixedArray> field_names_;
++  TaggedMember<Map> instance_map_;
++  TaggedMember<Map> sealed_instance_map_;
++  TaggedMember<FixedArray> captures_;
++} V8_OBJECT_END;
++
++inline constexpr int JSRegionClass::kHeaderSize = sizeof(JSRegionClass);
++
 +V8_OBJECT class JSRegionLocalRef : public JSRegionObject {
 + public:
 +  inline int ref_id() const;
@@ -14339,10 +15404,10 @@ index 00000000..34a8fcca
 +#endif  // V8_OBJECTS_JS_REGION_H_
 diff --git a/src/objects/js-region.tq b/src/objects/js-region.tq
 new file mode 100644
-index 00000000..9a8b5770
+index 00000000..5fa9598f
 --- /dev/null
 +++ b/src/objects/js-region.tq
-@@ -0,0 +1,51 @@
+@@ -0,0 +1,77 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -14382,6 +15447,32 @@ index 00000000..9a8b5770
 +  script_name: String|Undefined;
 +  line: Smi;
 +  column: Smi;
++}
++
++// A class of Region.class(): its source, which every isolate that uses the
++// class compiles into a class of its own, and what its instances are. Holders
++// with the same class_id are the same class. The maps of its instances have
++// it as their prototype; JS sees the prototype of the class of the reading
++// isolate instead. Lives in a sealed region of its own. Has no properties of
++// its own (empty keys and values).
++@cppObjectLayoutDefinition
++extern class JSRegionClass extends JSRegionObject {
++  class_id: Smi;
++  // Shared strings outside of regions, like the keys of region objects.
++  source: String;
++  script_name: String|Undefined;
++  line: Smi;
++  column: Smi;
++  // The keys of its instances: the fields it declares, after those of the
++  // class it extends. Shared outside of regions, like the keys of a shape.
++  field_names: FixedArray;
++  // The map of its instances, and the one for instances in a sealed region
++  // whose values are plain (JSRegionObject::IsSealedPlainMap).
++  instance_map: Map;
++  sealed_instance_map: Map;
++  // What the source refers to besides globals: names and values interleaved.
++  // The values are primitives, other such classes and Region.fn holders.
++  captures: FixedArray;
 +}
 +
 +// A Region.localRef() handle in a region: which object of which isolate it
@@ -14519,10 +15610,10 @@ index 943025b3..c44dcba1 100644
  
  bool IsBooleanMap(Tagged<Map> map) {
 diff --git a/src/objects/map.cc b/src/objects/map.cc
-index 36f6ad89..9e516100 100644
+index 36f6ad89..6900a2a5 100644
 --- a/src/objects/map.cc
 +++ b/src/objects/map.cc
-@@ -392,6 +392,14 @@ VisitorId Map::GetVisitorId(Tagged<Map> map) {
+@@ -392,6 +392,15 @@ VisitorId Map::GetVisitorId(Tagged<Map> map) {
      case JS_REG_EXP_TYPE:
        return kVisitJSRegExp;
  
@@ -14530,6 +15621,7 @@ index 36f6ad89..9e516100 100644
 +    case JS_REGION_OBJECT_TYPE:
 +    case JS_REGION_TYPED_ARRAY_TYPE:
 +    case JS_REGION_FUNCTION_TYPE:
++    case JS_REGION_CLASS_TYPE:
 +    case JS_REGION_LOCAL_REF_TYPE:
 +      CHECK_EQ(0, JSObject::GetEmbedderFieldCount(map));
 +      return kVisitJSRegionObject;
@@ -14550,13 +15642,14 @@ index 9e38cce4..d56dc511 100644
    V(JSWeakCollection)                \
    V(JSWeakRef)                       \
 diff --git a/src/objects/object-list-macros.h b/src/objects/object-list-macros.h
-index 82d2df89..220710e1 100644
+index 82d2df89..861dab45 100644
 --- a/src/objects/object-list-macros.h
 +++ b/src/objects/object-list-macros.h
-@@ -189,6 +189,10 @@ namespace internal {
+@@ -189,6 +189,11 @@ namespace internal {
    V(JSMessageObject)                            \
    V(JSModuleNamespace)                          \
    V(JSDeferredModuleNamespace)                  \
++  V(JSRegionClass)                              \
 +  V(JSRegionFunction)                           \
 +  V(JSRegionLocalRef)                           \
 +  V(JSRegionObject)                             \
@@ -14638,6 +15731,94 @@ index 36a144c7..7538f6a2 100644
        case LookupIterator::MODULE_NAMESPACE: {
          PropertyDescriptor desc;
          Maybe<bool> owned =
+diff --git a/src/objects/prototype-inl.h b/src/objects/prototype-inl.h
+index 5bacd8ff..4f3a5298 100644
+--- a/src/objects/prototype-inl.h
++++ b/src/objects/prototype-inl.h
+@@ -11,6 +11,7 @@
+ #include "src/execution/isolate-inl.h"  // For Isolate::native_context().
+ #include "src/handles/handles-inl.h"
+ #include "src/objects/js-proxy.h"
++#include "src/objects/js-region.h"
+ #include "src/objects/map-inl.h"
+ 
+ namespace v8 {
+@@ -100,6 +101,10 @@ void PrototypeIterator::AdvanceIgnoringProxies() {
+   Tagged<Map> map = object->map();
+ 
+   Tagged<JSPrototype> prototype = map->prototype();
++  if (V8_UNLIKELY(InstanceTypeChecker::IsJSRegionObject(map))) {
++    // Region maps are shared by all isolates; the prototype is the reader's.
++    prototype = JSRegionObject::PrototypeOf(isolate_, object);
++  }
+   is_at_end_ = IsNull(prototype) ||
+                (where_to_end_ == END_AT_NON_HIDDEN && !IsJSGlobalProxyMap(map));
+ 
+@@ -124,6 +129,14 @@ V8_WARN_UNUSED_RESULT bool PrototypeIterator::AdvanceFollowingProxies() {
+ V8_WARN_UNUSED_RESULT bool
+ PrototypeIterator::AdvanceFollowingProxiesIgnoringAccessChecks() {
+   if (handle_.is_null() || !IsJSProxy(*handle_)) {
++    // The prototype of an instance of a class of Region.class() is that of
++    // this isolate's class, which may have to be compiled first.
++    if (!handle_.is_null() &&
++        InstanceTypeChecker::IsJSRegionObject(
++            Cast<HeapObject>(*handle_)->map()) &&
++        !JSRegionObject::EnsureClass(isolate_, Cast<HeapObject>(handle_))) {
++      return false;
++    }
+     AdvanceIgnoringProxies();
+     return true;
+   }
+diff --git a/src/objects/script-inl.h b/src/objects/script-inl.h
+index 05a43971..3aa046e8 100644
+--- a/src/objects/script-inl.h
++++ b/src/objects/script-inl.h
+@@ -288,6 +288,12 @@ void Script::set_is_embedded(bool value) {
+   set_flags(flags().with_is_embedded(value));
+ }
+ 
++bool Script::is_region_class() const { return flags().is_region_class(); }
++
++void Script::set_is_region_class(bool value) {
++  set_flags(flags().with_is_region_class(value));
++}
++
+ bool Script::is_repl_mode() const { return flags().is_repl_mode(); }
+ 
+ void Script::set_is_repl_mode(bool value) {
+diff --git a/src/objects/script.h b/src/objects/script.h
+index e764773f..f073b973 100644
+--- a/src/objects/script.h
++++ b/src/objects/script.h
+@@ -215,6 +215,7 @@ V8_OBJECT class Script : public Struct {
+     using DeserializedBit = ProduceCompileHintsBit::Next<bool, 1>;
+     using OuterLanguageModeBit = DeserializedBit::Next<LanguageMode, 1>;
+     using IsEmbeddedBit = OuterLanguageModeBit::Next<bool, 1>;
++    using IsRegionClassBit = IsEmbeddedBit::Next<bool, 1>;
+ 
+     BIT_FIELD_GROUP_ACCESSORS(compilation_kind, CompilationKindBits)
+     BIT_FIELD_GROUP_ACCESSORS(compilation_state, CompilationStateBit)
+@@ -225,6 +226,7 @@ V8_OBJECT class Script : public Struct {
+     BIT_FIELD_GROUP_ACCESSORS(deserialized, DeserializedBit)
+     BIT_FIELD_GROUP_ACCESSORS(outer_language_mode, OuterLanguageModeBit)
+     BIT_FIELD_GROUP_ACCESSORS(is_embedded, IsEmbeddedBit)
++    BIT_FIELD_GROUP_ACCESSORS(is_region_class, IsRegionClassBit)
+   };
+ 
+   // Read/write the raw 'flags' field. This uses relaxed atomic loads/stores
+@@ -245,6 +247,12 @@ V8_OBJECT class Script : public Struct {
+   inline bool is_embedded() const;
+   inline void set_is_embedded(bool value);
+ 
++  // [is_region_class]: the script is the source of a class of Region.class(),
++  // compiled by an isolate that uses the class. The constructor of that class
++  // creates its instances in the current region.
++  inline bool is_region_class() const;
++  inline void set_is_region_class(bool value);
++
+   // [compilation_state]: determines whether the script has already been
+   // compiled. Encoded in the 'flags' field.
+   inline CompilationState compilation_state();
 diff --git a/src/objects/shared-function-info-inl.h b/src/objects/shared-function-info-inl.h
 index 6d48de46..97f8e63b 100644
 --- a/src/objects/shared-function-info-inl.h
@@ -14761,7 +15942,7 @@ index 3de06302..29de09e9 100644
    AddObjectWithID(id, Cast<JSReceiver>(shared_object));
    return shared_object;
 diff --git a/src/parsing/parse-info.cc b/src/parsing/parse-info.cc
-index e33cbd79..874bf3ea 100644
+index e33cbd79..ed22fde2 100644
 --- a/src/parsing/parse-info.cc
 +++ b/src/parsing/parse-info.cc
 @@ -138,6 +138,7 @@ void UnoptimizedCompileFlags::SetFlagsFromFunction(T function) {
@@ -14772,20 +15953,29 @@ index e33cbd79..874bf3ea 100644
  }
  
  void UnoptimizedCompileFlags::SetFlagsForToplevelCompile(
+@@ -165,6 +166,7 @@ void UnoptimizedCompileFlags::SetFlagsForFunctionFromScript(
+ 
+   set_block_coverage_enabled(block_coverage_enabled() &&
+                              script->IsUserJavaScript());
++  set_is_region_class(script->is_region_class());
+   if (is_toplevel() && script->compilation_kind() ==
+                            Script::CompilationKind::kFunctionConstructor) {
+     set_parse_restriction(ONLY_SINGLE_FUNCTION_LITERAL);
 diff --git a/src/parsing/parse-info.h b/src/parsing/parse-info.h
-index d62979f3..d8677967 100644
+index d62979f3..6c23181d 100644
 --- a/src/parsing/parse-info.h
 +++ b/src/parsing/parse-info.h
-@@ -67,6 +67,7 @@ class Zone;
+@@ -67,6 +67,8 @@ class Zone;
    V(compile_hints_per_function_magic_enabled, bool, 1, _)       \
    V(is_hoisted_in_context, bool, 1, _)                          \
    V(class_initializer_allows_await, bool, 1, _)                 \
 +  V(region_literals, bool, 1, _)                                \
++  V(is_region_class, bool, 1, _)                                \
    V(allow_heap_allocation, bool, 1, _)
  
  class V8_EXPORT_PRIVATE UnoptimizedCompileFlags {
 diff --git a/src/parsing/parser-base.h b/src/parsing/parser-base.h
-index 0aa6bf06..b7e24b2e 100644
+index 0aa6bf06..28686804 100644
 --- a/src/parsing/parser-base.h
 +++ b/src/parsing/parser-base.h
 @@ -895,6 +895,11 @@ class ParserBase {
@@ -14884,77 +16074,71 @@ index 0aa6bf06..b7e24b2e 100644
  template <typename Impl>
  typename ParserBase<Impl>::ExpressionT ParserBase<Impl>::ParseArrayLiteral() {
    // ArrayLiteral ::
-@@ -2420,12 +2488,20 @@ typename ParserBase<Impl>::ExpressionT ParserBase<Impl>::ParseArrayLiteral() {
+@@ -2420,12 +2488,18 @@ typename ParserBase<Impl>::ExpressionT ParserBase<Impl>::ParseArrayLiteral() {
    int pos = peek_position();
    ExpressionListT values(pointer_buffer());
    int first_spread_index = -1;
 +  bool region_literal = function_state_->scope()->region_literals();
++  // Whether #[] can create it: no holes and no spread.
++  bool region_supported = true;
    Consume(Token::kLeftBracket);
  
    AccumulationScope accumulation_scope(expression_scope());
  
    while (!Check(Token::kRightBracket)) {
      ExpressionT elem;
-+    if (region_literal &&
-+        (peek() == Token::kComma || peek() == Token::kEllipsis)) {
-+      // As #[], a region literal has no holes and no spread; as a pattern it
-+      // may.
-+      expression_scope()->RecordExpressionError(
-+          scanner()->peek_location(), MessageTemplate::kRegionLiteralUnsupported);
++    if (peek() == Token::kComma || peek() == Token::kEllipsis) {
++      region_supported = false;
 +    }
      if (peek() == Token::kComma) {
        elem = factory()->NewTheHoleLiteral();
      } else if (Check(Token::kEllipsis)) {
-@@ -2467,7 +2543,9 @@ typename ParserBase<Impl>::ExpressionT ParserBase<Impl>::ParseArrayLiteral() {
+@@ -2467,7 +2541,9 @@ typename ParserBase<Impl>::ExpressionT ParserBase<Impl>::ParseArrayLiteral() {
      }
    }
  
 -  return factory()->NewArrayLiteral(values, first_spread_index, pos);
 +  ExpressionT literal = factory()->NewArrayLiteral(values, first_spread_index, pos);
-+  if (region_literal) impl()->MarkRegionLiteral(literal);
++  if (region_literal) impl()->MarkRegionLiteral(literal, region_supported);
 +  return literal;
  }
  
  template <class Impl>
-@@ -3100,6 +3178,7 @@ typename ParserBase<Impl>::ExpressionT ParserBase<Impl>::ParseObjectLiteral() {
+@@ -3100,6 +3176,9 @@ typename ParserBase<Impl>::ExpressionT ParserBase<Impl>::ParseObjectLiteral() {
    bool has_computed_names = false;
    bool has_rest_property = false;
    bool has_seen_proto = false;
 +  bool region_literal = function_state_->scope()->region_literals();
++  // Whether #{} can create it: only `name: value` and `name`.
++  bool region_supported = true;
  
    Consume(Token::kLeftBrace);
    AccumulationScope accumulation_scope(expression_scope());
-@@ -3114,10 +3193,29 @@ typename ParserBase<Impl>::ExpressionT ParserBase<Impl>::ParseObjectLiteral() {
+@@ -3114,10 +3193,23 @@ typename ParserBase<Impl>::ExpressionT ParserBase<Impl>::ParseObjectLiteral() {
  
      ParsePropertyInfo prop_info(this, &accumulation_scope);
      prop_info.position = PropertyPosition::kObjectLiteral;
 +    Token::Value first_token = peek();
-+    int property_pos = peek_position();
 +    bool had_proto = has_seen_proto;
      ObjectLiteralPropertyT property =
          ParseObjectPropertyDefinition(&prop_info, &has_seen_proto);
      if (impl()->IsNull(property)) return impl()->FailureExpression();
  
-+    // As #{}, a region literal takes only `name: value` and `name`. As a
-+    // pattern, the literal may have anything a pattern may.
-+    if (region_literal && !prop_info.is_computed_name &&
-+        had_proto == has_seen_proto &&
-+        (Token::IsPropertyName(first_token) || first_token == Token::kString) &&
-+        (prop_info.kind == ParsePropertyKind::kValue ||
-+         prop_info.kind == ParsePropertyKind::kShorthand ||
-+         prop_info.kind == ParsePropertyKind::kShorthandOrClassField ||
-+         prop_info.kind == ParsePropertyKind::kAssign)) {
-+      // kAssign is an error as an expression anyway.
-+    } else if (region_literal) {
-+      expression_scope()->RecordExpressionError(
-+          Scanner::Location(property_pos, end_position()),
-+          MessageTemplate::kRegionLiteralUnsupported);
++    // #{} takes only `name: value` and `name`. kAssign is an error as an
++    // expression anyway.
++    if (prop_info.is_computed_name || had_proto != has_seen_proto ||
++        !(Token::IsPropertyName(first_token) || first_token == Token::kString) ||
++        !(prop_info.kind == ParsePropertyKind::kValue ||
++          prop_info.kind == ParsePropertyKind::kShorthand ||
++          prop_info.kind == ParsePropertyKind::kShorthandOrClassField ||
++          prop_info.kind == ParsePropertyKind::kAssign)) {
++      region_supported = false;
 +    }
 +
      if (prop_info.is_computed_name) {
        has_computed_names = true;
      }
-@@ -3160,9 +3258,11 @@ typename ParserBase<Impl>::ExpressionT ParserBase<Impl>::ParseObjectLiteral() {
+@@ -3160,9 +3252,11 @@ typename ParserBase<Impl>::ExpressionT ParserBase<Impl>::ParseObjectLiteral() {
                                             MessageTemplate::kTooManyArguments);
    }
  
@@ -14962,12 +16146,12 @@ index 0aa6bf06..b7e24b2e 100644
 +  ExpressionT literal = impl()->InitializeObjectLiteral(
        factory()->NewObjectLiteral(properties, number_of_boilerplate_properties,
                                    pos, has_rest_property, home_object));
-+  if (region_literal) impl()->MarkRegionLiteral(literal);
++  if (region_literal) impl()->MarkRegionLiteral(literal, region_supported);
 +  return literal;
  }
  
  template <typename Impl>
-@@ -5719,11 +5819,15 @@ void ParserBase<Impl>::ParseStatementList(StatementListT* body,
+@@ -5719,11 +5813,15 @@ void ParserBase<Impl>::ParseStatementList(StatementListT* body,
  
    while (peek() == Token::kString) {
      bool use_strict = false;
@@ -14983,7 +16167,7 @@ index 0aa6bf06..b7e24b2e 100644
      }
  
      StatementT stat = ParseStatementListItem();
-@@ -5733,7 +5837,11 @@ void ParserBase<Impl>::ParseStatementList(StatementListT* body,
+@@ -5733,7 +5831,11 @@ void ParserBase<Impl>::ParseStatementList(StatementListT* body,
  
      if (!impl()->IsStringLiteral(stat)) break;
  
@@ -15012,26 +16196,34 @@ index f54e8056..b009af32 100644
             is_strict(info->language_mode()));
      FunctionKind kind = flags().function_kind();
 diff --git a/src/parsing/parser.h b/src/parsing/parser.h
-index f6c42cde..330ca06e 100644
+index f6c42cde..070c1c57 100644
 --- a/src/parsing/parser.h
 +++ b/src/parsing/parser.h
-@@ -408,6 +408,15 @@ class V8_EXPORT_PRIVATE Parser : public NON_EXPORTED_BASE(ParserBase<Parser>) {
+@@ -408,6 +408,23 @@ class V8_EXPORT_PRIVATE Parser : public NON_EXPORTED_BASE(ParserBase<Parser>) {
        LanguageMode language_mode,
        ZonePtrList<const AstRawString>* arguments_for_wrapped_function);
  
-+  // A {} or [] in 'use region' code.
-+  V8_INLINE void MarkRegionLiteral(Expression* literal) {
-+    if (literal->IsObjectLiteral()) {
-+      literal->AsObjectLiteral()->set_is_region_literal();
-+    } else if (literal->IsArrayLiteral()) {
-+      literal->AsArrayLiteral()->set_is_region_literal();
++  // A {} or [] in 'use region' code: one that #{} or #[] can create, or one
++  // that is created as usual and then copied into the current region.
++  V8_INLINE void MarkRegionLiteral(Expression* literal, bool supported) {
++    AggregateLiteral* aggregate =
++        literal->IsObjectLiteral()
++            ? static_cast<AggregateLiteral*>(literal->AsObjectLiteral())
++        : literal->IsArrayLiteral()
++            ? static_cast<AggregateLiteral*>(literal->AsArrayLiteral())
++            : nullptr;
++    if (aggregate == nullptr) return;
++    if (supported) {
++      aggregate->set_is_region_literal();
++    } else {
++      aggregate->set_is_region_copy();
 +    }
 +  }
 +
    ObjectLiteral* InitializeObjectLiteral(ObjectLiteral* object_literal) {
      object_literal->CalculateEmitStore(main_zone());
      return object_literal;
-@@ -898,6 +907,16 @@ class V8_EXPORT_PRIVATE Parser : public NON_EXPORTED_BASE(ParserBase<Parser>) {
+@@ -898,6 +915,16 @@ class V8_EXPORT_PRIVATE Parser : public NON_EXPORTED_BASE(ParserBase<Parser>) {
  
    Expression* ExpressionListToExpression(const ScopedPtrList<Expression>& args);
  
@@ -15049,19 +16241,20 @@ index f6c42cde..330ca06e 100644
                                         const AstRawString* name,
                                         const AstRawString* prefix = nullptr);
 diff --git a/src/parsing/preparser.h b/src/parsing/preparser.h
-index fc6d8003..d24ccdf6 100644
+index fc6d8003..42ba4859 100644
 --- a/src/parsing/preparser.h
 +++ b/src/parsing/preparser.h
-@@ -974,6 +974,8 @@ class PreParser : public ParserBase<PreParser> {
+@@ -974,6 +974,9 @@ class PreParser : public ParserBase<PreParser> {
        LanguageMode language_mode,
        ZonePtrList<const AstRawString>* arguments_for_wrapped_function);
  
-+  V8_INLINE void MarkRegionLiteral(const PreParserExpression& literal) {}
++  V8_INLINE void MarkRegionLiteral(const PreParserExpression& literal,
++                                  bool supported) {}
 +
    PreParserExpression InitializeObjectLiteral(PreParserExpression literal) {
      return literal;
    }
-@@ -1602,6 +1604,12 @@ class PreParser : public ParserBase<PreParser> {
+@@ -1602,6 +1605,12 @@ class PreParser : public ParserBase<PreParser> {
        const Scanner::Location& params_loc) {
    }
  
@@ -17150,10 +18343,10 @@ index 00000000..7a176531
 +#endif  // V8_REGIONS_REGIONS_CHANNEL_H_
 diff --git a/src/regions/regions-globals.cc b/src/regions/regions-globals.cc
 new file mode 100644
-index 00000000..09fa8bf6
+index 00000000..9f529862
 --- /dev/null
 +++ b/src/regions/regions-globals.cc
-@@ -0,0 +1,1578 @@
+@@ -0,0 +1,1845 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -17209,6 +18402,7 @@ index 00000000..09fa8bf6
 +void RegionRun(const v8::FunctionCallbackInfo<v8::Value>& info);
 +void RegionOf(const v8::FunctionCallbackInfo<v8::Value>& info);
 +void RegionFn(const v8::FunctionCallbackInfo<v8::Value>& info);
++void RegionClass(const v8::FunctionCallbackInfo<v8::Value>& info);
 +void RegionLocalRef(const v8::FunctionCallbackInfo<v8::Value>& info);
 +Local<FunctionTemplate> CreateLocalRefTemplate(Isolate* isolate);
 +void LocalRefNew(const v8::FunctionCallbackInfo<v8::Value>& info);
@@ -17277,6 +18471,8 @@ index 00000000..09fa8bf6
 +                            ConstructorBehavior::kThrow));
 +  region_template->Set(isolate, "of", FunctionTemplate::New(isolate, RegionOf));
 +  region_template->Set(isolate, "fn", FunctionTemplate::New(isolate, RegionFn));
++  region_template->Set(isolate, "class",
++                       FunctionTemplate::New(isolate, RegionClass));
 +  region_template->Set(isolate, "localRef",
 +                       FunctionTemplate::New(isolate, RegionLocalRef));
 +  region_template->Set(isolate, "isRegionObject",
@@ -17883,15 +19079,36 @@ index 00000000..09fa8bf6
 +
 +namespace {
 +
++// What Region.class() needs to know about the code of a class, besides the
++// names it refers to.
++struct ClassScan {
++  // Class definitions: the class itself and any nested in it.
++  int classes = 0;
++  // Private members, or instance fields with computed or numeric names.
++  bool unsupported_members = false;
++  // The instance fields, in the order the class defines them.
++  std::vector<std::string> fields;
++};
++
 +// Collects the names of globals read or written by `shared` and the functions
 +// nested in it. Sets `uses_dynamic_scope` for code that resolves names at run
 +// time (eval, with), which cannot be checked ahead of time, and `uses_classes`
-+// for class declarations, whose methods are not analyzed.
++// for class declarations, whose methods are not analyzed. With `scan`, also
++// finds out what Region.class() needs.
 +bool CollectGlobalNames(i::Isolate* isolate,
 +                        i::Handle<i::SharedFunctionInfo> shared,
 +                        std::set<std::string>* names,
-+                        bool* uses_dynamic_scope, bool* uses_classes) {
-+  if (i::IsClassConstructor(shared->kind())) *uses_classes = true;
++                        bool* uses_dynamic_scope, bool* uses_classes,
++                        ClassScan* scan = nullptr) {
++  if (i::IsClassConstructor(shared->kind())) {
++    *uses_classes = true;
++    if (scan && shared->class_scope_has_private_brand()) {
++      scan->unsupported_members = true;
++    }
++  }
++  // Instance fields are defined on the receiver of the members initializer.
++  const bool initializer =
++      scan && shared->kind() == i::FunctionKind::kClassMembersInitializerFunction;
 +  i::IsCompiledScope is_compiled_scope(shared->is_compiled_scope(isolate));
 +  if (!is_compiled_scope.is_compiled() &&
 +      !i::Compiler::Compile(isolate, shared, i::Compiler::KEEP_EXCEPTION,
@@ -17925,8 +19142,27 @@ index 00000000..09fa8bf6
 +        *uses_dynamic_scope = true;
 +        break;
 +      case Bytecode::kCallRuntime:
++        // A direct eval, also in strict code, where `eval` is a global.
++        if (it.GetRuntimeIdOperand(0) ==
++            i::Runtime::kResolvePossiblyDirectEval) {
++          *uses_dynamic_scope = true;
++        }
 +        if (it.GetRuntimeIdOperand(0) == i::Runtime::kDefineClass) {
 +          *uses_classes = true;
++          if (scan) scan->classes++;
++        }
++        break;
++      case Bytecode::kDefineNamedOwnProperty:
++        if (initializer && it.GetRegisterOperand(0).is_receiver()) {
++          scan->fields.push_back(
++              i::Cast<i::String>(*it.GetConstantForOperand(1, isolate))
++                  ->ToCString()
++                  .get());
++        }
++        break;
++      case Bytecode::kDefineKeyedOwnProperty:
++        if (initializer && it.GetRegisterOperand(0).is_receiver()) {
++          scan->unsupported_members = true;
 +        }
 +        break;
 +      default:
@@ -17940,7 +19176,7 @@ index 00000000..09fa8bf6
 +    if (!CollectGlobalNames(isolate,
 +                            i::handle(i::Cast<i::SharedFunctionInfo>(entry),
 +                                      isolate),
-+                            names, uses_dynamic_scope, uses_classes)) {
++                            names, uses_dynamic_scope, uses_classes, scan)) {
 +      return false;
 +    }
 +  }
@@ -18008,44 +19244,60 @@ index 00000000..09fa8bf6
 +// names it refers to and whether it can be compiled there, cached by its
 +// place in its script. Functions without a script go to `uncached`. Returns
 +// null with an exception pending if the source cannot be read.
-+SpawnAnalysis* AnalyzeSpawnFunction(
-+    Isolate* isolate, Local<Context> context, Local<Function> function,
-+    SpawnAnalysis* uncached) {
++namespace {
++
++// A context with nothing but the globals every context of the embedder has,
++// to compile code in that was written for another one.
++MaybeLocal<Context> ProbeContext(Isolate* isolate) {
 +  IsolateData* data = IsolateData::Get(isolate);
 +  Local<Context> probe = data->spawn_probe_context.Get(isolate);
 +  if (probe.IsEmpty()) {
 +    if (data->new_probe_context == nullptr) {
 +      probe = Context::New(isolate);
 +    } else if (!data->new_probe_context(isolate).ToLocal(&probe)) {
-+      return nullptr;
++      return {};
 +    }
 +    data->spawn_probe_context.Reset(isolate, probe);
 +  }
++  return probe;
++}
++
++// Where the source of `function` starts in its script.
++SourcePlace PlaceOf(Isolate* isolate, Local<Function> function) {
 +  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
-+  auto place_of = [i_isolate](Local<Function> function) {
-+    SourcePlace place;
-+    i::DirectHandle<i::Object> raw = Utils::OpenDirectHandle(*function);
-+    if (!i::IsJSFunction(*raw)) return place;
-+    i::Tagged<i::SharedFunctionInfo> shared =
-+        i::Cast<i::JSFunction>(*raw)->shared();
-+    if (!i::IsScript(shared->script())) return place;
-+    i::DirectHandle<i::Script> script(i::Cast<i::Script>(shared->script()),
-+                                      i_isolate);
-+    i::Tagged<i::Object> name = script->GetNameOrSourceURL();
-+    if (!i::IsString(name) || i::Cast<i::String>(name)->length() == 0) {
-+      return place;
-+    }
-+    // Function.prototype.toString() starts at the function token.
-+    i::Script::PositionInfo position;
-+    if (!i::Script::GetPositionInfo(script, shared->function_token_position(),
-+                                    &position)) {
-+      return place;
-+    }
-+    place.file = i::Cast<i::String>(name)->ToCString().get();
-+    place.line = position.line;
-+    place.column = position.column;
++  SourcePlace place;
++  i::DirectHandle<i::Object> raw = Utils::OpenDirectHandle(*function);
++  if (!i::IsJSFunction(*raw)) return place;
++  i::Tagged<i::SharedFunctionInfo> shared =
++      i::Cast<i::JSFunction>(*raw)->shared();
++  if (!i::IsScript(shared->script())) return place;
++  i::DirectHandle<i::Script> script(i::Cast<i::Script>(shared->script()),
++                                    i_isolate);
++  i::Tagged<i::Object> name = script->GetNameOrSourceURL();
++  if (!i::IsString(name) || i::Cast<i::String>(name)->length() == 0) {
 +    return place;
-+  };
++  }
++  // Function.prototype.toString() starts at the function token.
++  i::Script::PositionInfo position;
++  if (!i::Script::GetPositionInfo(script, shared->function_token_position(),
++                                  &position)) {
++    return place;
++  }
++  place.file = i::Cast<i::String>(name)->ToCString().get();
++  place.line = position.line;
++  place.column = position.column;
++  return place;
++}
++
++}  // namespace
++
++SpawnAnalysis* AnalyzeSpawnFunction(
++    Isolate* isolate, Local<Context> context, Local<Function> function,
++    SpawnAnalysis* uncached) {
++  IsolateData* data = IsolateData::Get(isolate);
++  Local<Context> probe;
++  if (!ProbeContext(isolate).ToLocal(&probe)) return nullptr;
++  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
 +  using Analysis = SpawnAnalysis;
 +  Analysis* analysis = nullptr;
 +  std::optional<std::tuple<int, int, int>> key;
@@ -18100,7 +19352,7 @@ index 00000000..09fa8bf6
 +                   : uses_dynamic_scope  ? Analysis::Failure::kDynamicScope
 +                   : uses_classes        ? Analysis::Failure::kClasses
 +                                         : Analysis::Failure::kNone,
-+                   place_of(function)};
++                   PlaceOf(isolate, function)};
 +    for (const std::string& name : names) {
 +      bool in_probe =
 +          probe->Global()
@@ -18328,13 +19580,16 @@ index 00000000..09fa8bf6
 +    Local<Value> value;
 +    bool is_builtin;
 +    std::string error;
++    bool resolved;
 +    {
++      // The error below replaces the exception, if any.
 +      TryCatch try_catch(isolate);
-+      if (!ResolveCapture(isolate, in_probe, function, name, &value,
-+                          &is_builtin, &error)) {
-+        throw_type_error(error.empty() ? "cannot read " + name : error);
-+        return;
-+      }
++      resolved = ResolveCapture(isolate, in_probe, function, name, &value,
++                                &is_builtin, &error);
++    }
++    if (!resolved) {
++      throw_type_error(error.empty() ? "cannot read " + name : error);
++      return;
 +    }
 +    if (is_builtin || value->StrictEquals(function)) continue;
 +    if (name == "this" || name == "arguments") {
@@ -18374,6 +19629,210 @@ index 00000000..09fa8bf6
 +    return;
 +  }
 +  info.GetReturnValue().Set(Utils::ToLocal(i::DirectHandle<i::Object>(result)));
++}
++
++namespace {
++
++// The class of Region.class() made from `constructor`, a class. Its source
++// is compiled again in every isolate that uses it, without the closure, so it
++// may refer only to globals that every isolate has and to captures read now:
++// primitives, classes of Region.class() and functions of Region.fn().
++MaybeLocal<Function> NewRegionClass(Isolate* isolate, Local<Context> context,
++                                    Local<Function> constructor) {
++  auto throw_type_error = [isolate](const std::string& message) {
++    isolate->ThrowException(Exception::TypeError(
++        String::NewFromUtf8(isolate, message.c_str()).ToLocalChecked()));
++  };
++  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
++  i::DirectHandle<i::Object> raw = Utils::OpenDirectHandle(*constructor);
++  if (!i::IsJSFunction(*raw) ||
++      !i::IsClassConstructor(i::Cast<i::JSFunction>(*raw)->shared()->kind())) {
++    throw_type_error("Region.class() expects a class");
++    return {};
++  }
++  if (i::JSRegionObject::IsClass(i_isolate, raw)) return constructor;
++  Local<String> source;
++  if (!constructor->FunctionProtoToString(context).ToLocal(&source)) return {};
++  Local<Context> probe;
++  if (!ProbeContext(isolate).ToLocal(&probe)) return {};
++
++  using ClassAnalysis = IsolateData::ClassAnalysis;
++  IsolateData* data = IsolateData::Get(isolate);
++  i::Tagged<i::SharedFunctionInfo> shared_info =
++      i::Cast<i::JSFunction>(*raw)->shared();
++  CHECK(i::IsScript(shared_info->script()));
++  std::tuple<int, int, int> key{i::Cast<i::Script>(shared_info->script())->id(),
++                                shared_info->StartPosition(),
++                                shared_info->EndPosition()};
++  auto known = data->class_analyses.find(key);
++  if (known == data->class_analyses.end()) {
++    // The class is compiled, not run: its static members and computed keys
++    // run only when an isolate compiles it for itself.
++    std::set<std::string> names;
++    bool uses_dynamic_scope = false;
++    bool uses_classes = false;
++    ClassScan scan;
++    bool compiled = false;
++    {
++      Context::Scope probe_scope(probe);
++      TryCatch try_catch(isolate);
++      Local<String> wrapped = String::Concat(
++          isolate, String::NewFromUtf8Literal(isolate, "("),
++          String::Concat(isolate, source,
++                         String::NewFromUtf8Literal(isolate, "\n)")));
++      Local<Script> script;
++      if (Script::Compile(probe, wrapped).ToLocal(&script)) {
++        i::Handle<i::SharedFunctionInfo> shared(
++            *Utils::OpenDirectHandle(*script->GetUnboundScript()), i_isolate);
++        compiled = CollectGlobalNames(i_isolate, shared, &names,
++                                      &uses_dynamic_scope, &uses_classes,
++                                      &scan);
++      }
++    }
++    ClassAnalysis fresh;
++    if (!compiled) {
++      fresh.error = "Region.class() cannot compile the class on its own";
++    } else if (uses_dynamic_scope) {
++      fresh.error = "a Region.class() class cannot use eval or with";
++    } else if (scan.classes != 1) {
++      fresh.error = "a Region.class() class cannot declare classes";
++    } else if (scan.unsupported_members) {
++      fresh.error =
++          "a Region.class() class cannot have private members or instance "
++          "fields with computed or numeric names";
++    }
++    for (const std::string& name : names) {
++      bool in_probe =
++          probe->Global()
++              ->Has(probe,
++                    String::NewFromUtf8(isolate, name.c_str()).ToLocalChecked())
++              .FromMaybe(false);
++      fresh.names.emplace_back(name, in_probe);
++    }
++    fresh.fields = std::move(scan.fields);
++    known = data->class_analyses.emplace(key, std::move(fresh)).first;
++  }
++  ClassAnalysis& analysis = known->second;
++  if (!analysis.error.empty()) {
++    throw_type_error(analysis.error);
++    return {};
++  }
++
++  std::vector<std::pair<std::string, Local<Value>>> captures;
++  for (const auto& [name, in_probe] : analysis.names) {
++    Local<Value> value;
++    bool is_builtin;
++    std::string error;
++    bool resolved;
++    {
++      // The error below replaces the exception, if any.
++      TryCatch try_catch(isolate);
++      resolved = ResolveCapture(isolate, in_probe, constructor, name, &value,
++                                &is_builtin, &error);
++    }
++    if (!resolved) {
++      throw_type_error(error.empty() ? "cannot read " + name : error);
++      return {};
++    }
++    if (is_builtin) continue;
++    i::DirectHandle<i::Object> i_value = Utils::OpenDirectHandle(*value);
++    if (value->IsObject() &&
++        !i::JSRegionObject::IsClass(i_isolate, i_value) &&
++        !i::JSRegionObject::IsSharedFunction(i_isolate, i_value)) {
++      throw_type_error(
++          "a Region.class() class cannot use " + name +
++          " of its closure: every thread compiles the class again without "
++          "it. It can use primitives, classes of Region.class() and functions "
++          "of Region.fn()");
++      return {};
++    }
++    captures.emplace_back(name, value);
++  }
++  if (!analysis.made.IsEmpty() &&
++      analysis.made_captures.size() == captures.size() &&
++      std::equal(captures.begin(), captures.end(),
++                 analysis.made_captures.begin(),
++                 [isolate](const auto& capture, const Global<Value>& made) {
++                   return capture.second->SameValue(made.Get(isolate));
++                 })) {
++    return analysis.made.Get(isolate);
++  }
++
++  i::Factory* factory = i_isolate->factory();
++  i::DirectHandle<i::FixedArray> i_captures =
++      factory->NewFixedArray(static_cast<int>(2 * captures.size()));
++  for (size_t index = 0; index < captures.size(); index++) {
++    i_captures->set(static_cast<int>(2 * index),
++                    *factory->InternalizeUtf8String(
++                        captures[index].first.c_str()));
++    i_captures->set(static_cast<int>(2 * index + 1),
++                    *Utils::OpenDirectHandle(*captures[index].second));
++  }
++  i::DirectHandle<i::FixedArray> fields =
++      factory->NewFixedArray(static_cast<int>(analysis.fields.size()));
++  for (size_t index = 0; index < analysis.fields.size(); index++) {
++    fields->set(static_cast<int>(index),
++                *factory->InternalizeUtf8String(analysis.fields[index].c_str()));
++  }
++  SourcePlace place = PlaceOf(isolate, constructor);
++  i::DirectHandle<i::Object> script_name =
++      place.line < 0
++          ? i::DirectHandle<i::Object>(factory->undefined_value())
++          : i::DirectHandle<i::Object>(
++                Utils::OpenDirectHandle(
++                    *String::NewFromUtf8(isolate, place.file.c_str())
++                         .ToLocalChecked()));
++  i::DirectHandle<i::JSFunction> result;
++  if (!i::JSRegionObject::NewClass(
++           i_isolate, Utils::OpenDirectHandle(*source), script_name,
++           std::max(place.line, 0), std::max(place.column, 0), fields,
++           i_captures)
++           .ToHandle(&result)) {
++    return {};
++  }
++  Local<Function> made = Utils::ToLocal(result);
++  analysis.made.Reset(isolate, made);
++  analysis.made_captures.clear();
++  for (const auto& [name, value] : captures) {
++    analysis.made_captures.emplace_back(isolate, value);
++  }
++  return made;
++}
++
++// Makes a class declared in 'use region' code a class of Region.class().
++i::MaybeDirectHandle<i::Object> MakeRegionClassHook(
++    i::Isolate* i_isolate, i::DirectHandle<i::Object> value) {
++  if (!i::IsJSFunction(*value)) return value;
++  Isolate* isolate = reinterpret_cast<Isolate*>(i_isolate);
++  Local<Function> result;
++  if (!NewRegionClass(isolate, isolate->GetCurrentContext(),
++                      Utils::ToLocal(i::Cast<i::JSFunction>(value)))
++           .ToLocal(&result)) {
++    return {};
++  }
++  return Utils::OpenDirectHandle(*result);
++}
++
++}  // namespace
++
++// Region.class(C) -> a class whose instances objects of regions can be: in
++// the current region, `new` creates them there, with the fields C declares
++// and nothing else. Every isolate that uses the class compiles its source
++// again, without the closure.
++void RegionClass(const v8::FunctionCallbackInfo<v8::Value>& info) {
++  DCHECK(i::ValidateCallbackInfo(info));
++  Isolate* isolate = info.GetIsolate();
++  if (info.Length() < 1 || !info[0]->IsFunction()) {
++    isolate->ThrowException(Exception::TypeError(
++        String::NewFromUtf8Literal(isolate, "Region.class() expects a class")));
++    return;
++  }
++  Local<Function> result;
++  if (NewRegionClass(isolate, isolate->GetCurrentContext(),
++                     info[0].As<Function>())
++          .ToLocal(&result)) {
++    info.GetReturnValue().Set(result);
++  }
 +}
 +
 +// Region.localRef(obj) -> a LocalRef of `obj`, an object of this thread, that
@@ -18695,6 +20154,7 @@ index 00000000..09fa8bf6
 +void AddGlobals(Isolate* isolate, Local<ObjectTemplate> global) {
 +  IsolateData* data = IsolateData::Get(isolate);
 +  if (data->globals.empty()) {
++    i::JSRegionObject::SetMakeClassHook(MakeRegionClassHook);
 +    Local<FunctionTemplate> region = CreateRegionTemplate(isolate);
 +    region->Set(isolate, "__exportPort",
 +                FunctionTemplate::New(isolate, RegionExportPort));
@@ -20512,10 +21972,10 @@ index 00000000..13ba2260
 +}  // namespace v8::regions
 diff --git a/src/regions/regions-runtime.h b/src/regions/regions-runtime.h
 new file mode 100644
-index 00000000..b6d702cb
+index 00000000..905b2277
 --- /dev/null
 +++ b/src/regions/regions-runtime.h
-@@ -0,0 +1,183 @@
+@@ -0,0 +1,198 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -20676,6 +22136,21 @@ index 00000000..b6d702cb
 +  std::map<std::tuple<int, int, int>, SpawnAnalysis> spawn_analyses;
 +  std::unordered_map<std::string, int> spawn_code_ids;
 +  std::vector<SpawnCode> spawn_codes;
++
++  // What Region.class() found out about a class, by its place in its
++  // script, and the class it made last, with the values that class
++  // captured: a class in a function that runs again gets the same class
++  // while its captures stay the same, not a new one in a new region.
++  struct ClassAnalysis {
++    // Why the class cannot be one of Region.class(); empty if it can.
++    std::string error;
++    // Free names, and whether every context has them.
++    std::vector<std::pair<std::string, bool>> names;
++    std::vector<std::string> fields;
++    Global<Function> made;
++    std::vector<Global<Value>> made_captures;
++  };
++  std::map<std::tuple<int, int, int>, ClassAnalysis> class_analyses;
 +
 +  // The isolate's entries in regions-channel.cc and regions-port.cc, found
 +  // here without a lookup.
@@ -22540,7 +24015,7 @@ index 2ab60bab..433e7430 100644
          result = JSObject::GetPropertyAttributesWithInterceptor(&it);
          if (result.IsNothing()) return MaybeDirectHandle<Object>();
 diff --git a/src/runtime/runtime-object.cc b/src/runtime/runtime-object.cc
-index 6030578e..52351337 100644
+index 6030578e..b28c2241 100644
 --- a/src/runtime/runtime-object.cc
 +++ b/src/runtime/runtime-object.cc
 @@ -3,6 +3,7 @@
@@ -22563,7 +24038,7 @@ index 6030578e..52351337 100644
  #include "src/objects/property-descriptor-object.h"
  #include "src/objects/property-descriptor.h"
  #include "src/objects/property-details.h"
-@@ -87,6 +91,138 @@ Maybe<bool> Runtime::DeleteObjectProperty(Isolate* isolate,
+@@ -87,6 +91,167 @@ Maybe<bool> Runtime::DeleteObjectProperty(Isolate* isolate,
  }
  
  // https://tc39.es/ecma262/#sec-object.keys
@@ -22588,6 +24063,35 @@ index 6030578e..52351337 100644
 +  for (int i = 0; i < args.length(); i++) values.push_back(args.at(i));
 +  RETURN_RESULT_OR_FAILURE(isolate,
 +                           JSRegionObject::NewLiteral(isolate, nullptr, values));
++}
++
++// A {} or [] of 'use region' code that #{} or #[] can't create, while a
++// region is current.
++RUNTIME_FUNCTION(Runtime_CopyIntoCurrentRegion) {
++  HandleScope scope(isolate);
++  DCHECK_EQ(1, args.length());
++  DirectHandle<Object> value = args.at(0);
++  int region = JSRegionObject::Current(isolate);
++  if (region < 0) return *value;
++  RETURN_RESULT_OR_FAILURE(isolate,
++                           JSRegionObject::Evacuate(isolate, region, value));
++}
++
++// See JSRegionObject::NewClassInstance.
++RUNTIME_FUNCTION(Runtime_NewRegionClassInstance) {
++  HandleScope scope(isolate);
++  DCHECK_EQ(1, args.length());
++  RETURN_RESULT_OR_FAILURE(
++      isolate, JSRegionObject::NewClassInstance(isolate, args.at(0)));
++}
++
++// A class declared in 'use region' code: the class of Region.class() made of
++// it, which the declaration binds instead.
++RUNTIME_FUNCTION(Runtime_MakeRegionClass) {
++  HandleScope scope(isolate);
++  DCHECK_EQ(1, args.length());
++  DirectHandle<Object> value = args.at(0);
++  RETURN_RESULT_OR_FAILURE(isolate, JSRegionObject::MakeClass(isolate, value));
 +}
 +
 +// A value that the #{} and #[] builtins can't store as it is: a string or
@@ -22702,7 +24206,7 @@ index 6030578e..52351337 100644
  RUNTIME_FUNCTION(Runtime_ObjectKeys) {
    HandleScope scope(isolate);
    DirectHandle<Object> object = args.at(0);
-@@ -221,6 +357,7 @@ RUNTIME_FUNCTION(Runtime_HasOwnConstDataProperty) {
+@@ -221,6 +386,7 @@ RUNTIME_FUNCTION(Runtime_HasOwnConstDataProperty) {
        case LookupIterator::ACCESS_CHECK:
        case LookupIterator::JSPROXY:
        case LookupIterator::WASM_OBJECT:
@@ -22711,15 +24215,18 @@ index 6030578e..52351337 100644
        case LookupIterator::ACCESSOR:
        case LookupIterator::MODULE_NAMESPACE:
 diff --git a/src/runtime/runtime.h b/src/runtime/runtime.h
-index 8a1f8910..7bd96219 100644
+index 8a1f8910..b890c840 100644
 --- a/src/runtime/runtime.h
 +++ b/src/runtime/runtime.h
-@@ -393,6 +393,20 @@ constexpr bool CanTriggerGC(T... properties) {
+@@ -393,6 +393,23 @@ constexpr bool CanTriggerGC(T... properties) {
    F(HasOwnConstDataProperty, 2, 1)                                     \
    F(ObjectIsExtensible, 1, 1)                                          \
    F(ObjectKeys, 1, 1)                                                  \
 +  F(CreateRegionObjectLiteral, -1 /* keys and values */, 1)            \
 +  F(CreateRegionArrayLiteral, -1 /* elements */, 1)                    \
++  F(CopyIntoCurrentRegion, 1, 1)                                       \
++  F(NewRegionClassInstance, 1, 1)                                      \
++  F(MakeRegionClass, 1, 1)                                             \
 +  F(ShareRegionLiteralValue, 2, 1)                                     \
 +  F(AllocateInRegion, 2, 1)                                            \
 +  F(RegionPageOf, 1, 1)                                                \

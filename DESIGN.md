@@ -21,13 +21,15 @@ diverged from it, this section says so.
   “Map + name” pair.
 - **Ownership check** on the IC fast path: a table of owner isolate addresses indexed by region
   number, and one comparison with the address of the current isolate. A write checks the value right there.
-- **Prototypes.** There is no own prototype, but missing properties are read from the
-  `Array.prototype` / `Object.prototype` of the reading isolate: `for...of`, spread and
-  `map`/`filter` work. `Object.keys`, `for...in`, `JSON.stringify` and `Array.isArray` work
+- **Prototypes.** There is no own prototype: the prototype is the `Array.prototype` /
+  `Object.prototype` of the reading isolate, or the prototype of that isolate's class for an
+  instance of a `Region.class` class. `Object.getPrototypeOf`, `instanceof`, `for...of`, spread
+  and `map`/`filter` work; the prototype cannot be changed. `Object.keys`, `for...in`, `JSON.stringify` and `Array.isArray` work
   through enumeration of the region's keys.
 - **A region can hold** plain objects (`Object.prototype` or `null`), arrays with
-  `Array.prototype`, primitives, typed arrays, `Region.fn` functions and
-  `Region.localRef` handles (below). Class instances, `Map` and ordinary functions are an error.
+  `Array.prototype`, primitives, typed arrays, `Region.fn` functions,
+  `Region.localRef` handles and instances of `Region.class` classes (below). Instances of other
+  classes, `Map` and ordinary functions are an error.
 - **`freeze` / `borrow`.** There is no borrow bitset: a region has a reader count, and who
   may read a frozen region is decided by the isolate's read table (“Mandatory borrow”
   below). `thaw` with readers is an exception; `thawWhenFree()` waits until the borrows are returned.
@@ -317,6 +319,18 @@ diverged from it, this section says so.
   handle) or a new compilation. Fast paths (IC, CSA, iterator, Maglev, Turboshaft) see the
   range `FIRST/LAST_JS_REGION_MATERIALIZED_TYPE` and go to the runtime, as with a typed array
   view. There is no deduplication between different writes: about 48 bytes per region.
+- **`Region.class(C)`**, and every class declared in `'use region'` code. The same analysis as
+  `Region.fn` finds what the class captures (primitives, `Region.fn` functions and other such
+  classes); private members, computed field names, nested classes and `eval` give `TypeError`.
+  The engine (`JSRegionObject::NewClass`) creates a sealed region with a holder
+  (`JSRegionClass`): the source, its place, the declared instance fields (those of the base class
+  first), the shared maps of instances, whose prototype is the holder, and the captures. Each
+  isolate compiles the source once, as `'use region'` code, into a class of its own and freezes
+  it with its prototype; `PrototypeOf` of an instance gives that prototype. The base
+  constructor of such a class starts with `RegionClassThis`: in the current region it allocates
+  the instance there with every field, and the constructor returns it; elsewhere `new` gives a
+  plain object. Field initializers write into the record (`DefineOwnProperty` of a declared
+  key is a write), and a key that is not declared gives `TypeError`. `tests/region-class.js`.
 - **`Region.localRef(obj)`** instead of `Shared.localRef`. Returns a `LocalRef` wrapper
   (an ordinary isolate object with a prototype from d8 and a descriptor `[id, thread]` under a private
   symbol). The target lives in the creator isolate under a strong global handle. Writing the wrapper into a region
@@ -351,8 +365,8 @@ diverged from it, this section says so.
 |---|---|
 | Engine and host | V8, `d8` and its `Worker` |
 | Threads | An isolate per thread; regions are a separate shared part of the heap, modeled on shared space |
-| What is stored | Objects and arrays without prototypes, numbers, strings, typed arrays, `Region.fn` functions, `Region.localRef` handles |
-| Prototypes | No own prototype; missing properties are read from the `Array.prototype` / `Object.prototype` of the isolate that reads |
+| What is stored | Objects and arrays without prototypes, numbers, strings, typed arrays, `Region.fn` functions, `Region.localRef` handles, instances of `Region.class` classes |
+| Prototypes | No own prototype; the prototype is the `Array.prototype` / `Object.prototype` of the isolate that reads, or the prototype of its class |
 | Functions | `Region.fn`: no closures, only builtin globals; each isolate compiles the source itself |
 | Getting into a region | `#{}` / `#[]` literals and `'use region'` allocate directly in the region; `region.run(fn)` copies a ready graph |
 | Object shape | One shared Map per set of keys in shared space, not a per-region one; the shape is fixed, there are no transitions |
