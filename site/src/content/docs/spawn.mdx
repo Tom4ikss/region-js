@@ -204,7 +204,7 @@ For tasks of a millisecond or longer this overhead is barely noticeable. For sma
 :::caution[spawn limitations]
 - Classes are not supported; `super`, `new.target` and `import` do not work in the callback.
 - If a pool worker dies in the middle of a task, that task's `join()` and `await` end with the error `spawn() worker exited without a result`. This applies only to the tasks it had already picked up: the rest are run by other workers, and if all of them died, the next `spawn` sets up a new pool. Without `timeout(ms)`, a task that runs forever is waited for forever.
-- Like everything else, `spawn` exists only in d8 with the `--harmony-regions` flag.
+- Like everything else, `spawn` exists only in d8 and in Node.js built from this fork, with the `--harmony-regions` flag.
 :::
 
 :::note[If you know Go]

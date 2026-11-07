@@ -31,9 +31,9 @@ jobs.close();
 print('payload items:', await worker); // 3
 ```
 
-Работает только в тестовой оболочке движка `d8`, в браузер и Node это не попадает.
+Работает в тестовой оболочке движка `d8` и в Node.js, собранной из этого форка (Linux x64, `scripts/setup-node.sh`). В браузерах этого нет.
 
-**Документация:** https://tom4ikss.github.io/region-js/ru/ (английская версия: https://tom4ikss.github.io/region-js/) · **Релиз:** [v0.5.1-alpha](https://github.com/Tom4ikss/region-js/releases/tag/v0.5.1-alpha)
+**Документация:** https://tom4ikss.github.io/region-js/ru/ (английская версия: https://tom4ikss.github.io/region-js/) · **Релиз:** [v1.0.0-beta](https://github.com/Tom4ikss/region-js/releases/tag/v1.0.0-beta)
 
 ## Против воркеров и tokio
 
@@ -105,4 +105,4 @@ node scripts/run-examples.mjs        # перезапустить примеры
 
 ## Статус
 
-Alpha. Тесты V8 (mjsunit, 9 255) проходят, свои тесты и фаззер — тоже, но это исследовательский прототип: проверки безопасности уровня настоящего V8 не было, чужой код в нём не запускайте. Что не сделано и почему — на странице [«Ограничения и планы»](https://tom4ikss.github.io/region-js/ru/limits/) (`site/src/content/docs/ru/limits.mdx`).
+Beta. Тесты V8 (mjsunit, 9 292 из 9 292) проходят, свои тесты и фаззер — тоже, но это исследовательский прототип: проверки безопасности уровня настоящего V8 не было, чужой код в нём не запускайте. Что не сделано и почему — на странице [«Ограничения и планы»](https://tom4ikss.github.io/region-js/ru/limits/) (`site/src/content/docs/ru/limits.mdx`).

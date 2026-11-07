@@ -31,9 +31,9 @@ jobs.close();
 print('payload items:', await worker); // 3
 ```
 
-It runs only in `d8`, the engine's test shell; none of this reaches browsers or Node.
+It runs in `d8`, the engine's test shell, and in Node.js built from this fork (Linux x64, `scripts/setup-node.sh`). Browsers do not have it.
 
-**Documentation:** https://tom4ikss.github.io/region-js/ (in Russian: https://tom4ikss.github.io/region-js/ru/) · **Release:** [v0.5.1-alpha](https://github.com/Tom4ikss/region-js/releases/tag/v0.5.1-alpha)
+**Documentation:** https://tom4ikss.github.io/region-js/ (in Russian: https://tom4ikss.github.io/region-js/ru/) · **Release:** [v1.0.0-beta](https://github.com/Tom4ikss/region-js/releases/tag/v1.0.0-beta)
 
 ## Against workers and tokio
 
@@ -105,4 +105,4 @@ The playground: open the `playground/` folder in VSCode and run `npm install`; C
 
 ## Status
 
-Alpha. V8's own tests (mjsunit, 9,255) pass, and so do our tests and the fuzzer, but this is a research prototype: it has had no security review on the level of real V8, so do not run untrusted code in it. What is missing and why is on the [Limits and plans](https://tom4ikss.github.io/region-js/limits/) page (`site/src/content/docs/limits.mdx`).
+Beta. V8's own tests (mjsunit, 9,292 of 9,292) pass, and so do our tests and the fuzzer, but this is a research prototype: it has had no security review on the level of real V8, so do not run untrusted code in it. What is missing and why is on the [Limits and plans](https://tom4ikss.github.io/region-js/limits/) page (`site/src/content/docs/limits.mdx`).
