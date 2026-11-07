@@ -2268,7 +2268,7 @@ index 23075681..d2291244 100644
  };
  
 diff --git a/src/compiler/js-call-reducer.cc b/src/compiler/js-call-reducer.cc
-index 1ea643c7..adc23b7f 100644
+index 1ea643c7..7e5cd583 100644
 --- a/src/compiler/js-call-reducer.cc
 +++ b/src/compiler/js-call-reducer.cc
 @@ -32,6 +32,8 @@
@@ -2276,7 +2276,7 @@ index 1ea643c7..adc23b7f 100644
  #include "src/compiler/state-values-utils.h"
  #include "src/compiler/type-cache.h"
 +#include "src/ic/handler-configuration.h"
-+#include "src/objects/js-region.h"
++#include "src/objects/js-region-inl.h"
  #include "src/compiler/use-info.h"
  #include "src/flags/flags.h"
  #include "src/ic/call-optimization.h"
@@ -2295,7 +2295,7 @@ index 1ea643c7..adc23b7f 100644
    // Check that various {iterated_object_maps} have compatible elements kinds.
    ElementsKind elements_kind = iterated_object_maps[0].elements_kind();
    if (IsTypedArrayElementsKind(elements_kind)) {
-@@ -7701,6 +7711,116 @@ Reduction JSCallReducer::ReduceArrayIteratorPrototypeNext(Node* node) {
+@@ -7701,6 +7711,128 @@ Reduction JSCallReducer::ReduceArrayIteratorPrototypeNext(Node* node) {
    return Replace(value);
  }
  
@@ -2315,10 +2315,19 @@ index 1ea643c7..adc23b7f 100644
 +  Control control = n.control();
 +  if (iteration_kind == IterationKind::kEntries) return inference->NoChange();
 +
++  // Arrays with a sealed plain map need no access check, and every element
++  // in bounds is what JS sees.
++  const ZoneRefSet<Map>& maps = inference->GetMaps();
++  const bool plain =
++      std::all_of(maps.begin(), maps.end(), [](MapRef map) {
++        return JSRegionObject::IsSealedPlainMap(*map.object());
++      });
 +  inference->InsertMapChecks(jsgraph(), &effect, control, p.feedback());
-+  effect = Effect{graph()->NewNode(
-+      simplified()->CheckRegionAccess(false, p.feedback()), iterated_object,
-+      effect, control)};
++  if (!plain) {
++    effect = Effect{graph()->NewNode(
++        simplified()->CheckRegionAccess(false, p.feedback()), iterated_object,
++        effect, control)};
++  }
 +  // Only arrays have no keys, and a region object never becomes an array or
 +  // stops being one.
 +  FieldAccess keys_access = {kTaggedBase,
@@ -2366,15 +2375,18 @@ index 1ea643c7..adc23b7f 100644
 +      // The hole: a typed array or a function of the region, which the
 +      // builtin reads as a local view or copy.
 +      value_true = etrue =
-+          graph()->NewNode(simplified()->LoadRegionElement(false),
++          graph()->NewNode(simplified()->LoadRegionElement(false, plain),
 +                           iterated_object, index, etrue, if_true);
-+      etrue = graph()->NewNode(
-+          simplified()->CheckIf(DeoptimizeReason::kRegionAccess, p.feedback()),
-+          graph()->NewNode(
-+              simplified()->BooleanNot(),
-+              graph()->NewNode(simplified()->ReferenceEqual(), value_true,
-+                               jsgraph()->TheHoleConstant())),
-+          etrue, if_true);
++      if (!plain) {
++        etrue = graph()->NewNode(
++            simplified()->CheckIf(DeoptimizeReason::kRegionAccess,
++                                  p.feedback()),
++            graph()->NewNode(
++                simplified()->BooleanNot(),
++                graph()->NewNode(simplified()->ReferenceEqual(), value_true,
++                                 jsgraph()->TheHoleConstant())),
++            etrue, if_true);
++      }
 +      value_true = etrue =
 +          graph()->NewNode(common()->TypeGuard(Type::NonInternal()),
 +                           value_true, etrue, if_true);
@@ -2428,7 +2440,7 @@ index 0d4d10d6..be8f5e1d 100644
    Reduction ReduceFastArrayIteratorNext(InstanceType type, Node* node,
                                          IterationKind kind);
 diff --git a/src/compiler/js-native-context-specialization.cc b/src/compiler/js-native-context-specialization.cc
-index 468b715c..db95ef21 100644
+index 468b715c..46307f88 100644
 --- a/src/compiler/js-native-context-specialization.cc
 +++ b/src/compiler/js-native-context-specialization.cc
 @@ -38,10 +38,10 @@
@@ -2439,7 +2451,7 @@ index 468b715c..db95ef21 100644
  #include "src/objects/elements-kind.h"
  #include "src/objects/feedback-vector.h"
  #include "src/objects/heap-number.h"
-+#include "src/objects/js-region.h"
++#include "src/objects/js-region-inl.h"
  #include "src/objects/property-details.h"
  #include "src/objects/string.h"
  #include "src/objects/tagged-field.h"
@@ -2451,7 +2463,7 @@ index 468b715c..db95ef21 100644
        zone_(zone),
        shared_zone_(shared_zone),
        type_cache_(TypeCache::Get()),
-@@ -1373,6 +1374,444 @@ Reduction JSNativeContextSpecialization::ReduceMegaDOMPropertyAccess(
+@@ -1373,6 +1374,469 @@ Reduction JSNativeContextSpecialization::ReduceMegaDOMPropertyAccess(
    return Replace(value);
  }
  
@@ -2758,15 +2770,39 @@ index 468b715c..db95ef21 100644
 +    controls.push_back(other_success);
 +  }
 +
++  // Objects with sealed plain maps are never written, and every value they
++  // hold is what JS sees: a load needs no check of the region or the value.
++  // Only an element out of bounds still takes the slow path.
++  const bool plain =
++      !is_store && !region_maps.empty() &&
++      std::all_of(region_maps.begin(), region_maps.end(), [](MapRef map) {
++        return JSRegionObject::IsSealedPlainMap(*map.object());
++      });
 +  // In a loop that allows speculation the access deoptimizes when the fast
 +  // path can't do it, so the loop has no call. The access check is a node of
 +  // its own then: RedundancyElimination keeps only the first one for an
 +  // object in such a loop, which loop peeling moves out of it.
 +  FeedbackSource loop_feedback = RegionLoopFeedback(control);
-+  if (loop_feedback.IsValid()) {
-+    effect = Effect{graph()->NewNode(
-+        simplified()->CheckRegionAccess(is_store, loop_feedback), receiver,
-+        effect, region_control)};
++  if (plain && field_index.has_value()) {
++    Node* fast = effect = graph()->NewNode(
++        simplified()->LoadRegionField(*field_index, false, true), receiver,
++        effect, region_control);
++    Node* result = effect =
++        Effect{graph()->NewNode(common()->TypeGuard(Type::NonInternal()), fast,
++                                effect, region_control)};
++    if (controls.empty()) {
++      ReplaceWithValue(node, result, effect, region_control);
++      return Replace(result);
++    }
++    values.push_back(result);
++    effects.push_back(effect);
++    controls.push_back(region_control);
++  } else if (loop_feedback.IsValid()) {
++    if (!plain) {
++      effect = Effect{graph()->NewNode(
++          simplified()->CheckRegionAccess(is_store, loop_feedback), receiver,
++          effect, region_control)};
++    }
 +    Node* fast;
 +    if (field_index.has_value()) {
 +      fast = effect = is_store
@@ -2780,11 +2816,11 @@ index 468b715c..db95ef21 100644
 +                                receiver, effect, region_control);
 +    } else {
 +      fast = effect =
-+          is_store ? graph()->NewNode(simplified()->StoreRegionElement(false),
-+                                      receiver, key, value, effect,
-+                                      region_control)
-+                   : graph()->NewNode(simplified()->LoadRegionElement(false),
-+                                      receiver, key, effect, region_control);
++          is_store
++              ? graph()->NewNode(simplified()->StoreRegionElement(false),
++                                 receiver, key, value, effect, region_control)
++              : graph()->NewNode(simplified()->LoadRegionElement(false, plain),
++                                 receiver, key, effect, region_control);
 +    }
 +    Node* done =
 +        is_store ? fast
@@ -2825,11 +2861,12 @@ index 468b715c..db95ef21 100644
 +                    receiver, effect, region_control);
 +    } else {
 +      fast = effect =
-+          is_store ? graph()->NewNode(simplified()->StoreRegionElement(true),
-+                                      receiver, key, value, effect,
-+                                      region_control)
-+                   : graph()->NewNode(simplified()->LoadRegionElement(true),
-+                                      receiver, key, effect, region_control);
++          is_store
++              ? graph()->NewNode(simplified()->StoreRegionElement(true),
++                                 receiver, key, value, effect, region_control)
++              : graph()->NewNode(
++                    simplified()->LoadRegionElement(!plain, plain), receiver,
++                    key, effect, region_control);
 +    }
 +    Node* use_fast =
 +        is_store ? fast
@@ -2896,7 +2933,7 @@ index 468b715c..db95ef21 100644
  Reduction JSNativeContextSpecialization::ReduceNamedAccess(
      Node* node, Node* value, NamedAccessFeedback const& feedback,
      AccessMode access_mode, FeedbackSource const& source, Node* key) {
-@@ -1445,6 +1884,12 @@ Reduction JSNativeContextSpecialization::ReduceNamedAccess(
+@@ -1445,6 +1909,12 @@ Reduction JSNativeContextSpecialization::ReduceNamedAccess(
      }
    }
  
@@ -2909,7 +2946,7 @@ index 468b715c..db95ef21 100644
    ZoneVector<PropertyAccessInfo> access_infos(zone());
    {
      ZoneVector<PropertyAccessInfo> access_infos_for_feedback(zone());
-@@ -2300,6 +2745,18 @@ Reduction JSNativeContextSpecialization::ReduceElementAccess(
+@@ -2300,6 +2770,18 @@ Reduction JSNativeContextSpecialization::ReduceElementAccess(
    }
  
    AccessMode access_mode = refined_feedback.keyed_mode().access_mode();
@@ -3382,25 +3419,28 @@ index 9ea2e639..cdd8427f 100644
          if (truncation.IsUnused()) return VisitUnused<T>(node);
          VisitBinop<T>(node, UseInfo::AnyTagged(), UseInfo::TruncatingWord32(),
 diff --git a/src/compiler/simplified-operator.cc b/src/compiler/simplified-operator.cc
-index 38a92b04..66a403b4 100644
+index 38a92b04..ddfb7aab 100644
 --- a/src/compiler/simplified-operator.cc
 +++ b/src/compiler/simplified-operator.cc
-@@ -2395,6 +2395,92 @@ const Operator* SimplifiedOperatorBuilder::TypedArrayLength(
+@@ -2395,6 +2395,96 @@ const Operator* SimplifiedOperatorBuilder::TypedArrayLength(
        elements_kind);  // parameter
  }
  
 +bool operator==(RegionAccessParameters const& lhs,
 +                RegionAccessParameters const& rhs) {
-+  return lhs.index() == rhs.index() && lhs.check_access() == rhs.check_access();
++  return lhs.index() == rhs.index() &&
++         lhs.check_access() == rhs.check_access() &&
++         lhs.plain() == rhs.plain();
 +}
 +
 +size_t hash_value(RegionAccessParameters const& p) {
-+  return base::hash_combine(p.index(), p.check_access());
++  return base::hash_combine(p.index(), p.check_access(), p.plain());
 +}
 +
 +std::ostream& operator<<(std::ostream& os, RegionAccessParameters const& p) {
 +  os << p.index();
 +  if (!p.check_access()) os << ", access checked";
++  if (p.plain()) os << ", plain";
 +  return os;
 +}
 +
@@ -3434,12 +3474,13 @@ index 38a92b04..66a403b4 100644
 +}
 +
 +const Operator* SimplifiedOperatorBuilder::LoadRegionField(int index,
-+                                                           bool check_access) {
++                                                           bool check_access,
++                                                           bool plain) {
 +  return zone()->New<Operator1<RegionAccessParameters>>(
 +      IrOpcode::kLoadRegionField,
 +      Operator::kNoThrow | Operator::kNoDeopt | Operator::kNoWrite,
 +      "LoadRegionField", 1, 1, 1, 1, 1, 0,
-+      RegionAccessParameters(index, check_access));
++      RegionAccessParameters(index, check_access, plain));
 +}
 +
 +const Operator* SimplifiedOperatorBuilder::StoreRegionField(int index,
@@ -3450,13 +3491,13 @@ index 38a92b04..66a403b4 100644
 +      RegionAccessParameters(index, check_access));
 +}
 +
-+const Operator* SimplifiedOperatorBuilder::LoadRegionElement(
-+    bool check_access) {
++const Operator* SimplifiedOperatorBuilder::LoadRegionElement(bool check_access,
++                                                             bool plain) {
 +  return zone()->New<Operator1<RegionAccessParameters>>(
 +      IrOpcode::kLoadRegionElement,
 +      Operator::kNoThrow | Operator::kNoDeopt | Operator::kNoWrite,
 +      "LoadRegionElement", 2, 1, 1, 1, 1, 0,
-+      RegionAccessParameters(-1, check_access));
++      RegionAccessParameters(-1, check_access, plain));
 +}
 +
 +const Operator* SimplifiedOperatorBuilder::StoreRegionElement(
@@ -3479,28 +3520,33 @@ index 38a92b04..66a403b4 100644
    DCHECK(op->opcode() == IrOpcode::kArgumentsLength ||
           op->opcode() == IrOpcode::kRestLength);
 diff --git a/src/compiler/simplified-operator.h b/src/compiler/simplified-operator.h
-index 2e47ad4d..6ac3227b 100644
+index 2e47ad4d..f077a6aa 100644
 --- a/src/compiler/simplified-operator.h
 +++ b/src/compiler/simplified-operator.h
-@@ -757,6 +757,51 @@ bool operator==(SpeculativeBigIntAsNParameters const&,
+@@ -757,6 +757,56 @@ bool operator==(SpeculativeBigIntAsNParameters const&,
  const SpeculativeBigIntAsNParameters& SpeculativeBigIntAsNParametersOf(
      const Operator* op) V8_WARN_UNUSED_RESULT;
  
 +// Parameters of LoadRegionField, StoreRegionField, LoadRegionElement and
 +// StoreRegionElement: the position in values() for a field, and whether the
 +// operator itself checks that this isolate may access the region. It does not
-+// when a CheckRegionAccess on the same object comes before it.
++// when a CheckRegionAccess on the same object comes before it. A load is
++// `plain` when the maps of the object are sealed plain maps
++// (JSRegionObject::IsSealedPlainMap): no value is a holder, so it returns the
++// value as it is, and the hole only for an element out of bounds.
 +class RegionAccessParameters final {
 + public:
-+  RegionAccessParameters(int index, bool check_access)
-+      : index_(index), check_access_(check_access) {}
++  RegionAccessParameters(int index, bool check_access, bool plain = false)
++      : index_(index), check_access_(check_access), plain_(plain) {}
 +
 +  int index() const { return index_; }
 +  bool check_access() const { return check_access_; }
++  bool plain() const { return plain_; }
 +
 + private:
 +  int index_;
 +  bool check_access_;
++  bool plain_;
 +};
 +
 +bool operator==(RegionAccessParameters const&, RegionAccessParameters const&);
@@ -3534,7 +3580,7 @@ index 2e47ad4d..6ac3227b 100644
  int FormalParameterCountOf(const Operator* op) V8_WARN_UNUSED_RESULT;
  
  class AllocateParameters {
-@@ -1252,6 +1297,25 @@ class V8_EXPORT_PRIVATE SimplifiedOperatorBuilder final
+@@ -1252,6 +1302,26 @@ class V8_EXPORT_PRIVATE SimplifiedOperatorBuilder final
    const Operator* StoreMessage();
  
    const Operator* LoadFieldByIndex();
@@ -3547,9 +3593,10 @@ index 2e47ad4d..6ac3227b 100644
 +  // that the value can be used as it is. When it can't, a load returns the
 +  // hole and a store returns false, without side effects, and the caller
 +  // takes the generic path or deoptimizes.
-+  const Operator* LoadRegionField(int index, bool check_access);
++  const Operator* LoadRegionField(int index, bool check_access,
++                                  bool plain = false);
 +  const Operator* StoreRegionField(int index, bool check_access);
-+  const Operator* LoadRegionElement(bool check_access);
++  const Operator* LoadRegionElement(bool check_access, bool plain = false);
 +  const Operator* StoreRegionElement(bool check_access);
 +  // Deoptimizes unless this isolate may read (or write) the region of the
 +  // object. Only the isolate itself can take that right away from itself, by
@@ -3626,7 +3673,7 @@ index f7525792..3d3506e0 100644
      case JS_ARRAY_ITERATOR_TYPE:
      case JS_REG_EXP_TYPE:
 diff --git a/src/compiler/turboshaft/graph-builder.cc b/src/compiler/turboshaft/graph-builder.cc
-index e0e9cfa7..f2709b87 100644
+index e0e9cfa7..606a9707 100644
 --- a/src/compiler/turboshaft/graph-builder.cc
 +++ b/src/compiler/turboshaft/graph-builder.cc
 @@ -47,7 +47,9 @@
@@ -3931,7 +3978,7 @@ index e0e9cfa7..f2709b87 100644
    OpIndex Process(Node* node, BasicBlock* block,
                    const base::SmallVector<int, 16>& predecessor_permutation,
                    V<EagerFrameState>& dominating_frame_state,
-@@ -432,6 +719,140 @@ GraphBuilder::TurnTaggedSignedInputIntoSmi(OpIndex value,
+@@ -432,6 +719,142 @@ GraphBuilder::TurnTaggedSignedInputIntoSmi(OpIndex value,
    return {value, rep, write_barrier};
  }
  
@@ -3954,6 +4001,7 @@ index e0e9cfa7..f2709b87 100644
 +        __ Load(LoadRegionValues(object), LoadOp::Kind::TaggedBase(),
 +                MemoryRepresentation::AnyTagged(),
 +                FixedArray::OffsetOfElementAt(params.index())));
++    if (params.plain()) return value;
 +    IF (LIKELY(RegionAccessAllowedIf(params.check_access(),
 +                                     LoadRegionId(object), false))) {
 +      __ SetVariable(result, RegionValueOrHole(value));
@@ -4012,7 +4060,8 @@ index e0e9cfa7..f2709b87 100644
 +          __ Load(array.values, index, LoadOp::Kind::TaggedBase(),
 +                  MemoryRepresentation::AnyTagged(),
 +                  OFFSET_OF_DATA_START(FixedArray), kTaggedSizeLog2));
-+      __ SetVariable(result, RegionValueOrHole(value));
++      __ SetVariable(result,
++                     params.plain() ? value : RegionValueOrHole(value));
 +    }
 +  }
 +  return V<Object>::Cast(__ GetVariable(result));
@@ -4072,7 +4121,7 @@ index e0e9cfa7..f2709b87 100644
  OpIndex GraphBuilder::Process(
      Node* node, BasicBlock* block,
      const base::SmallVector<int, 16>& predecessor_permutation,
-@@ -2245,6 +2666,38 @@ OpIndex GraphBuilder::Process(
+@@ -2245,6 +2668,38 @@ OpIndex GraphBuilder::Process(
        return __ CheckedClosure(Map(node->InputAt(0)), dominating_frame_state,
                                 FeedbackCellOf(node->op()));
  
@@ -8799,10 +8848,10 @@ index 9c6f4043..0e1c4b10 100644
                                                  DirectHandle<Object> reactions,
 diff --git a/src/objects/js-region-inl.h b/src/objects/js-region-inl.h
 new file mode 100644
-index 00000000..5cf0a91e
+index 00000000..99e3fe03
 --- /dev/null
 +++ b/src/objects/js-region-inl.h
-@@ -0,0 +1,120 @@
+@@ -0,0 +1,132 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -8848,6 +8897,18 @@ index 00000000..5cf0a91e
 +}
 +
 +bool JSRegionObject::is_array() const { return IsUndefined(keys()); }
++
++// static
++bool JSRegionObject::IsSealedPlainMap(Tagged<Map> map) {
++  return map->instance_type() == JS_REGION_OBJECT_TYPE &&
++         !map->new_target_is_base();
++}
++
++// static
++void JSRegionObject::MarkSealedPlainMap(Tagged<Map> map) {
++  DCHECK_EQ(map->instance_type(), JS_REGION_OBJECT_TYPE);
++  map->set_new_target_is_base(false);
++}
 +
 +uint32_t JSRegionObject::array_length() const {
 +  return static_cast<uint32_t>(array_length_.load().value());
@@ -8925,10 +8986,10 @@ index 00000000..5cf0a91e
 +#endif  // V8_OBJECTS_JS_REGION_INL_H_
 diff --git a/src/objects/js-region.cc b/src/objects/js-region.cc
 new file mode 100644
-index 00000000..a1e99c79
+index 00000000..9b0ea7ba
 --- /dev/null
 +++ b/src/objects/js-region.cc
-@@ -0,0 +1,4520 @@
+@@ -0,0 +1,4615 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -10585,6 +10646,10 @@ index 00000000..a1e99c79
 +    // literals and local objects pass these, so the recent shapes are found
 +    // by comparing pointers. Null if a key was not internalized.
 +    Address* local_keys;
++    // The same shape for objects of a sealed region whose values are plain
++    // (JSRegionObject::IsSealedPlainMap). Made with `map`, so that seal()
++    // finds it without allocating.
++    Address* sealed_map;
 +  };
 +  struct State {
 +    std::vector<int> current;
@@ -10595,6 +10660,7 @@ index 00000000..a1e99c79
 +    Shape recent[kRecent] = {};
 +    int next_recent = 0;
 +    Address* array_map = nullptr;
++    Address* sealed_array_map = nullptr;
 +  };
 +
 +  // The entry of an isolate never moves, and an isolate runs on one thread
@@ -10617,10 +10683,14 @@ index 00000000..a1e99c79
 +      for (Shape& shape : shapes) {
 +        GlobalHandles::Destroy(shape.keys);
 +        GlobalHandles::Destroy(shape.map);
++        GlobalHandles::Destroy(shape.sealed_map);
 +        if (shape.local_keys) GlobalHandles::Destroy(shape.local_keys);
 +      }
 +    }
-+    if (it->second.array_map) GlobalHandles::Destroy(it->second.array_map);
++    if (it->second.array_map) {
++      GlobalHandles::Destroy(it->second.array_map);
++      GlobalHandles::Destroy(it->second.sealed_array_map);
++    }
 +    for (int region : it->second.current) RegionRegistry::RemoveHandle(region);
 +    // Keep the entry: a thread may still have it cached, and a new isolate
 +    // at the same address starts from an empty state.
@@ -10682,7 +10752,9 @@ index 00000000..a1e99c79
 +      local_keys = isolate->global_handles()->Create(*local).location();
 +    }
 +    Shape shape{isolate->global_handles()->Create(*new_keys).location(),
-+                isolate->global_handles()->Create(*map).location(), local_keys};
++                isolate->global_handles()->Create(*map).location(), local_keys,
++                isolate->global_handles()->Create(*NewSealedPlainMap(isolate))
++                    .location()};
 +    // Of() may have been invalidated by nothing else; `candidates` is still
 +    // the vector of this hash.
 +    candidates.push_back(shape);
@@ -10699,8 +10771,27 @@ index 00000000..a1e99c79
 +              ->Create(*NewRegionMapFor(isolate, JS_REGION_OBJECT_TYPE,
 +                                        JSRegionObject::kHeaderSize))
 +              .location();
++      state.sealed_array_map = isolate->global_handles()
++                                   ->Create(*NewSealedPlainMap(isolate))
++                                   .location();
 +    }
 +    return direct_handle(Cast<Map>(Tagged<Object>(*state.array_map)), isolate);
++  }
++
++  // The sealed plain map of each map of this isolate's shapes.
++  static std::unordered_map<Address, Tagged<Map>> SealedPlainMaps(
++      Isolate* isolate, const DisallowGarbageCollection& no_gc) {
++    State& state = Of(isolate);
++    std::unordered_map<Address, Tagged<Map>> maps;
++    auto add = [&](Address* map, Address* sealed_map) {
++      maps.emplace(Tagged<Object>(*map).ptr(),
++                   Cast<Map>(Tagged<Object>(*sealed_map)));
++    };
++    for (const auto& [hash, shapes] : state.shapes) {
++      for (const Shape& shape : shapes) add(shape.map, shape.sealed_map);
++    }
++    if (state.array_map) add(state.array_map, state.sealed_array_map);
++    return maps;
 +  }
 +
 + private:
@@ -10708,6 +10799,12 @@ index 00000000..a1e99c79
 +      Isolate* isolate, const Shape& shape) {
 +    return {direct_handle(Cast<FixedArray>(Tagged<Object>(*shape.keys)), isolate),
 +            direct_handle(Cast<Map>(Tagged<Object>(*shape.map)), isolate)};
++  }
++  static DirectHandle<Map> NewSealedPlainMap(Isolate* isolate) {
++    DirectHandle<Map> map = NewRegionMapFor(isolate, JS_REGION_OBJECT_TYPE,
++                                            JSRegionObject::kHeaderSize);
++    JSRegionObject::MarkSealedPlainMap(*map);
++    return map;
 +  }
 +  static void Remember(State& state, const Shape& shape) {
 +    state.recent[state.next_recent] = shape;
@@ -12944,6 +13041,53 @@ index 00000000..a1e99c79
 +}
 +
 +// static
++// static
++void JSRegionObject::UseSealedPlainMaps(
++    Isolate* isolate, int region, const std::vector<NormalPage*>& pages,
++    const std::vector<std::pair<Address, Address>>& chunks,
++    const std::vector<Address>& objects) {
++  DisallowGarbageCollection no_gc;
++  // Only shapes of this isolate have a sealed plain map at hand; objects
++  // made by other isolates keep their maps.
++  std::unordered_map<Address, Tagged<Map>> sealed_maps =
++      RegionLiterals::SealedPlainMaps(isolate, no_gc);
++  if (sealed_maps.empty()) return;
++  auto use = [&](Tagged<HeapObject> object) {
++    if (IsFreeSpaceOrFiller(object)) return;
++    Tagged<Map> map = object->map();
++    // Holders have instance types of their own and keep their maps.
++    if (map->instance_type() != JS_REGION_OBJECT_TYPE) return;
++    Tagged<JSRegionObject> region_object = Cast<JSRegionObject>(object);
++    if (region_object->region_id() != region) return;
++    auto it = sealed_maps.find(map.ptr());
++    if (it == sealed_maps.end()) return;
++    Tagged<FixedArray> values = region_object->values();
++    for (uint32_t i = 0; i < values->ulength().value(); i++) {
++      Tagged<Object> value = values->get(i);
++      if (!IsHeapObject(value)) continue;
++      InstanceType type = Cast<HeapObject>(value)->map()->instance_type();
++      if (type >= FIRST_JS_REGION_MATERIALIZED_TYPE &&
++          type <= LAST_JS_REGION_MATERIALIZED_TYPE) {
++        return;
++      }
++    }
++    // Readers of the frozen region may be running: the layout stays, and
++    // their code still checks the old map.
++    object->set_map_safe_transition(isolate, it->second, kReleaseStore);
++  };
++  for (NormalPage* page : pages) {
++    for (Tagged<HeapObject> object : HeapObjectRange(page)) use(object);
++  }
++  for (auto [start, end] : chunks) {
++    for (Address address = start; address < end;) {
++      Tagged<HeapObject> object = HeapObject::FromAddress(address);
++      address += object->Size();
++      use(object);
++    }
++  }
++  for (Address object : objects) use(HeapObject::FromAddress(object));
++}
++
 +void RegionAllocator::PrepareSealed(Isolate* isolate, int region) {
 +  if (!UsesOwnMemory() || !v8_flags.black_allocated_pages) return;
 +  RegionMemory* memory = Memory();
@@ -12955,18 +13099,30 @@ index 00000000..a1e99c79
 +  SharedSpace* space = SharedSpaceOf(isolate);
 +  TakeSweptPages(space, memory, {&region, 1});
 +  std::vector<NormalPage*> pages;
++  std::vector<std::pair<Address, Address>> chunks;
++  std::vector<Address> objects;
 +  {
 +    base::MutexGuard guard(&memory->mutex);
 +    if (memory->sealed.contains(region)) return;
-+    auto it = memory->pages.find(region);
-+    if (it == memory->pages.end()) return;
-+    pages = it->second;
++    if (auto it = memory->pages.find(region); it != memory->pages.end()) {
++      pages = it->second;
++    }
++    if (auto it = memory->chunks.find(region); it != memory->chunks.end()) {
++      chunks = it->second;
++    }
++    if (auto it = memory->objects.find(region); it != memory->objects.end()) {
++      objects = it->second;
++    }
 +  }
 +  for (NormalPage* page : pages) {
 +    while (!page->SweepingDone()) {
 +      base::OS::Sleep(base::TimeDelta::FromMicroseconds(100));
 +    }
 +  }
++  // Before the walk below, so that it lists the new maps. The chunks and
++  // objects are on pages that TakeSweptPages() swept.
++  JSRegionObject::UseSealedPlainMaps(isolate, region, pages, chunks, objects);
++  if (pages.empty()) return;
 +
 +  // Nobody writes into the region, and the shared GC waits for this isolate:
 +  // its objects stay as they are. Pages and dead objects swept since the last
@@ -13451,10 +13607,10 @@ index 00000000..a1e99c79
 +}  // namespace v8
 diff --git a/src/objects/js-region.h b/src/objects/js-region.h
 new file mode 100644
-index 00000000..563918b3
+index 00000000..34a8fcca
 --- /dev/null
 +++ b/src/objects/js-region.h
-@@ -0,0 +1,709 @@
+@@ -0,0 +1,726 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -13944,6 +14100,23 @@ index 00000000..563918b3
 +  static Maybe<PropertyAttributes> GetPropertyAttributes(LookupIterator* it);
 +  static Maybe<bool> SetProperty(LookupIterator* it, DirectHandle<Object> value,
 +                                 Maybe<ShouldThrow> should_throw);
++
++  // A map of objects of a sealed region whose values are all plain: none is a
++  // holder of a typed array, a function or a LocalRef. Such an object never
++  // changes, so optimized code reads it after the map check without checking
++  // the region or the value. Each shape has one such map next to its usual
++  // one, with the same keys; seal() gives it to the objects it can.
++  // The bit is new_target_is_base, which region maps don't use otherwise.
++  static inline bool IsSealedPlainMap(Tagged<Map> map);
++  static inline void MarkSealedPlainMap(Tagged<Map> map);
++  // Gives the objects of `region`, which was just sealed, their sealed plain
++  // map: those on its `pages`, in its `chunks` of common pages and among its
++  // listed `objects` there. They must be swept, and nothing may allocate
++  // meanwhile.
++  static void UseSealedPlainMaps(
++      Isolate* isolate, int region, const std::vector<NormalPage*>& pages,
++      const std::vector<std::pair<Address, Address>>& chunks,
++      const std::vector<Address>& objects);
 +
 +  // For inline caches: index of the named property in values(),
 +  // kArrayLengthIndex for `length` of an array, or kNotFound when the access
