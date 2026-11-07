@@ -854,6 +854,126 @@ index b8b0529d..07932026 100644
                async_generator_object);
  
    TailCallBuiltin(Builtin::kAsyncGeneratorResumeNext, context,
+diff --git a/src/builtins/builtins-collections-gen.cc b/src/builtins/builtins-collections-gen.cc
+index 58b4ee07..d747f604 100644
+--- a/src/builtins/builtins-collections-gen.cc
++++ b/src/builtins/builtins-collections-gen.cc
+@@ -1235,6 +1235,35 @@ void CollectionsBuiltinsAssembler::FindOrderedHashTableEntryForStringKey(
+       result, entry_found, not_found);
+ }
+ 
++template <typename CollectionType>
++void CollectionsBuiltinsAssembler::FindOrderedHashTableEntryForSharedStringKey(
++    TNode<CollectionType> table, TNode<String> key_tagged,
++    TNode<Uint32T> raw_hash_field, TVariable<IntPtrT>* result,
++    Label* entry_found, Label* not_found) {
++  const TNode<Uint32T> hash = DecodeWord32<Name::HashBits>(raw_hash_field);
++  const TNode<IntPtrT> key_length = LoadStringLengthAsWord(key_tagged);
++  *result = Signed(ChangeUint32ToWord(hash));
++  FindOrderedHashTableEntry<CollectionType>(
++      table, hash,
++      [&](TNode<Object> other_key, Label* if_same, Label* if_not_same) {
++        GotoIf(TaggedIsSmi(other_key), if_not_same);
++        GotoIfNot(IsString(CAST(other_key)), if_not_same);
++        const TNode<String> other = CAST(other_key);
++        // Equal contents give equal hash fields, unless the other one holds
++        // a forwarding index.
++        const TNode<Uint32T> other_hash_field = LoadNameRawHashField(other);
++        Label compare(this);
++        GotoIf(Word32Equal(other_hash_field, raw_hash_field), &compare);
++        Branch(IsSetWord32(other_hash_field, Name::kHashNotComputedMask),
++               &compare, if_not_same);
++        BIND(&compare);
++        BranchIfStringEqual(key_tagged, key_length, other,
++                            LoadStringLengthAsWord(other), if_same,
++                            if_not_same);
++      },
++      result, entry_found, not_found);
++}
++
+ template <typename CollectionType>
+ void CollectionsBuiltinsAssembler::FindOrderedHashTableEntryForHeapNumberKey(
+     TNode<CollectionType> table, TNode<HeapNumber> key_heap_number,
+@@ -2599,6 +2628,30 @@ void CollectionsBuiltinsAssembler::TryLookupOrderedHashTableIndex(
+ 
+     BIND(&if_not_thin);
+     {
++      // A shared string, such as a string of a region, does not become a
++      // ThinString when it is internalized (there is no shared string table),
++      // so internalizing it would search the string table on every lookup.
++      // Compare its contents with the keys instead, and internalize it only
++      // on a miss, since the caller may then add it to the table.
++      Label if_internalize(this), if_shared_not_found(this, Label::kDeferred);
++      GotoIfNot(IsSharedStringInstanceType(key_instance_type),
++                &if_internalize);
++      const TNode<Uint32T> raw_hash_field =
++          LoadNameRawHashField(CAST(key->value()));
++      GotoIf(IsSetWord32(raw_hash_field, Name::kHashNotComputedMask),
++             &if_internalize);
++      FindOrderedHashTableEntryForSharedStringKey<CollectionType>(
++          table, CAST(key->value()), raw_hash_field, result, if_entry_found,
++          &if_shared_not_found);
++
++      BIND(&if_shared_not_found);
++      {
++        *key = CAST(CallRuntime(Runtime::kInternalizeString,
++                                NoContextConstant(), key->value()));
++        Goto(if_not_found);
++      }
++
++      BIND(&if_internalize);
+       *key = CAST(CallRuntime(Runtime::kInternalizeString, NoContextConstant(),
+                               key->value()));
+       Goto(&if_unique);
+@@ -2711,13 +2764,14 @@ const TNode<OrderedHashMap> CollectionsBuiltinsAssembler::AddValueToKeyedGroup(
+       };
+ 
+   ApplyAtEntry<OrderedHashMap> store_at_existing_entry =
+-      [this, &key, value](const TNode<OrderedHashMap> table,
+-                          const TNode<IntPtrT> entry_start) {
++      [this, value](const TNode<OrderedHashMap> table,
++                    const TNode<IntPtrT> entry_start) {
+         TNode<ArrayList> array =
+             CAST(LoadValueFromOrderedHashMapEntry(table, entry_start));
+         TNode<ArrayList> new_array = ArrayListAdd(array, value);
+-        StoreKeyValueInOrderedHashMapEntry(table, key.value(), new_array,
+-                                           entry_start);
++        // Keep the key of the entry: a found shared string key is equal to it
++        // but is not internalized.
++        StoreValueInOrderedHashMapEntry(table, new_array, entry_start);
+       };
+ 
+   return AddToOrderedHashTable(groups, &key, grow, store_at_new_entry,
+diff --git a/src/builtins/builtins-collections-gen.h b/src/builtins/builtins-collections-gen.h
+index a23774e3..fa667ac1 100644
+--- a/src/builtins/builtins-collections-gen.h
++++ b/src/builtins/builtins-collections-gen.h
+@@ -327,6 +327,15 @@ class CollectionsBuiltinsAssembler : public BaseCollectionsAssembler {
+                                              Label* entry_found,
+                                              Label* not_found);
+ 
++  // Specialization for a shared string that is not internalized, such as a
++  // string of a region. The keys of the table are internalized, so it compares
++  // contents. {raw_hash_field} is the computed hash field of {key_tagged}.
++  template <typename CollectionType>
++  void FindOrderedHashTableEntryForSharedStringKey(
++      TNode<CollectionType> table, TNode<String> key_tagged,
++      TNode<Uint32T> raw_hash_field, TVariable<IntPtrT>* result,
++      Label* entry_found, Label* not_found);
++
+   // Specialization for bigints.
+   // The {result} variable will contain the entry index if the key was found,
+   // or the hash code otherwise.
+@@ -377,6 +386,9 @@ class CollectionsBuiltinsAssembler : public BaseCollectionsAssembler {
+       const ApplyAtEntry<CollectionType>& store_at_new_entry,
+       const ApplyAtEntry<CollectionType>& store_at_existing_entry);
+ 
++  // Normalizes {key} on the way: on {if_not_found} it is ready to be added to
++  // the table. On {if_entry_found} it may be a shared string that is equal to
++  // the key of the entry but not internalized, so do not store it there.
+   template <typename CollectionType>
+   void TryLookupOrderedHashTableIndex(const TNode<CollectionType> table,
+                                       TVariable<JSAny>* key,
 diff --git a/src/builtins/builtins-definitions.h b/src/builtins/builtins-definitions.h
 index 34cc7706..72d9d441 100644
 --- a/src/builtins/builtins-definitions.h
