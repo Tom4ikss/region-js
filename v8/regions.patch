@@ -277,7 +277,7 @@ index 00000000..8147b7f8
 +
 +#endif  // INCLUDE_V8_REGIONS_H_
 diff --git a/src/api/api.cc b/src/api/api.cc
-index d4db3562..bcdab90e 100644
+index d4db3562..43c8b012 100644
 --- a/src/api/api.cc
 +++ b/src/api/api.cc
 @@ -29,6 +29,7 @@
@@ -541,13 +541,13 @@ index d4db3562..bcdab90e 100644
    }
 -  i_isolate->isolate_data()->set_continuation_preserved_embedder_data(
 -      *Utils::OpenDirectHandle(*data));
-+  double task = i::RegionRegistry::TaskOfContinuation(
-+      i_isolate->isolate_data()->continuation_preserved_embedder_data());
-+  i::DirectHandle<i::Object> value = Utils::OpenDirectHandle(*data);
-+  if (!std::isnan(task)) {
-+    // The task of region code that runs now stays.
-+    value = i::RegionRegistry::NewContinuation(i_isolate, value, task);
-+  }
++  // The task and the region of region code that runs now stay.
++  i::DirectHandle<i::Object> value = i::RegionRegistry::WithEmbedderPart(
++      i_isolate,
++      i::direct_handle(
++          i_isolate->isolate_data()->continuation_preserved_embedder_data(),
++          i_isolate),
++      Utils::OpenDirectHandle(*data));
 +  i_isolate->isolate_data()->set_continuation_preserved_embedder_data(*value);
  #endif  // V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA
  }
@@ -1096,10 +1096,56 @@ index 3de7f820..c3baaa59 100644
    {
      Label if_fast(this), check_next(this);
 diff --git a/src/builtins/builtins-microtask-queue-gen.cc b/src/builtins/builtins-microtask-queue-gen.cc
-index 725786e0..ea008333 100644
+index 725786e0..ad13733a 100644
 --- a/src/builtins/builtins-microtask-queue-gen.cc
 +++ b/src/builtins/builtins-microtask-queue-gen.cc
-@@ -497,11 +497,10 @@ void MicrotaskQueueBuiltinsAssembler::RunSingleMicrotask(
+@@ -63,6 +63,9 @@ class MicrotaskQueueBuiltinsAssembler : public CodeStubAssembler {
+ #ifdef V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA
+   void SetupContinuationPreservedEmbedderData(TNode<Microtask> microtask);
+   void ClearContinuationPreservedEmbedderData();
++  void CallIfContinuationRegion(TNode<Context> context,
++                                TNode<Microtask> microtask,
++                                Runtime::FunctionId function);
+ #endif
+ };
+ 
+@@ -179,6 +182,26 @@ void MicrotaskQueueBuiltinsAssembler::SetupContinuationPreservedEmbedderData(
+ void MicrotaskQueueBuiltinsAssembler::ClearContinuationPreservedEmbedderData() {
+   SetContinuationPreservedEmbedderData(UndefinedConstant());
+ }
++
++// Code of region.run() continues in its region: its microtasks have
++// [embedder data, task, Region, region id] as continuation data
++// (RegionRegistry::RegionOfContinuation), and the region is current while
++// they run.
++void MicrotaskQueueBuiltinsAssembler::CallIfContinuationRegion(
++    TNode<Context> context, TNode<Microtask> microtask,
++    Runtime::FunctionId function) {
++  TNode<Object> data = LoadObjectField(
++      microtask, offsetof(Microtask, continuation_preserved_embedder_data_));
++  Label done(this);
++  GotoIf(TaggedIsSmi(data), &done);
++  GotoIfNot(IsFixedArray(CAST(data)), &done);
++  GotoIfNot(
++      IntPtrEqual(LoadFixedArrayBaseLength(CAST(data)), IntPtrConstant(4)),
++      &done);
++  CallRuntime(function, context, data);
++  Goto(&done);
++  BIND(&done);
++}
+ #endif  // V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA
+ 
+ void MicrotaskQueueBuiltinsAssembler::RunSingleMicrotask(
+@@ -191,6 +214,8 @@ void MicrotaskQueueBuiltinsAssembler::RunSingleMicrotask(
+ 
+ #ifdef V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA
+   SetupContinuationPreservedEmbedderData(microtask);
++  CallIfContinuationRegion(current_context, microtask,
++                           Runtime::kEnterContinuationRegion);
+ #endif  // V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA
+ 
+   TNode<Map> microtask_map = LoadMap(microtask);
+@@ -497,11 +522,10 @@ void MicrotaskQueueBuiltinsAssembler::RunSingleMicrotask(
      BIND(&kind_async_function_await);
      {
        ScopedExceptionHandler handler(this, &if_exception, &var_exception);
@@ -1115,6 +1161,15 @@ index 725786e0..ea008333 100644
      }
      Goto(&done);
  
+@@ -523,6 +547,8 @@ void MicrotaskQueueBuiltinsAssembler::RunSingleMicrotask(
+   BIND(&done);
+   {
+ #ifdef V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA
++    CallIfContinuationRegion(current_context, microtask,
++                             Runtime::kLeaveContinuationRegion);
+     ClearContinuationPreservedEmbedderData();
+ #endif  // V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA
+   }
 diff --git a/src/builtins/builtins-object.cc b/src/builtins/builtins-object.cc
 index 7677d9c3..fc762f96 100644
 --- a/src/builtins/builtins-object.cc
@@ -1671,7 +1726,7 @@ index 36439464..29842b91 100644
      case Builtin::kInterpreterEntryTrampolineForProfiling:
      // Tiering builtins are set directly into the dispatch table and never
 diff --git a/src/builtins/promise-misc.tq b/src/builtins/promise-misc.tq
-index de8293f7..d1bc1b6a 100644
+index de8293f7..4e435104 100644
 --- a/src/builtins/promise-misc.tq
 +++ b/src/builtins/promise-misc.tq
 @@ -463,7 +463,12 @@ transitioning javascript builtin GetContinuationPreservedEmbedderData(
@@ -1680,25 +1735,29 @@ index de8293f7..d1bc1b6a 100644
    // something that can be exposed to script.
 -  const data = macros::GetContinuationPreservedEmbedderData();
 +  let data = macros::GetContinuationPreservedEmbedderData();
-+  // In a region task, [embedder data, task] (RegionRegistry::
-+  // TaskOfContinuation).
++  // In a region task or region.run(), [embedder data, task] or [embedder
++  // data, task, Region, region id] (RegionRegistry::TaskOfContinuation).
 +  if (Is<FixedArray>(data)) {
 +    data = UnsafeCast<FixedArray>(data).objects[0];
 +  }
    if (!Is<JSAny>(data)) {
      return Undefined;
    }
-@@ -473,6 +478,15 @@ transitioning javascript builtin GetContinuationPreservedEmbedderData(
+@@ -473,6 +478,19 @@ transitioning javascript builtin GetContinuationPreservedEmbedderData(
  @if(V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA)
  transitioning javascript builtin SetContinuationPreservedEmbedderData(
      js-implicit context: Context, receiver: JSAny)(data: Object): Undefined {
 +  const current = macros::GetContinuationPreservedEmbedderData();
 +  if (Is<FixedArray>(current)) {
-+    // The region task stays.
-+    const pair = AllocateZeroedFixedArray(2);
-+    pair.objects[0] = data;
-+    pair.objects[1] = UnsafeCast<FixedArray>(current).objects[1];
-+    macros::SetContinuationPreservedEmbedderData(pair);
++    // The region task and region stay.
++    const old = UnsafeCast<FixedArray>(current);
++    const length = Convert<intptr>(old.length);
++    const copy = AllocateZeroedFixedArray(length);
++    for (let i: intptr = 1; i < length; i++) {
++      copy.objects[i] = old.objects[i];
++    }
++    copy.objects[0] = data;
++    macros::SetContinuationPreservedEmbedderData(copy);
 +    return Undefined;
 +  }
    macros::SetContinuationPreservedEmbedderData(data);
@@ -9447,10 +9506,10 @@ index 00000000..bb663750
 +#endif  // V8_OBJECTS_JS_REGION_INL_H_
 diff --git a/src/objects/js-region.cc b/src/objects/js-region.cc
 new file mode 100644
-index 00000000..a7995496
+index 00000000..0d28673e
 --- /dev/null
 +++ b/src/objects/js-region.cc
-@@ -0,0 +1,5129 @@
+@@ -0,0 +1,5199 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -10751,30 +10810,100 @@ index 00000000..a7995496
 +  isolate->set_region_task_aborted(aborted);
 +}
 +
++namespace {
++
++// [embedder data, task, Region, region id]; see TaskOfContinuation().
++constexpr int kContinuationEmbedder = 0;
++constexpr int kContinuationTask = 1;
++constexpr int kContinuationHolder = 2;
++constexpr int kContinuationRegion = 3;
++
++bool IsContinuation(Tagged<Object> data) {
++  if (!IsFixedArray(data)) return false;
++  uint32_t length = Cast<FixedArray>(data)->ulength().value();
++  return length == 2 || length == 4;
++}
++
++DirectHandle<Object> NewContinuationOf(Isolate* isolate,
++                                       DirectHandle<Object> embedder,
++                                       double task,
++                                       DirectHandle<Object> holder,
++                                       int region) {
++  if (region < 0 && std::isnan(task)) return embedder;
++  Factory* factory = isolate->factory();
++  DirectHandle<Object> task_value =
++      std::isnan(task) ? DirectHandle<Object>(factory->undefined_value())
++                       : DirectHandle<Object>(factory->NewNumber(task));
++  DirectHandle<FixedArray> data = factory->NewFixedArray(region < 0 ? 2 : 4);
++  data->set(kContinuationEmbedder, *embedder);
++  data->set(kContinuationTask, *task_value);
++  if (region >= 0) {
++    data->set(kContinuationHolder, *holder);
++    data->set(kContinuationRegion, Smi::FromInt(region));
++  }
++  return data;
++}
++
++}  // namespace
++
 +// static
 +double RegionRegistry::TaskOfContinuation(Tagged<Object> data) {
-+  if (!IsFixedArray(data)) return std::numeric_limits<double>::quiet_NaN();
-+  Tagged<FixedArray> pair = Cast<FixedArray>(data);
-+  if (pair->ulength().value() != 2 || !IsNumber(pair->get(1))) {
-+    return std::numeric_limits<double>::quiet_NaN();
++  if (!IsContinuation(data)) return std::numeric_limits<double>::quiet_NaN();
++  Tagged<Object> task = Cast<FixedArray>(data)->get(kContinuationTask);
++  if (!IsNumber(task)) return std::numeric_limits<double>::quiet_NaN();
++  return Object::NumberValue(task);
++}
++
++// static
++int RegionRegistry::RegionOfContinuation(Tagged<Object> data) {
++  if (!IsContinuation(data) ||
++      Cast<FixedArray>(data)->ulength().value() != 4) {
++    return -1;
 +  }
-+  return Object::NumberValue(pair->get(1));
++  return Smi::ToInt(Cast<FixedArray>(data)->get(kContinuationRegion));
 +}
 +
 +// static
 +Tagged<Object> RegionRegistry::EmbedderPartOfContinuation(Tagged<Object> data) {
-+  if (std::isnan(TaskOfContinuation(data))) return data;
-+  return Cast<FixedArray>(data)->get(0);
++  if (!IsContinuation(data)) return data;
++  return Cast<FixedArray>(data)->get(kContinuationEmbedder);
 +}
 +
 +// static
-+DirectHandle<Object> RegionRegistry::NewContinuation(
-+    Isolate* isolate, DirectHandle<Object> embedder, double task) {
-+  if (std::isnan(task)) return embedder;
-+  DirectHandle<FixedArray> pair = isolate->factory()->NewFixedArray(2);
-+  pair->set(0, *embedder);
-+  pair->set(1, *isolate->factory()->NewNumber(task));
-+  return pair;
++DirectHandle<Object> RegionRegistry::WithEmbedderPart(
++    Isolate* isolate, DirectHandle<Object> data,
++    DirectHandle<Object> embedder) {
++  int region = RegionOfContinuation(*data);
++  DirectHandle<Object> holder =
++      region < 0 ? DirectHandle<Object>(isolate->factory()->undefined_value())
++                 : direct_handle(Cast<FixedArray>(*data)->get(kContinuationHolder),
++                                 isolate);
++  return NewContinuationOf(isolate, embedder, TaskOfContinuation(*data),
++                           holder, region);
++}
++
++// static
++DirectHandle<Object> RegionRegistry::WithTask(Isolate* isolate,
++                                              DirectHandle<Object> data,
++                                              double task) {
++  int region = RegionOfContinuation(*data);
++  DirectHandle<Object> holder =
++      region < 0 ? DirectHandle<Object>(isolate->factory()->undefined_value())
++                 : direct_handle(Cast<FixedArray>(*data)->get(kContinuationHolder),
++                                 isolate);
++  return NewContinuationOf(
++      isolate, direct_handle(EmbedderPartOfContinuation(*data), isolate), task,
++      holder, region);
++}
++
++// static
++DirectHandle<Object> RegionRegistry::WithRegion(Isolate* isolate,
++                                                DirectHandle<Object> data,
++                                                DirectHandle<Object> holder,
++                                                int region) {
++  return NewContinuationOf(
++      isolate, direct_handle(EmbedderPartOfContinuation(*data), isolate),
++      TaskOfContinuation(*data), holder, region);
 +}
 +
 +// static
@@ -14582,10 +14711,10 @@ index 00000000..a7995496
 +}  // namespace v8
 diff --git a/src/objects/js-region.h b/src/objects/js-region.h
 new file mode 100644
-index 00000000..3cfe015d
+index 00000000..8b4b66fe
 --- /dev/null
 +++ b/src/objects/js-region.h
-@@ -0,0 +1,816 @@
+@@ -0,0 +1,829 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -14693,15 +14822,28 @@ index 00000000..3cfe015d
 +  static double ShieldedTask(double data);
 +  static void SetHasAbortedTasks(Isolate* isolate, bool aborted);
 +  // The task shares the continuation data with the embedder, which keeps its
-+  // own there too (Node.js its AsyncContextFrame): while task code runs, the
-+  // data is a FixedArray [embedder data, task]. The API and the extras
-+  // binding give the embedder only its part. NaN for no task.
++  // own there too (Node.js its AsyncContextFrame): while task code or code of
++  // region.run() runs, the data is a FixedArray [embedder data, task] or
++  // [embedder data, task, Region, region id], the task undefined if there is
++  // none. The API and the extras binding give the embedder only its part and
++  // keep ours when it sets its own. NaN for no task.
 +  static double TaskOfContinuation(Tagged<Object> data);
++  // The region code of region.run() continues in, through its awaits and
++  // the promise callbacks it adds: current while their microtasks run. The
++  // Region object keeps the id. -1 for none.
++  static int RegionOfContinuation(Tagged<Object> data);
 +  static Tagged<Object> EmbedderPartOfContinuation(Tagged<Object> data);
-+  // Continuation data with `embedder` and `task`, which may be NaN.
-+  static DirectHandle<Object> NewContinuation(Isolate* isolate,
-+                                              DirectHandle<Object> embedder,
-+                                              double task);
++  // `data` with another embedder part, task (NaN for none) or region
++  // (undefined and -1 for none), the rest kept.
++  static DirectHandle<Object> WithEmbedderPart(Isolate* isolate,
++                                               DirectHandle<Object> data,
++                                               DirectHandle<Object> embedder);
++  static DirectHandle<Object> WithTask(Isolate* isolate,
++                                       DirectHandle<Object> data, double task);
++  static DirectHandle<Object> WithRegion(Isolate* isolate,
++                                         DirectHandle<Object> data,
++                                         DirectHandle<Object> holder,
++                                         int region);
 +  // Undefined, or the error for an await that resumes now.
 +  static DirectHandle<Object> AwaitAbortError(Isolate* isolate);
 +  // The awaits of `task` that wait for a promise that is still pending
@@ -18343,10 +18485,10 @@ index 00000000..7a176531
 +#endif  // V8_REGIONS_REGIONS_CHANNEL_H_
 diff --git a/src/regions/regions-globals.cc b/src/regions/regions-globals.cc
 new file mode 100644
-index 00000000..9f529862
+index 00000000..4ae4e927
 --- /dev/null
 +++ b/src/regions/regions-globals.cc
-@@ -0,0 +1,1845 @@
+@@ -0,0 +1,1931 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -18703,11 +18845,8 @@ index 00000000..9f529862
 +    double task = info[0]->IsNumber() ? info[0].As<Number>()->Value()
 +                                      : std::numeric_limits<double>::quiet_NaN();
 +    i_isolate->isolate_data()->set_continuation_preserved_embedder_data(
-+        *i::RegionRegistry::NewContinuation(
-+            i_isolate,
-+            i::direct_handle(i::RegionRegistry::EmbedderPartOfContinuation(data),
-+                             i_isolate),
-+            task));
++        *i::RegionRegistry::WithTask(i_isolate, i::direct_handle(data, i_isolate),
++                                     task));
 +    return;
 +  }
 +  double task = i::RegionRegistry::TaskOfContinuation(data);
@@ -19979,6 +20118,87 @@ index 00000000..9f529862
 +// arrays whose ArrayBuffer is in the transfer array move without copying and
 +// the buffers are detached; `true` transfers every buffer (used by spawn for
 +// results that nothing else refers to).
++namespace {
++
++// The second argument of region.run(): a list of ArrayBuffers whose bytes go
++// to the region, or true for every one the result refers to.
++bool ReadTransfer(Isolate* isolate, Local<Context> context, Local<Value> option,
++                  i::DirectHandleVector<i::JSArrayBuffer>* transfer,
++                  bool* transfer_all) {
++  *transfer_all = option->IsTrue();
++  if (!option->IsArray()) return true;
++  Local<Array> list = option.As<Array>();
++  for (uint32_t i = 0; i < list->Length(); i++) {
++    Local<Value> item;
++    if (!list->Get(context, i).ToLocal(&item)) return false;
++    if (!item->IsArrayBuffer()) {
++      ThrowError(isolate, "region.run() transfer list must contain ArrayBuffers");
++      return false;
++    }
++    transfer->push_back(
++        i::Cast<i::JSArrayBuffer>(Utils::OpenDirectHandle(*item)));
++  }
++  return true;
++}
++
++// What region.run() gives for `result`: it, with what it refers to outside
++// the region copied into the region.
++MaybeLocal<Value> ResultInRegion(Isolate* isolate, int region,
++                                 Local<Value> result,
++                                 i::DirectHandleVector<i::JSArrayBuffer>* transfer,
++                                 bool transfer_all) {
++  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
++  i::DirectHandle<i::Object> evacuated;
++  if (!i::JSRegionObject::Evacuate(i_isolate, region,
++                                   Utils::OpenDirectHandle(*result), transfer,
++                                   transfer_all)
++           .ToHandle(&evacuated)) {
++    return {};
++  }
++  i::Handle<i::Object> value;
++  if (!i::JSRegionObject::ToJSValue(i_isolate,
++                                    i::indirect_handle(evacuated, i_isolate))
++           .ToHandle(&value)) {
++    return {};
++  }
++  return Utils::ToLocal(value);
++}
++
++// The promise of an async region.run() callback fulfilled: its value goes
++// into the region. Data: [Region, transfer option].
++void RunFulfilled(const v8::FunctionCallbackInfo<v8::Value>& info) {
++  Isolate* isolate = info.GetIsolate();
++  Local<Context> context = isolate->GetCurrentContext();
++  Local<Array> data = info.DataV2().As<Array>();
++  Local<Value> holder;
++  Local<Value> option;
++  if (!data->Get(context, 0).ToLocal(&holder) ||
++      !data->Get(context, 1).ToLocal(&option)) {
++    return;
++  }
++  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
++  i::DirectHandleVector<i::JSArrayBuffer> transfer(i_isolate);
++  bool transfer_all;
++  if (!ReadTransfer(isolate, context, option, &transfer, &transfer_all)) return;
++  int region =
++      holder.As<Object>()->GetInternalField(0).As<Int32>()->Value();
++  Local<Value> result;
++  if (ResultInRegion(isolate, region,
++                     info.Length() > 0 ? info[0] : Undefined(isolate).As<Value>(),
++                     &transfer, transfer_all)
++          .ToLocal(&result)) {
++    info.GetReturnValue().Set(result);
++  }
++}
++
++}  // namespace
++
++// region.run(fn[, transfer]): calls fn with the region current, so that {}
++// and [] of 'use region' code and #{} create their objects there, and gives
++// its result with what it refers to outside the region copied into the
++// region. The region stays current in what fn continues as: after its
++// awaits and in the promise callbacks it adds. For an async fn, run() gives
++// a promise of the result.
 +void RegionRun(const v8::FunctionCallbackInfo<v8::Value>& info) {
 +  DCHECK(i::ValidateCallbackInfo(info));
 +  Isolate* isolate = info.GetIsolate();
@@ -19988,42 +20208,50 @@ index 00000000..9f529862
 +  }
 +  Local<Context> context = isolate->GetCurrentContext();
 +  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
++  Local<Value> option =
++      info.Length() > 1 ? info[1] : Undefined(isolate).As<Value>();
 +  i::DirectHandleVector<i::JSArrayBuffer> transfer(i_isolate);
-+  bool transfer_all = info.Length() > 1 && info[1]->IsTrue();
-+  if (info.Length() > 1 && info[1]->IsArray()) {
-+    Local<Array> list = info[1].As<Array>();
-+    for (uint32_t i = 0; i < list->Length(); i++) {
-+      Local<Value> item;
-+      if (!list->Get(context, i).ToLocal(&item)) return;
-+      if (!item->IsArrayBuffer()) {
-+        ThrowError(isolate, "region.run() transfer list must contain ArrayBuffers");
-+        return;
-+      }
-+      transfer.push_back(
-+          i::Cast<i::JSArrayBuffer>(Utils::OpenDirectHandle(*item)));
-+    }
-+  }
-+  // Inside fn the region is the current one, for #{} and #[].
++  bool transfer_all;
++  if (!ReadTransfer(isolate, context, option, &transfer, &transfer_all)) return;
++
 +  int region = RegionIdOf(info);
++  // The continuation data carries the region into the microtasks of what fn
++  // starts; the Region object keeps the id until they have run.
++  i::DirectHandle<i::Object> outer_data(
++      i_isolate->isolate_data()->continuation_preserved_embedder_data(),
++      i_isolate);
++  i_isolate->isolate_data()->set_continuation_preserved_embedder_data(
++      *i::RegionRegistry::WithRegion(i_isolate, outer_data,
++                                     Utils::OpenDirectHandle(*info.This()),
++                                     region));
 +  i::JSRegionObject::PushCurrent(i_isolate, region);
 +  Local<Value> result;
 +  bool called = info[0].As<Function>()
 +                    ->Call(context, Undefined(isolate), 0, nullptr)
 +                    .ToLocal(&result);
 +  i::JSRegionObject::PopCurrent(i_isolate, region);
++  i_isolate->isolate_data()->set_continuation_preserved_embedder_data(
++      *outer_data);
 +  if (!called) return;
-+  i::DirectHandle<i::Object> evacuated;
-+  if (!i::JSRegionObject::Evacuate(i_isolate, RegionIdOf(info),
-+                                   Utils::OpenDirectHandle(*result), &transfer,
-+                                   transfer_all)
-+           .ToHandle(&evacuated)) {
++
++  if (result->IsPromise()) {
++    Local<Value> elements[] = {info.This(), option};
++    Local<Function> on_fulfilled;
++    Local<Promise> chained;
++    if (!Function::New(context, RunFulfilled,
++                       Array::New(isolate, elements, 2), 1,
++                       ConstructorBehavior::kThrow)
++             .ToLocal(&on_fulfilled) ||
++        !result.As<Promise>()->Then(context, on_fulfilled).ToLocal(&chained)) {
++      return;
++    }
++    info.GetReturnValue().Set(chained);
 +    return;
 +  }
-+  i::Handle<i::Object> value;
-+  if (i::JSRegionObject::ToJSValue(i_isolate,
-+                                   i::indirect_handle(evacuated, i_isolate))
-+          .ToHandle(&value)) {
-+    info.GetReturnValue().Set(Utils::ToLocal(value));
++  Local<Value> value;
++  if (ResultInRegion(isolate, region, result, &transfer, transfer_all)
++          .ToLocal(&value)) {
++    info.GetReturnValue().Set(value);
 +  }
 +}
 +
@@ -24015,7 +24243,7 @@ index 2ab60bab..433e7430 100644
          result = JSObject::GetPropertyAttributesWithInterceptor(&it);
          if (result.IsNothing()) return MaybeDirectHandle<Object>();
 diff --git a/src/runtime/runtime-object.cc b/src/runtime/runtime-object.cc
-index 6030578e..b28c2241 100644
+index 6030578e..7c24ac2d 100644
 --- a/src/runtime/runtime-object.cc
 +++ b/src/runtime/runtime-object.cc
 @@ -3,6 +3,7 @@
@@ -24038,7 +24266,7 @@ index 6030578e..b28c2241 100644
  #include "src/objects/property-descriptor-object.h"
  #include "src/objects/property-descriptor.h"
  #include "src/objects/property-details.h"
-@@ -87,6 +91,167 @@ Maybe<bool> Runtime::DeleteObjectProperty(Isolate* isolate,
+@@ -87,6 +91,183 @@ Maybe<bool> Runtime::DeleteObjectProperty(Isolate* isolate,
  }
  
  // https://tc39.es/ecma262/#sec-object.keys
@@ -24075,6 +24303,22 @@ index 6030578e..b28c2241 100644
 +  if (region < 0) return *value;
 +  RETURN_RESULT_OR_FAILURE(isolate,
 +                           JSRegionObject::Evacuate(isolate, region, value));
++}
++
++// The microtask runner: a microtask of code of region.run() runs with the
++// region current (RegionRegistry::RegionOfContinuation).
++RUNTIME_FUNCTION(Runtime_EnterContinuationRegion) {
++  DCHECK_EQ(1, args.length());
++  int region = RegionRegistry::RegionOfContinuation(args[0]);
++  if (region >= 0) JSRegionObject::PushCurrent(isolate, region);
++  return ReadOnlyRoots(isolate).undefined_value();
++}
++
++RUNTIME_FUNCTION(Runtime_LeaveContinuationRegion) {
++  DCHECK_EQ(1, args.length());
++  int region = RegionRegistry::RegionOfContinuation(args[0]);
++  if (region >= 0) JSRegionObject::PopCurrent(isolate, region);
++  return ReadOnlyRoots(isolate).undefined_value();
 +}
 +
 +// See JSRegionObject::NewClassInstance.
@@ -24206,7 +24450,7 @@ index 6030578e..b28c2241 100644
  RUNTIME_FUNCTION(Runtime_ObjectKeys) {
    HandleScope scope(isolate);
    DirectHandle<Object> object = args.at(0);
-@@ -221,6 +386,7 @@ RUNTIME_FUNCTION(Runtime_HasOwnConstDataProperty) {
+@@ -221,6 +402,7 @@ RUNTIME_FUNCTION(Runtime_HasOwnConstDataProperty) {
        case LookupIterator::ACCESS_CHECK:
        case LookupIterator::JSPROXY:
        case LookupIterator::WASM_OBJECT:
@@ -24215,16 +24459,18 @@ index 6030578e..b28c2241 100644
        case LookupIterator::ACCESSOR:
        case LookupIterator::MODULE_NAMESPACE:
 diff --git a/src/runtime/runtime.h b/src/runtime/runtime.h
-index 8a1f8910..b890c840 100644
+index 8a1f8910..fabc42e9 100644
 --- a/src/runtime/runtime.h
 +++ b/src/runtime/runtime.h
-@@ -393,6 +393,23 @@ constexpr bool CanTriggerGC(T... properties) {
+@@ -393,6 +393,25 @@ constexpr bool CanTriggerGC(T... properties) {
    F(HasOwnConstDataProperty, 2, 1)                                     \
    F(ObjectIsExtensible, 1, 1)                                          \
    F(ObjectKeys, 1, 1)                                                  \
 +  F(CreateRegionObjectLiteral, -1 /* keys and values */, 1)            \
 +  F(CreateRegionArrayLiteral, -1 /* elements */, 1)                    \
 +  F(CopyIntoCurrentRegion, 1, 1)                                       \
++  F(EnterContinuationRegion, 1, 1)                                     \
++  F(LeaveContinuationRegion, 1, 1)                                     \
 +  F(NewRegionClassInstance, 1, 1)                                      \
 +  F(MakeRegionClass, 1, 1)                                             \
 +  F(ShareRegionLiteralValue, 2, 1)                                     \
