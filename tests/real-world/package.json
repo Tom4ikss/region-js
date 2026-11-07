@@ -1,0 +1,11 @@
+{
+  "name": "region-js-real-world-bench",
+  "private": true,
+  "description": "Real-world HTTP benchmark: Express, Fastify, node:http, uWebSockets.js, Bun, Go, Rust and regions",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^5.1.0",
+    "fastify": "^5.6.1",
+    "postgres": "^3.4.7"
+  }
+}
