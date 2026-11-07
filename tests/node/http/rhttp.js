@@ -61,7 +61,7 @@ async function serve({ port, threads, state }, app) {
       server.on('connection', () => { connections++; });
       await new Promise((resolve, reject) => {
         server.once('error', reject);
-        server.listen({ port, reusePort: true }, resolve);
+        server.listen({ port, host: '127.0.0.1', reusePort: true }, resolve);
       });
       await listening.send(index);
 

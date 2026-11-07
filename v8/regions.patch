@@ -1893,7 +1893,7 @@ index 818f63b6..60e9a35c 100644
    TNode<IntPtrT> TimesSystemPointerSize(TNode<IntPtrT> value) {
      return Signed(TimesSystemPointerSize(implicit_cast<TNode<WordT>>(value)));
 diff --git a/src/codegen/external-reference.cc b/src/codegen/external-reference.cc
-index b8aeff63..399cf068 100644
+index b8aeff63..4c7f919a 100644
 --- a/src/codegen/external-reference.cc
 +++ b/src/codegen/external-reference.cc
 @@ -37,6 +37,7 @@
@@ -1904,7 +1904,7 @@ index b8aeff63..399cf068 100644
  #include "src/objects/module.h"
  #include "src/objects/object-type.h"
  #include "src/objects/objects-inl.h"
-@@ -536,6 +537,55 @@ ExternalReference ExternalReference::force_slow_path(Isolate* isolate) {
+@@ -536,6 +537,60 @@ ExternalReference ExternalReference::force_slow_path(Isolate* isolate) {
    return ExternalReference(isolate->force_slow_path_address());
  }
  
@@ -1942,6 +1942,11 @@ index b8aeff63..399cf068 100644
 +  return ExternalReference(isolate->region_allocation_region_address());
 +}
 +
++ExternalReference ExternalReference::region_allocation_unaccounted_address(
++    Isolate* isolate) {
++  return ExternalReference(isolate->region_allocation_unaccounted_address());
++}
++
 +ExternalReference ExternalReference::region_task_aborted_address(
 +    Isolate* isolate) {
 +  return ExternalReference(isolate->region_task_aborted_address());
@@ -1960,7 +1965,7 @@ index b8aeff63..399cf068 100644
  FUNCTION_REFERENCE(new_deoptimizer_function, Deoptimizer::New)
  
  FUNCTION_REFERENCE(compute_output_frames_function,
-@@ -814,6 +864,22 @@ ExternalReference ExternalReference::address_of_builtin_subclassing_flag() {
+@@ -814,6 +869,22 @@ ExternalReference ExternalReference::address_of_builtin_subclassing_flag() {
    return ExternalReference(&v8_flags.builtin_subclassing);
  }
  
@@ -1984,10 +1989,10 @@ index b8aeff63..399cf068 100644
    return ExternalReference(&v8_flags.js_pr_3883);
  }
 diff --git a/src/codegen/external-reference.h b/src/codegen/external-reference.h
-index 8226ac48..8af47999 100644
+index 8226ac48..dce2b131 100644
 --- a/src/codegen/external-reference.h
 +++ b/src/codegen/external-reference.h
-@@ -32,6 +32,22 @@ enum class IsolateFieldId : uint8_t;
+@@ -32,6 +32,24 @@ enum class IsolateFieldId : uint8_t;
      "Address of the InterpreterEntryTrampoline instruction start")             \
    V(interpreter_dispatch_table_address, "Interpreter::dispatch_table_address") \
    V(force_slow_path, "Isolate::force_slow_path_address()")                     \
@@ -2003,6 +2008,8 @@ index 8226ac48..8af47999 100644
 +    "Isolate::region_allocation_info()->limit_address()")                      \
 +  V(region_allocation_region_address,                                          \
 +    "Isolate::region_allocation_region_address()")                             \
++  V(region_allocation_unaccounted_address,                                     \
++    "Isolate::region_allocation_unaccounted_address()")                        \
 +  V(region_task_aborted_address, "Isolate::region_task_aborted_address()")     \
 +  V(region_task_awaits_address, "Isolate::region_task_awaits_address()")       \
 +  V(region_task_awaits_limit_address,                                          \
@@ -2010,7 +2017,7 @@ index 8226ac48..8af47999 100644
    V(isolate_root, "Isolate::isolate_root()")                                   \
    V(address_of_jslimit, "StackGuard::address_of_jslimit()")                    \
    V(address_of_no_heap_write_interrupt_request,                                \
-@@ -81,6 +97,10 @@ enum class IsolateFieldId : uint8_t;
+@@ -81,6 +99,10 @@ enum class IsolateFieldId : uint8_t;
    V(abort_with_sandbox_violation, "abort_with_sandbox_violation")              \
    V(address_of_log_or_trace_osr, "v8_flags.log_or_trace_osr")                  \
    V(address_of_builtin_subclassing_flag, "v8_flags.builtin_subclassing")       \
@@ -2106,11 +2113,205 @@ index 8dae69c0..c17febaa 100644
    // We can inline property access to prototypes of all primitives, except
    // the special Oddball ones that have no wrapper counterparts (i.e. Null,
    // Undefined and TheHole).
+diff --git a/src/compiler/heap-refs.cc b/src/compiler/heap-refs.cc
+index 8ef2225a..f6de57a2 100644
+--- a/src/compiler/heap-refs.cc
++++ b/src/compiler/heap-refs.cc
+@@ -2818,6 +2818,15 @@ bool DataHandlerRef::IsFastProxyHandler() const {
+   return data_field_count() == LoadHandler::kProxyDataFieldCount;
+ }
+ 
++bool DataHandlerRef::IsRegionPrototypeConstantHandler() const {
++  Tagged<UnionOf<Smi, Code>> smi_handler = object()->smi_handler();
++  if (!smi_handler.IsSmi() || data_field_count() != 1) return false;
++  int config = Cast<Smi>(smi_handler).value();
++  return LoadHandler::KindBits::decode(config) ==
++             LoadHandler::Kind::kConstantFromPrototype &&
++         LoadHandler::DoAccessCheckOnLookupStartObjectBits::decode(config);
++}
++
+ #undef BIMODAL_ACCESSOR
+ #undef BIMODAL_ACCESSOR_B
+ #undef BIMODAL_ACCESSOR_C
+diff --git a/src/compiler/heap-refs.h b/src/compiler/heap-refs.h
+index 23075681..d2291244 100644
+--- a/src/compiler/heap-refs.h
++++ b/src/compiler/heap-refs.h
+@@ -795,6 +795,9 @@ class DataHandlerRef : public HeapObjectRef {
+ 
+   int data_field_count() const;
+   bool IsFastProxyHandler() const;
++  // A load of a constant from the prototype of a region object (see
++  // LoadIC::ComputeRegionPrototypeHandler); data(broker, 1) is the constant.
++  bool IsRegionPrototypeConstantHandler() const;
+   OptionalObjectRef data(JSHeapBroker* broker, int index) const;
+ };
+ 
+diff --git a/src/compiler/js-call-reducer.cc b/src/compiler/js-call-reducer.cc
+index 1ea643c7..adc23b7f 100644
+--- a/src/compiler/js-call-reducer.cc
++++ b/src/compiler/js-call-reducer.cc
+@@ -32,6 +32,8 @@
+ #include "src/compiler/simplified-operator.h"
+ #include "src/compiler/state-values-utils.h"
+ #include "src/compiler/type-cache.h"
++#include "src/ic/handler-configuration.h"
++#include "src/objects/js-region.h"
+ #include "src/compiler/use-info.h"
+ #include "src/flags/flags.h"
+ #include "src/ic/call-optimization.h"
+@@ -7477,6 +7479,14 @@ Reduction JSCallReducer::ReduceArrayIteratorPrototypeNext(Node* node) {
+   if (!inference.HaveMaps()) return NoChange();
+   ZoneRefSet<Map> const& iterated_object_maps = inference.GetMaps();
+ 
++  if (std::all_of(iterated_object_maps.begin(), iterated_object_maps.end(),
++                  [](MapRef map) {
++                    return map.instance_type() == JS_REGION_OBJECT_TYPE;
++                  })) {
++    return ReduceRegionArrayIteratorNext(node, &inference, iterator,
++                                         iterated_object, iteration_kind);
++  }
++
+   // Check that various {iterated_object_maps} have compatible elements kinds.
+   ElementsKind elements_kind = iterated_object_maps[0].elements_kind();
+   if (IsTypedArrayElementsKind(elements_kind)) {
+@@ -7701,6 +7711,116 @@ Reduction JSCallReducer::ReduceArrayIteratorPrototypeNext(Node* node) {
+   return Replace(value);
+ }
+ 
++// The next step of an array iterator over an array of a region, as
++// JSNativeContextSpecialization::ReduceRegionAccess reads an element in a
++// loop: the access check is a node of its own, which RedundancyElimination
++// keeps out of the loop, and anything the fast path can't read deoptimizes.
++// The deoptimization turns speculation off for this call, so the next
++// optimization leaves the call to the builtin.
++Reduction JSCallReducer::ReduceRegionArrayIteratorNext(
++    Node* node, MapInference* inference, Node* iterator, Node* iterated_object,
++    IterationKind iteration_kind) {
++  JSCallNode n(node);
++  CallParameters const& p = n.Parameters();
++  Node* context = n.context();
++  Effect effect = n.effect();
++  Control control = n.control();
++  if (iteration_kind == IterationKind::kEntries) return inference->NoChange();
++
++  inference->InsertMapChecks(jsgraph(), &effect, control, p.feedback());
++  effect = Effect{graph()->NewNode(
++      simplified()->CheckRegionAccess(false, p.feedback()), iterated_object,
++      effect, control)};
++  // Only arrays have no keys, and a region object never becomes an array or
++  // stops being one.
++  FieldAccess keys_access = {kTaggedBase,
++                             offsetof(JSRegionObject, keys_),
++                             MaybeHandle<Name>(),
++                             OptionalMapRef(),
++                             Type::Any(),
++                             MachineType::AnyTagged(),
++                             kNoWriteBarrier,
++                             "JSRegionObjectKeys"};
++  Node* keys = effect = graph()->NewNode(simplified()->LoadField(keys_access),
++                                         iterated_object, effect, control);
++  effect = graph()->NewNode(
++      simplified()->CheckIf(DeoptimizeReason::kRegionAccess, p.feedback()),
++      graph()->NewNode(simplified()->ReferenceEqual(), keys,
++                       jsgraph()->UndefinedConstant()),
++      effect, control);
++
++  FieldAccess index_access = AccessBuilder::ForJSArrayIteratorNextIndex();
++  index_access.type = TypeCache::Get()->kJSArrayLengthType;
++  Node* index = effect = graph()->NewNode(simplified()->LoadField(index_access),
++                                          iterator, effect, control);
++  // The length may change in the loop, as push() and stores past the end
++  // change it.
++  Node* length = effect = graph()->NewNode(
++      simplified()->LoadRegionField(LoadHandler::kRegionArrayLengthIndex,
++                                    false),
++      iterated_object, effect, control);
++  length = effect = graph()->NewNode(
++      common()->TypeGuard(TypeCache::Get()->kFixedArrayLengthType), length,
++      effect, control);
++
++  Node* check = graph()->NewNode(simplified()->NumberLessThan(), index, length);
++  Node* branch =
++      graph()->NewNode(common()->Branch(BranchHint::kNone), check, control);
++
++  Node* value_true;
++  Node* etrue = effect;
++  Node* if_true = graph()->NewNode(common()->IfTrue(), branch);
++  {
++    if (iteration_kind == IterationKind::kKeys) {
++      value_true = index;
++    } else {
++      DCHECK_EQ(IterationKind::kValues, iteration_kind);
++      // The hole: a typed array or a function of the region, which the
++      // builtin reads as a local view or copy.
++      value_true = etrue =
++          graph()->NewNode(simplified()->LoadRegionElement(false),
++                           iterated_object, index, etrue, if_true);
++      etrue = graph()->NewNode(
++          simplified()->CheckIf(DeoptimizeReason::kRegionAccess, p.feedback()),
++          graph()->NewNode(
++              simplified()->BooleanNot(),
++              graph()->NewNode(simplified()->ReferenceEqual(), value_true,
++                               jsgraph()->TheHoleConstant())),
++          etrue, if_true);
++      value_true = etrue =
++          graph()->NewNode(common()->TypeGuard(Type::NonInternal()),
++                           value_true, etrue, if_true);
++    }
++    Node* next_index = graph()->NewNode(simplified()->NumberAdd(), index,
++                                        jsgraph()->OneConstant());
++    etrue = graph()->NewNode(simplified()->StoreField(index_access), iterator,
++                             next_index, etrue, if_true);
++  }
++
++  Node* efalse = effect;
++  Node* if_false = graph()->NewNode(common()->IfFalse(), branch);
++  {
++    // As for other arrays: the index never passes the length check again.
++    Node* end_index = jsgraph()->ConstantNoHole(index_access.type.Max());
++    efalse = graph()->NewNode(simplified()->StoreField(index_access), iterator,
++                              end_index, efalse, if_false);
++  }
++
++  control = graph()->NewNode(common()->Merge(2), if_true, if_false);
++  effect = graph()->NewNode(common()->EffectPhi(2), etrue, efalse, control);
++  Node* value =
++      graph()->NewNode(common()->Phi(MachineRepresentation::kTagged, 2),
++                       value_true, jsgraph()->UndefinedConstant(), control);
++  Node* done =
++      graph()->NewNode(common()->Phi(MachineRepresentation::kTagged, 2),
++                       jsgraph()->FalseConstant(), jsgraph()->TrueConstant(),
++                       control);
++  value = effect = graph()->NewNode(javascript()->CreateIterResultObject(),
++                                    value, done, context, effect);
++  ReplaceWithValue(node, value, effect, control);
++  return Replace(value);
++}
++
+ // ES6 section 21.1.3.2 String.prototype.charCodeAt ( pos )
+ Reduction JSCallReducer::ReduceStringPrototypeStringCharCodeAt(Node* node) {
+   JSCallNode n(node);
+diff --git a/src/compiler/js-call-reducer.h b/src/compiler/js-call-reducer.h
+index 0d4d10d6..be8f5e1d 100644
+--- a/src/compiler/js-call-reducer.h
++++ b/src/compiler/js-call-reducer.h
+@@ -137,6 +137,10 @@ class V8_EXPORT_PRIVATE JSCallReducer final : public AdvancedReducer {
+   Reduction ReduceArrayIterator(Node* node, ArrayIteratorKind array_kind,
+                                 IterationKind iteration_kind);
+   Reduction ReduceArrayIteratorPrototypeNext(Node* node);
++  Reduction ReduceRegionArrayIteratorNext(Node* node, MapInference* inference,
++                                          Node* iterator,
++                                          Node* iterated_object,
++                                          IterationKind iteration_kind);
+   Reduction ReduceGeneratorPrototypeNext(Node* node);
+   Reduction ReduceFastArrayIteratorNext(InstanceType type, Node* node,
+                                         IterationKind kind);
 diff --git a/src/compiler/js-native-context-specialization.cc b/src/compiler/js-native-context-specialization.cc
-index 468b715c..d1017bc9 100644
+index 468b715c..db95ef21 100644
 --- a/src/compiler/js-native-context-specialization.cc
 +++ b/src/compiler/js-native-context-specialization.cc
-@@ -38,7 +38,6 @@
+@@ -38,10 +38,10 @@
  #include "src/heap/heap-layout-inl.h"
  #include "src/heap/heap-write-barrier-inl.h"
  #include "src/ic/handler-configuration-inl.h"
@@ -2118,7 +2319,11 @@ index 468b715c..d1017bc9 100644
  #include "src/objects/elements-kind.h"
  #include "src/objects/feedback-vector.h"
  #include "src/objects/heap-number.h"
-@@ -79,6 +78,7 @@ JSNativeContextSpecialization::JSNativeContextSpecialization(
++#include "src/objects/js-region.h"
+ #include "src/objects/property-details.h"
+ #include "src/objects/string.h"
+ #include "src/objects/tagged-field.h"
+@@ -79,6 +79,7 @@ JSNativeContextSpecialization::JSNativeContextSpecialization(
            broker->target_native_context().global_object(broker).object()),
        global_proxy_(
            broker->target_native_context().global_proxy_object(broker).object()),
@@ -2126,7 +2331,7 @@ index 468b715c..d1017bc9 100644
        zone_(zone),
        shared_zone_(shared_zone),
        type_cache_(TypeCache::Get()),
-@@ -1373,6 +1373,327 @@ Reduction JSNativeContextSpecialization::ReduceMegaDOMPropertyAccess(
+@@ -1373,6 +1374,444 @@ Reduction JSNativeContextSpecialization::ReduceMegaDOMPropertyAccess(
    return Replace(value);
  }
  
@@ -2153,6 +2358,13 @@ index 468b715c..d1017bc9 100644
 +      !IsRegionAccessNode(node) || region_fallbacks_.contains(node) ||
 +      std::none_of(maps.begin(), maps.end(), IsRegionObjectMap)) {
 +    return NoChange();
++  }
++  if (access_mode == AccessMode::kLoad) {
++    if (Reduction reduction =
++            ReduceRegionPrototypeLoad(node, feedback, maps, key);
++        reduction.Changed()) {
++      return reduction;
++    }
 +  }
 +  // The position in values() comes from the inline cache handlers. A region
 +  // map stands for one set of keys, so every object with the map has the
@@ -2199,6 +2411,116 @@ index 468b715c..d1017bc9 100644
 +  }
 +  return ReduceRegionAccess(node, maps, index, nullptr, value,
 +                            access_mode == AccessMode::kStore, effect, control);
++}
++
++Reduction JSNativeContextSpecialization::ReduceRegionPrototypeLoad(
++    Node* node, NamedAccessFeedback const& feedback,
++    ZoneVector<MapRef> const& maps, Node* key) {
++  // What a region object does not have comes from Array.prototype or
++  // Object.prototype of the native context, and the feedback caches a
++  // constant found there (see LoadIC::ComputeRegionPrototypeHandler).
++  OptionalHeapObjectRef constant;
++  for (MapRef map : maps) {
++    if (!IsRegionObjectMap(map)) return NoChange();
++    OptionalObjectRef handler;
++    for (const auto [m, h] : base::zip(feedback.maps(), feedback.handlers())) {
++      if (m.equals(map)) {
++        handler = h;
++        break;
++      }
++    }
++    if (!handler.has_value() || !handler->IsDataHandler() ||
++        !handler->AsDataHandler().IsRegionPrototypeConstantHandler()) {
++      return NoChange();
++    }
++    OptionalObjectRef data = handler->AsDataHandler().data(broker(), 1);
++    if (!data.has_value() || !data->IsHeapObject()) return NoChange();
++    if (constant.has_value() && !constant->equals(data->AsHeapObject())) {
++      return NoChange();
++    }
++    constant = data->AsHeapObject();
++  }
++  if (!constant.has_value()) return NoChange();
++
++  Node* receiver = NodeProperties::GetValueInput(node, 0);
++  Effect effect{NodeProperties::GetEffectInput(node)};
++  Control control{NodeProperties::GetControlInput(node)};
++  if (key != nullptr) {
++    effect = BuildCheckEqualsName(feedback.name(), key, effect, &control);
++  }
++  PropertyAccessBuilder access_builder(jsgraph(), broker());
++  access_builder.BuildCheckMaps(receiver, &effect, control, maps);
++
++  // Outside a loop that allows speculation the load stays generic, as it
++  // checks the access to the region; the map check lets later reductions
++  // know the maps of {receiver}, such as those of the array iterator.
++  FeedbackSource loop_feedback = RegionLoopFeedback(control);
++  if (!loop_feedback.IsValid()) {
++    region_fallbacks_.insert(node);
++    NodeProperties::ReplaceEffectInput(node, effect);
++    NodeProperties::ReplaceControlInput(node, control);
++    return Changed(node);
++  }
++
++  // The constant must still be what the prototype chain of local arrays or
++  // local objects has: the one of the region object, which has keys unless it
++  // is an array.
++  MapRef local_maps[] = {
++      native_context().array_function(broker()).initial_map(broker()),
++      native_context().object_function(broker()).initial_map(broker())};
++  bool matches[2] = {false, false};
++  for (int i = 0; i < 2; i++) {
++    PropertyAccessInfo access_info = broker()->GetPropertyAccessInfo(
++        local_maps[i], feedback.name(), AccessMode::kLoad);
++    if (!access_info.IsFastDataConstant() ||
++        !access_info.holder().has_value() ||
++        access_info.field_representation().IsDouble()) {
++      continue;
++    }
++    OptionalObjectRef value =
++        access_info.holder()->GetOwnFastConstantDataProperty(
++            broker(), access_info.field_representation(),
++            access_info.field_index(), dependencies());
++    if (!value.has_value() || !value->equals(*constant)) continue;
++    access_info.RecordDependencies(dependencies());
++    dependencies()->DependOnStablePrototypeChains(
++        access_info.lookup_start_object_maps(), kStartAtPrototype,
++        access_info.holder().value());
++    matches[i] = true;
++  }
++  if (!matches[0] && !matches[1]) {
++    region_fallbacks_.insert(node);
++    NodeProperties::ReplaceEffectInput(node, effect);
++    NodeProperties::ReplaceControlInput(node, control);
++    return Changed(node);
++  }
++
++  effect = Effect{graph()->NewNode(
++      simplified()->CheckRegionAccess(false, loop_feedback), receiver, effect,
++      control)};
++  if (matches[0] != matches[1]) {
++    FieldAccess keys_access = {kTaggedBase,
++                               offsetof(JSRegionObject, keys_),
++                               MaybeHandle<Name>(),
++                               OptionalMapRef(),
++                               Type::Any(),
++                               MachineType::AnyTagged(),
++                               kNoWriteBarrier,
++                               "JSRegionObjectKeys"};
++    Node* keys = effect = Effect{graph()->NewNode(
++        simplified()->LoadField(keys_access), receiver, effect, control)};
++    Node* same_kind = graph()->NewNode(simplified()->ReferenceEqual(), keys,
++                                       jsgraph()->UndefinedConstant());
++    if (matches[1]) {
++      same_kind = graph()->NewNode(simplified()->BooleanNot(), same_kind);
++    }
++    effect = Effect{graph()->NewNode(
++        simplified()->CheckIf(DeoptimizeReason::kRegionAccess, loop_feedback),
++        same_kind, effect, control)};
++  }
++  Node* value = jsgraph()->ConstantNoHole(*constant, broker());
++  ReplaceWithValue(node, value, effect, control);
++  return Replace(value);
 +}
 +
 +Reduction JSNativeContextSpecialization::ReduceRegionElementAccess(
@@ -2454,7 +2776,7 @@ index 468b715c..d1017bc9 100644
  Reduction JSNativeContextSpecialization::ReduceNamedAccess(
      Node* node, Node* value, NamedAccessFeedback const& feedback,
      AccessMode access_mode, FeedbackSource const& source, Node* key) {
-@@ -1445,6 +1766,12 @@ Reduction JSNativeContextSpecialization::ReduceNamedAccess(
+@@ -1445,6 +1884,12 @@ Reduction JSNativeContextSpecialization::ReduceNamedAccess(
      }
    }
  
@@ -2467,7 +2789,7 @@ index 468b715c..d1017bc9 100644
    ZoneVector<PropertyAccessInfo> access_infos(zone());
    {
      ZoneVector<PropertyAccessInfo> access_infos_for_feedback(zone());
-@@ -2300,6 +2627,18 @@ Reduction JSNativeContextSpecialization::ReduceElementAccess(
+@@ -2300,6 +2745,18 @@ Reduction JSNativeContextSpecialization::ReduceElementAccess(
    }
  
    AccessMode access_mode = refined_feedback.keyed_mode().access_mode();
@@ -2487,10 +2809,10 @@ index 468b715c..d1017bc9 100644
        receiver->opcode() == IrOpcode::kHeapConstant) {
      Reduction reduction = ReduceElementLoadFromHeapConstant(
 diff --git a/src/compiler/js-native-context-specialization.h b/src/compiler/js-native-context-specialization.h
-index 4c7f0103..3ad40c55 100644
+index 4c7f0103..aec1fce3 100644
 --- a/src/compiler/js-native-context-specialization.h
 +++ b/src/compiler/js-native-context-specialization.h
-@@ -97,6 +97,31 @@ class V8_EXPORT_PRIVATE JSNativeContextSpecialization final
+@@ -97,6 +97,36 @@ class V8_EXPORT_PRIVATE JSNativeContextSpecialization final
    Reduction ReduceJSStoreInArrayLiteral(Node* node);
    Reduction ReduceJSToObject(Node* node);
  
@@ -2500,6 +2822,11 @@ index 4c7f0103..3ad40c55 100644
 +                                    NamedAccessFeedback const& feedback,
 +                                    AccessMode access_mode,
 +                                    ZoneVector<MapRef> const& maps, Node* key);
++  // A load of a constant from the local prototype of region objects.
++  Reduction ReduceRegionPrototypeLoad(Node* node,
++                                      NamedAccessFeedback const& feedback,
++                                      ZoneVector<MapRef> const& maps,
++                                      Node* key);
 +  Reduction ReduceRegionElementAccess(Node* node, Node* index, Node* value,
 +                                      AccessMode access_mode,
 +                                      ZoneVector<MapRef> const& maps);
@@ -2522,7 +2849,7 @@ index 4c7f0103..3ad40c55 100644
    Reduction ReduceElementAccess(Node* node, Node* index, Node* value,
                                  ElementAccessFeedback const& feedback);
    // In the case of non-keyed (named) accesses, pass the name as {static_name}
-@@ -294,6 +319,9 @@ class V8_EXPORT_PRIVATE JSNativeContextSpecialization final
+@@ -294,6 +324,9 @@ class V8_EXPORT_PRIVATE JSNativeContextSpecialization final
    Flags const flags_;
    Handle<JSGlobalObject> global_object_;
    Handle<JSGlobalProxy> global_proxy_;
@@ -2593,7 +2920,7 @@ index 30fd3e16..f954a5c5 100644
    V(StoreToObject)                          \
    V(StoreTypedElement)                      \
 diff --git a/src/compiler/redundancy-elimination.cc b/src/compiler/redundancy-elimination.cc
-index 64d01b3e..84b992db 100644
+index 64d01b3e..846eaf89 100644
 --- a/src/compiler/redundancy-elimination.cc
 +++ b/src/compiler/redundancy-elimination.cc
 @@ -17,6 +17,7 @@ RedundancyElimination::RedundancyElimination(Editor* editor, JSGraph* jsgraph,
@@ -2612,7 +2939,18 @@ index 64d01b3e..84b992db 100644
      case IrOpcode::kCheckSmi:
      case IrOpcode::kCheckString:
      case IrOpcode::kCheckStringOrStringWrapper:
-@@ -177,10 +179,82 @@ struct Subsumption {
+@@ -51,6 +53,10 @@ Reduction RedundancyElimination::Reduce(Node* node) {
+     case IrOpcode::kStringCodePointAt:
+     case IrOpcode::kStringFromCodePointAt:
+     case IrOpcode::kStringSubstring:
++    // Loads from region objects, until something writes (see
++    // ReduceOtherNode).
++    case IrOpcode::kLoadRegionElement:
++    case IrOpcode::kLoadRegionField:
+ #define SIMPLIFIED_OP(Opcode) case IrOpcode::k##Opcode:
+       SIMPLIFIED_CHECKED_OP_LIST(SIMPLIFIED_OP)
+       SIMPLIFIED_BIGINT_BINOP_LIST(SIMPLIFIED_OP)
+@@ -177,10 +183,89 @@ struct Subsumption {
    const Operator* conversion_op_;
  };
  
@@ -2649,7 +2987,11 @@ index 64d01b3e..84b992db 100644
 +// region, so a value loaded from it is in the same region (if it is an object
 +// at all). A phi whose inputs come from one object, or from the phi itself
 +// (as in `for (n = head; n; n = n.next)`), is in the region of that object.
-+Node* RegionOrigin(Node* node, Node* phi = nullptr, int depth = 0) {
++// So is a phi with {undefined} as its other inputs, such as the value of an
++// array iterator, which is undefined once the iterator is done: a check of
++// the region of the phi follows a map check that excludes undefined.
++Node* RegionOrigin(Node* node, Node* undefined, Node* phi = nullptr,
++                   int depth = 0) {
 +  while (true) {
 +    switch (node->opcode()) {
 +      case IrOpcode::kCheckHeapObject:
@@ -2663,7 +3005,9 @@ index 64d01b3e..84b992db 100644
 +        if (node == phi || depth == 3) return node;
 +        Node* origin = nullptr;
 +        for (int i = 0; i < node->op()->ValueInputCount(); ++i) {
-+          Node* input = RegionOrigin(node->InputAt(i), node, depth + 1);
++          if (node->InputAt(i) == undefined) continue;
++          Node* input =
++              RegionOrigin(node->InputAt(i), undefined, node, depth + 1);
 +          if (input == node) continue;
 +          if (origin != nullptr && origin != input) return node;
 +          origin = input;
@@ -2677,15 +3021,18 @@ index 64d01b3e..84b992db 100644
 +}
 +
  // Does check {a} subsume check {b}?
- Subsumption CheckSubsumes(Node const* a, Node const* b,
-                           MachineOperatorBuilder* machine) {
+-Subsumption CheckSubsumes(Node const* a, Node const* b,
+-                          MachineOperatorBuilder* machine) {
++Subsumption CheckSubsumes(Node const* a, Node const* b, JSGraph* jsgraph) {
++  MachineOperatorBuilder* machine = jsgraph->machine();
    Subsumption subsumption = Subsumption::Implicit();
 +  if (a->opcode() == IrOpcode::kCheckRegionAccess ||
 +      b->opcode() == IrOpcode::kCheckRegionAccess) {
 +    // Access depends only on the region, so a check covers every object of
 +    // the same region. Access to write implies access to read.
 +    if (a->opcode() != b->opcode() ||
-+        RegionOrigin(a->InputAt(0)) != RegionOrigin(b->InputAt(0)) ||
++        RegionOrigin(a->InputAt(0), jsgraph->UndefinedConstant()) !=
++            RegionOrigin(b->InputAt(0), jsgraph->UndefinedConstant()) ||
 +        (!CheckRegionAccessParametersOf(a->op()).for_write() &&
 +         CheckRegionAccessParametersOf(b->op()).for_write())) {
 +      return Subsumption::None();
@@ -2695,24 +3042,56 @@ index 64d01b3e..84b992db 100644
    if (a->op() != b->op()) {
      if (a->opcode() == IrOpcode::kCheckInternalizedString &&
          b->opcode() == IrOpcode::kCheckString) {
-@@ -353,6 +427,31 @@ Node* RedundancyElimination::EffectPathChecks::LookupBoundsCheckFor(
+@@ -278,6 +363,13 @@ Subsumption CheckSubsumes(Node const* a, Node const* b,
+           }
+           break;
+         }
++        case IrOpcode::kLoadRegionElement:
++        case IrOpcode::kLoadRegionField:
++          if (!(RegionAccessParametersOf(a->op()) ==
++                RegionAccessParametersOf(b->op()))) {
++            return Subsumption::None();
++          }
++          break;
+         case IrOpcode::kCheckedTaggedToFloat64:
+         case IrOpcode::kCheckedTruncateTaggedToWord32: {
+           CheckTaggedInputParameters const& ap =
+@@ -326,7 +418,7 @@ Node* RedundancyElimination::EffectPathChecks::LookupCheck(
+     Node* node, JSGraph* jsgraph) const {
+   for (Check const* check = head_; check != nullptr; check = check->next) {
+     Subsumption subsumption =
+-        CheckSubsumes(check->node, node, jsgraph->machine());
++        CheckSubsumes(check->node, node, jsgraph);
+     if (!subsumption.IsNone() && TypeSubsumes(node, check->node)) {
+       DCHECK(!check->node->IsDead());
+       Node* result = check->node;
+@@ -353,6 +445,40 @@ Node* RedundancyElimination::EffectPathChecks::LookupBoundsCheckFor(
    return nullptr;
  }
  
 +RedundancyElimination::EffectPathChecks const*
 +RedundancyElimination::EffectPathChecks::WithoutRegionChecks(
-+    Zone* zone) const {
-+  // Keep the tail after the last region check, so that merges still find it.
++    Zone* zone, bool access_checks) const {
++  auto drop = [&](Node* node) {
++    switch (node->opcode()) {
++      case IrOpcode::kLoadRegionElement:
++      case IrOpcode::kLoadRegionField:
++        return true;
++      case IrOpcode::kCheckRegionAccess:
++        return access_checks;
++      default:
++        return false;
++    }
++  };
++  // Keep the tail after the last dropped node, so that merges still find it.
 +  Check* last = nullptr;
 +  for (Check* check = head_; check != nullptr; check = check->next) {
-+    if (check->node->opcode() == IrOpcode::kCheckRegionAccess) last = check;
++    if (drop(check->node)) last = check;
 +  }
 +  if (last == nullptr) return this;
 +  ZoneVector<Node*> prefix(zone);
 +  for (Check* check = head_; check != last; check = check->next) {
-+    if (check->node->opcode() != IrOpcode::kCheckRegionAccess) {
-+      prefix.push_back(check->node);
-+    }
++    if (!drop(check->node)) prefix.push_back(check->node);
 +  }
 +  Check* head = last->next;
 +  size_t size = 0;
@@ -2727,37 +3106,46 @@ index 64d01b3e..84b992db 100644
  RedundancyElimination::EffectPathChecks const*
  RedundancyElimination::PathChecksForEffectNodes::Get(Node* node) const {
    size_t const id = node->id();
-@@ -388,8 +487,14 @@ Reduction RedundancyElimination::ReduceEffectPhi(Node* node) {
+@@ -388,8 +514,20 @@ Reduction RedundancyElimination::ReduceEffectPhi(Node* node) {
    if (control->opcode() == IrOpcode::kLoop) {
      // Here we rely on having only reducible loops:
      // The loop entry edge always dominates the header, so we can just use
 -    // the information from the loop entry edge.
 -    return TakeChecksFromFirstEffect(node);
 +    // the information from the loop entry edge. A region check holds in the
-+    // loop only if nothing in it may change region access.
++    // loop only if nothing in it may change region access; a load from a
++    // region object is not kept, as the loop may write the value.
 +    EffectPathChecks const* checks =
 +        node_checks_.Get(NodeProperties::GetEffectInput(node));
 +    if (checks == nullptr) return NoChange();
-+    EffectPathChecks const* without = checks->WithoutRegionChecks(zone());
-+    if (without != checks && LoopMayChangeRegionAccess(node)) checks = without;
++    EffectPathChecks const* without =
++        checks->WithoutRegionChecks(zone(), true);
++    if (without != checks) {
++      checks = LoopMayChangeRegionAccess(node)
++                   ? without
++                   : checks->WithoutRegionChecks(zone(), false);
++    }
 +    return UpdateChecks(node, checks);
    }
    DCHECK_EQ(IrOpcode::kMerge, control->opcode());
  
-@@ -511,6 +616,12 @@ Reduction RedundancyElimination::ReduceStart(Node* node) {
+@@ -511,6 +649,15 @@ Reduction RedundancyElimination::ReduceStart(Node* node) {
  Reduction RedundancyElimination::ReduceOtherNode(Node* node) {
    if (node->op()->EffectInputCount() == 1) {
      if (node->op()->EffectOutputCount() == 1) {
-+      if (MayChangeRegionAccess(node)) {
++      // Anything that writes may write a value of a region object, and
++      // anything that may call may also change region access.
++      if (!node->op()->HasProperty(Operator::kNoWrite)) {
 +        EffectPathChecks const* checks =
 +            node_checks_.Get(NodeProperties::GetEffectInput(node));
 +        if (checks == nullptr) return NoChange();
-+        return UpdateChecks(node, checks->WithoutRegionChecks(zone()));
++        return UpdateChecks(node, checks->WithoutRegionChecks(
++                                      zone(), MayChangeRegionAccess(node)));
 +      }
        return TakeChecksFromFirstEffect(node);
      } else {
        // Effect terminators should be handled specially.
-@@ -522,6 +633,36 @@ Reduction RedundancyElimination::ReduceOtherNode(Node* node) {
+@@ -522,6 +669,36 @@ Reduction RedundancyElimination::ReduceOtherNode(Node* node) {
    return NoChange();
  }
  
@@ -2795,7 +3183,7 @@ index 64d01b3e..84b992db 100644
    DCHECK_EQ(1, node->op()->EffectOutputCount());
    Node* const effect = NodeProperties::GetEffectInput(node);
 diff --git a/src/compiler/redundancy-elimination.h b/src/compiler/redundancy-elimination.h
-index ffa02df7..1b9b183d 100644
+index ffa02df7..b7098e2d 100644
 --- a/src/compiler/redundancy-elimination.h
 +++ b/src/compiler/redundancy-elimination.h
 @@ -7,6 +7,7 @@
@@ -2806,16 +3194,18 @@ index ffa02df7..1b9b183d 100644
  
  namespace v8 {
  namespace internal {
-@@ -42,6 +43,8 @@ class V8_EXPORT_PRIVATE RedundancyElimination final : public AdvancedReducer {
+@@ -42,6 +43,10 @@ class V8_EXPORT_PRIVATE RedundancyElimination final : public AdvancedReducer {
      EffectPathChecks const* AddCheck(Zone* zone, Node* node) const;
      Node* LookupCheck(Node* node, JSGraph* jsgraph) const;
      Node* LookupBoundsCheckFor(Node* node) const;
-+    // The same checks without CheckRegionAccess.
-+    EffectPathChecks const* WithoutRegionChecks(Zone* zone) const;
++    // The same checks without loads from region objects and, if
++    // {access_checks}, without CheckRegionAccess.
++    EffectPathChecks const* WithoutRegionChecks(Zone* zone,
++                                                bool access_checks) const;
  
     private:
      friend Zone;
-@@ -72,11 +75,15 @@ class V8_EXPORT_PRIVATE RedundancyElimination final : public AdvancedReducer {
+@@ -72,11 +77,15 @@ class V8_EXPORT_PRIVATE RedundancyElimination final : public AdvancedReducer {
    Reduction ReduceOtherNode(Node* node);
  
    Reduction TakeChecksFromFirstEffect(Node* node);
@@ -3051,10 +3441,18 @@ index 2e47ad4d..6ac3227b 100644
                                        NameRef name,
                                        const FeedbackSource& feedback,
 diff --git a/src/compiler/turbofan-typer.cc b/src/compiler/turbofan-typer.cc
-index e52c358e..3dc8af36 100644
+index e52c358e..d78f6cb4 100644
 --- a/src/compiler/turbofan-typer.cc
 +++ b/src/compiler/turbofan-typer.cc
-@@ -2473,6 +2473,8 @@ Type Typer::Visitor::TypeCheckHeapObject(Node* node) {
+@@ -21,6 +21,7 @@
+ #include "src/compiler/operation-typer.h"
+ #include "src/compiler/simplified-operator.h"
+ #include "src/compiler/type-cache.h"
++#include "src/ic/handler-configuration.h"
+ #include "src/objects/objects-inl.h"
+ 
+ namespace v8 {
+@@ -2473,6 +2474,8 @@ Type Typer::Visitor::TypeCheckHeapObject(Node* node) {
  
  Type Typer::Visitor::TypeCheckIf(Node* node) { UNREACHABLE(); }
  
@@ -3063,11 +3461,17 @@ index e52c358e..3dc8af36 100644
  Type Typer::Visitor::TypeCheckInternalizedString(Node* node) {
    Type arg = Operand(node, 0);
    return Type::Intersect(arg, Type::InternalizedString(), zone());
-@@ -2592,6 +2594,22 @@ Type Typer::Visitor::TypeLoadFieldByIndex(Node* node) {
+@@ -2592,6 +2595,28 @@ Type Typer::Visitor::TypeLoadFieldByIndex(Node* node) {
    return Type::NonInternal();
  }
  
 +Type Typer::Visitor::TypeLoadRegionField(Node* node) {
++  // The length of an array is a Smi, as for JSArray.
++  if (RegionAccessParametersOf(node->op()).index() ==
++      static_cast<int>(LoadHandler::kRegionArrayLengthIndex)) {
++    return Type::Union(typer_->cache_->kFixedArrayLengthType, Type::Hole(),
++                       zone());
++  }
 +  return Type::Union(Type::NonInternal(), Type::Hole(), zone());
 +}
 +
@@ -3102,7 +3506,7 @@ index f7525792..3d3506e0 100644
      case JS_ARRAY_ITERATOR_TYPE:
      case JS_REG_EXP_TYPE:
 diff --git a/src/compiler/turboshaft/graph-builder.cc b/src/compiler/turboshaft/graph-builder.cc
-index e0e9cfa7..15201b62 100644
+index e0e9cfa7..f2709b87 100644
 --- a/src/compiler/turboshaft/graph-builder.cc
 +++ b/src/compiler/turboshaft/graph-builder.cc
 @@ -47,7 +47,9 @@
@@ -3115,7 +3519,7 @@ index e0e9cfa7..15201b62 100644
  #include "src/objects/map.h"
  #include "src/zone/zone-containers.h"
  
-@@ -243,6 +245,208 @@ struct GraphBuilder {
+@@ -243,6 +245,291 @@ struct GraphBuilder {
    TurnTaggedSignedInputIntoSmi(OpIndex value, MemoryRepresentation rep,
                                 WriteBarrierKind write_barrier);
  
@@ -3286,6 +3690,87 @@ index e0e9cfa7..15201b62 100644
 +    }
 +    return RegionValueStorable(region, value);
 +  }
++  // A copy of the number `value` in the area this isolate allocates in for
++  // `region`, or the hole if `value` is not a HeapNumber or the area is not
++  // open for the region. A number of the isolate or of another region can't
++  // be stored as it is; the literal builtins copy numbers the same way.
++  // `raw` is the value of the number if Turbofan has it unboxed.
++  V<Object> RegionNumberCopyOrHole(V<Smi> region, V<Object> value,
++                                   OptionalV<Float64> raw) {
++    Variable result = __ NewVariable(RegisterRepresentation::Tagged());
++    __ SetVariable(result,
++                   __ HeapConstant(isolate->factory()->the_hole_value()));
++    IF_NOT (__ IsSmi(value)) {
++      V<HeapObject> heap_value = V<HeapObject>::Cast(value);
++      V<WordPtr> area_region = __ Load(
++          __ ExternalConstant(
++              ExternalReference::region_allocation_region_address(isolate)),
++          LoadOp::Kind::RawAligned(), MemoryRepresentation::UintPtr());
++      V<Word32> in_regions = __ Load(
++          __ ExternalConstant(ExternalReference::region_strings_flag()),
++          LoadOp::Kind::RawAligned(), MemoryRepresentation::Uint8());
++      IF (LIKELY(__ Word32BitwiseAnd(
++              __ TaggedEqual(
++                  __ LoadMapField(heap_value),
++                  __ HeapConstant(isolate->factory()->heap_number_map())),
++              __ Word32BitwiseAnd(
++                  __ WordPtrEqual(area_region, __ ChangeInt32ToIntPtr(
++                                                   __ UntagSmi(region))),
++                  __ Word32Equal(__ Word32Equal(in_regions, 0), 0))))) {
++        static_assert(!USE_ALLOCATION_ALIGNMENT_HEAP_NUMBER_BOOL);
++        constexpr int kSize = sizeof(HeapNumber);
++        V<WordPtr> top_address = __ ExternalConstant(
++            ExternalReference::region_allocation_top_address(isolate));
++        V<WordPtr> top = __ Load(top_address, LoadOp::Kind::RawAligned(),
++                                 MemoryRepresentation::UintPtr());
++        V<WordPtr> limit = __ Load(
++            __ ExternalConstant(
++                ExternalReference::region_allocation_limit_address(isolate)),
++            LoadOp::Kind::RawAligned(), MemoryRepresentation::UintPtr());
++        V<WordPtr> new_top = __ WordPtrAdd(top, kSize);
++        IF (LIKELY(__ UintPtrLessThanOrEqual(new_top, limit))) {
++          V<Float64> number =
++              raw.has_value() ? raw.value()
++                          : __ LoadHeapNumberValue(V<HeapNumber>::Cast(value));
++          __ Store(top_address, new_top, StoreOp::Kind::RawAligned(),
++                   MemoryRepresentation::UintPtr(),
++                   WriteBarrierKind::kNoWriteBarrier);
++          V<HeapObject> copy = __ BitcastWordPtrToHeapObject(
++              __ WordPtrAdd(top, kHeapObjectTag));
++          __ Store(copy, __ HeapConstant(isolate->factory()->heap_number_map()),
++                   StoreOp::Kind::TaggedBase(),
++                   MemoryRepresentation::TaggedPointer(),
++                   WriteBarrierKind::kNoWriteBarrier, offsetof(HeapObject, map_),
++                   true);
++          __ Store(copy, number, StoreOp::Kind::TaggedBase(),
++                   MemoryRepresentation::Float64(),
++                   WriteBarrierKind::kNoWriteBarrier,
++                   offsetof(HeapNumber, value_), true);
++          // The region counts these bytes when the area closes.
++          V<WordPtr> unaccounted_address = __ ExternalConstant(
++              ExternalReference::region_allocation_unaccounted_address(
++                  isolate));
++          __ Store(unaccounted_address,
++                   __ WordPtrAdd(
++                       __ Load(unaccounted_address, LoadOp::Kind::RawAligned(),
++                               MemoryRepresentation::UintPtr()),
++                       kSize),
++                   StoreOp::Kind::RawAligned(), MemoryRepresentation::UintPtr(),
++                   WriteBarrierKind::kNoWriteBarrier);
++          __ SetVariable(result, copy);
++        }
++      }
++    }
++    return V<Object>::Cast(__ GetVariable(result));
++  }
++  // The unboxed value of a number that representation selection boxes for
++  // a store, if it is one.
++  OptionalV<Float64> UnboxedNumberOf(Node* value) {
++    if (value->opcode() == IrOpcode::kChangeFloat64ToTagged) {
++      return Map<Float64>(value->InputAt(0));
++    }
++    return OptionalV<Float64>::Nullopt();
++  }
 +  static WriteBarrierKind RegionWriteBarrier(compiler::Type value_type) {
 +    return value_type.Is(compiler::Type::SignedSmall())
 +               ? WriteBarrierKind::kNoWriteBarrier
@@ -3313,18 +3798,20 @@ index e0e9cfa7..15201b62 100644
 +
 +  V<Word32> BuildStoreRegionField(V<HeapObject> object,
 +                                  const RegionAccessParameters& params,
-+                                  V<Object> value, compiler::Type value_type);
++                                  V<Object> value, compiler::Type value_type,
++                                  OptionalV<Float64> number);
 +  V<Object> BuildLoadRegionElement(V<HeapObject> object, V<Object> key,
 +                                   const RegionAccessParameters& params);
 +  V<Word32> BuildStoreRegionElement(V<HeapObject> object, V<Object> key,
 +                                    V<Object> value,
 +                                    const RegionAccessParameters& params,
-+                                    compiler::Type value_type);
++                                    compiler::Type value_type,
++                                    OptionalV<Float64> number);
 +
    OpIndex Process(Node* node, BasicBlock* block,
                    const base::SmallVector<int, 16>& predecessor_permutation,
                    V<EagerFrameState>& dominating_frame_state,
-@@ -432,6 +636,114 @@ GraphBuilder::TurnTaggedSignedInputIntoSmi(OpIndex value,
+@@ -432,6 +719,140 @@ GraphBuilder::TurnTaggedSignedInputIntoSmi(OpIndex value,
    return {value, rep, write_barrier};
  }
  
@@ -3357,18 +3844,29 @@ index e0e9cfa7..15201b62 100644
 +
 +V<Word32> GraphBuilder::BuildStoreRegionField(
 +    V<HeapObject> object, const RegionAccessParameters& params,
-+    V<Object> value, compiler::Type value_type) {
++    V<Object> value, compiler::Type value_type, OptionalV<Float64> number) {
 +  Variable done = __ NewVariable(RegisterRepresentation::Word32());
 +  __ SetVariable(done, __ Word32Constant(0));
 +  V<Smi> region = LoadRegionId(object);
 +  V<FixedArray> values = LoadRegionValues(object);
++  V<Word32> allowed =
++      RegionAccessAllowedIf(params.check_access(), region, true);
 +  IF (LIKELY(__ Word32BitwiseAnd(
-+          RegionAccessAllowedIf(params.check_access(), region, true),
-+          RegionValueStorableIf(value_type, region, value)))) {
++          allowed, RegionValueStorableIf(value_type, region, value)))) {
 +    __ Store(values, value, StoreOp::Kind::TaggedBase(),
 +             MemoryRepresentation::AnyTagged(), RegionWriteBarrier(value_type),
 +             FixedArray::OffsetOfElementAt(params.index()));
 +    __ SetVariable(done, __ Word32Constant(1));
++  } ELSE IF (allowed) {
++    V<Object> copy = RegionNumberCopyOrHole(region, value, number);
++    IF_NOT (__ TaggedEqual(
++                copy, __ HeapConstant(isolate->factory()->the_hole_value()))) {
++      __ Store(values, copy, StoreOp::Kind::TaggedBase(),
++               MemoryRepresentation::AnyTagged(),
++               WriteBarrierKind::kFullWriteBarrier,
++               FixedArray::OffsetOfElementAt(params.index()));
++      __ SetVariable(done, __ Word32Constant(1));
++    }
 +  }
 +  return V<Word32>::Cast(__ GetVariable(done));
 +}
@@ -3402,7 +3900,8 @@ index e0e9cfa7..15201b62 100644
 +
 +V<Word32> GraphBuilder::BuildStoreRegionElement(
 +    V<HeapObject> object, V<Object> key, V<Object> value,
-+    const RegionAccessParameters& params, compiler::Type value_type) {
++    const RegionAccessParameters& params, compiler::Type value_type,
++    OptionalV<Float64> number) {
 +  Variable done = __ NewVariable(RegisterRepresentation::Word32());
 +  __ SetVariable(done, __ Word32Constant(0));
 +  V<Smi> region = LoadRegionId(object);
@@ -3410,18 +3909,32 @@ index e0e9cfa7..15201b62 100644
 +  IF (LIKELY(__ IsSmi(key))) {
 +    V<WordPtr> index = __ ChangeInt32ToIntPtr(__ UntagSmi(V<Smi>::Cast(key)));
 +    // In bounds, or one past the end while there is room, as push() does.
-+    IF (LIKELY(__ Word32BitwiseAnd(
-+            __ Word32BitwiseAnd(
-+                __ Word32BitwiseAnd(
-+                    RegionAccessAllowedIf(params.check_access(), region, true),
-+                    array.is_array),
-+                RegionValueStorableIf(value_type, region, value)),
-+            __ Word32BitwiseAnd(
-+                __ UintPtrLessThanOrEqual(index, array.length),
-+                __ UintPtrLessThan(index, array.capacity))))) {
-+      __ Store(array.values, index, value, StoreOp::Kind::TaggedBase(),
-+               MemoryRepresentation::AnyTagged(), RegionWriteBarrier(value_type),
-+               OFFSET_OF_DATA_START(FixedArray), kTaggedSizeLog2);
++    V<Word32> allowed = __ Word32BitwiseAnd(
++        __ Word32BitwiseAnd(
++            RegionAccessAllowedIf(params.check_access(), region, true),
++            array.is_array),
++        __ Word32BitwiseAnd(__ UintPtrLessThanOrEqual(index, array.length),
++                            __ UintPtrLessThan(index, array.capacity)));
++    Variable stored = __ NewVariable(RegisterRepresentation::Tagged());
++    __ SetVariable(stored, value);
++    Variable storable = __ NewVariable(RegisterRepresentation::Word32());
++    __ SetVariable(storable, RegionValueStorableIf(value_type, region, value));
++    IF (__ Word32BitwiseAnd(allowed,
++                            __ Word32Equal(__ GetVariable(storable), 0))) {
++      V<Object> copy = RegionNumberCopyOrHole(region, value, number);
++      IF_NOT (__ TaggedEqual(copy, __ HeapConstant(
++                                       isolate->factory()->the_hole_value()))) {
++        __ SetVariable(stored, copy);
++        __ SetVariable(storable, __ Word32Constant(1));
++      }
++    }
++    IF (LIKELY(__ Word32BitwiseAnd(allowed, __ GetVariable(storable)))) {
++      // A copy of a number needs the barrier, which RegionWriteBarrier()
++      // keeps for anything that is not a Smi.
++      __ Store(array.values, index, __ GetVariable(stored),
++               StoreOp::Kind::TaggedBase(), MemoryRepresentation::AnyTagged(),
++               RegionWriteBarrier(value_type), OFFSET_OF_DATA_START(FixedArray),
++               kTaggedSizeLog2);
 +      IF (__ WordPtrEqual(index, array.length)) {
 +        __ Store(object,
 +                 __ TagSmi(__ TruncateWordPtrToWord32(__ WordPtrAdd(index, 1))),
@@ -3439,7 +3952,7 @@ index e0e9cfa7..15201b62 100644
  OpIndex GraphBuilder::Process(
      Node* node, BasicBlock* block,
      const base::SmallVector<int, 16>& predecessor_permutation,
-@@ -2245,6 +2557,36 @@ OpIndex GraphBuilder::Process(
+@@ -2245,6 +2666,38 @@ OpIndex GraphBuilder::Process(
        return __ CheckedClosure(Map(node->InputAt(0)), dominating_frame_state,
                                 FeedbackCellOf(node->op()));
  
@@ -3450,7 +3963,8 @@ index e0e9cfa7..15201b62 100644
 +      return BuildStoreRegionField(Map<HeapObject>(node->InputAt(0)),
 +                                   RegionAccessParametersOf(node->op()),
 +                                   Map<Object>(node->InputAt(1)),
-+                                   TypeOfStoredValue(node->InputAt(1)));
++                                   TypeOfStoredValue(node->InputAt(1)),
++                                   UnboxedNumberOf(node->InputAt(1)));
 +    case IrOpcode::kLoadRegionElement:
 +      return BuildLoadRegionElement(Map<HeapObject>(node->InputAt(0)),
 +                                    Map<Object>(node->InputAt(1)),
@@ -3460,7 +3974,8 @@ index e0e9cfa7..15201b62 100644
 +                                     Map<Object>(node->InputAt(1)),
 +                                     Map<Object>(node->InputAt(2)),
 +                                     RegionAccessParametersOf(node->op()),
-+                                     TypeOfStoredValue(node->InputAt(2)));
++                                     TypeOfStoredValue(node->InputAt(2)),
++                                     UnboxedNumberOf(node->InputAt(2)));
 +    case IrOpcode::kCheckRegionAccess: {
 +      DCHECK(dominating_frame_state.valid());
 +      const CheckRegionAccessParameters& params =
@@ -4457,7 +4972,7 @@ index f842fc63..080fd4b0 100644
    // Since there are no other threads left, we can lock this mutex without any
    // ceremony. This signals to the tear down code that we are in a safepoint.
 diff --git a/src/execution/isolate.h b/src/execution/isolate.h
-index aad92c6a..f7fa3c07 100644
+index aad92c6a..82eac51a 100644
 --- a/src/execution/isolate.h
 +++ b/src/execution/isolate.h
 @@ -98,6 +98,10 @@ namespace bigint {
@@ -4471,7 +4986,7 @@ index aad92c6a..f7fa3c07 100644
  namespace debug {
  class ConsoleDelegate;
  class AsyncEventDelegate;
-@@ -1822,6 +1826,86 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
+@@ -1822,6 +1826,97 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
    bool force_slow_path() const { return force_slow_path_; }
    bool* force_slow_path_address() { return &force_slow_path_; }
  
@@ -4508,6 +5023,17 @@ index aad92c6a..f7fa3c07 100644
 +  }
 +  intptr_t* region_allocation_region_address() {
 +    return &region_allocation_region_;
++  }
++  // Bytes that generated code allocated in that area and that the region
++  // does not count yet; RegionAllocator adds them when the area closes.
++  size_t region_allocation_unaccounted() const {
++    return region_allocation_unaccounted_;
++  }
++  void set_region_allocation_unaccounted(size_t bytes) {
++    region_allocation_unaccounted_ = bytes;
++  }
++  size_t* region_allocation_unaccounted_address() {
++    return &region_allocation_unaccounted_;
 +  }
 +
 +  // The bit of this isolate in the holder sets of regions, or -1 until it
@@ -4558,7 +5084,7 @@ index aad92c6a..f7fa3c07 100644
    bool jitless() const { return jitless_; }
  
    void SetStackSize(size_t v);
-@@ -2855,6 +2939,18 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
+@@ -2855,6 +2950,19 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
    std::unique_ptr<PersistentHandlesList> persistent_handles_list_;
  
    bool force_slow_path_ = false;
@@ -4567,6 +5093,7 @@ index aad92c6a..f7fa3c07 100644
 +  LinearAllocationArea shared_allocation_info_;
 +  LinearAllocationArea region_allocation_info_;
 +  intptr_t region_allocation_region_ = -1;
++  size_t region_allocation_unaccounted_ = 0;
 +  std::atomic<int> region_holder_slot_{-1};
 +  size_t region_bytes_since_collection_ = 0;
 +  std::atomic<uint8_t> region_task_aborted_{0};
@@ -8204,10 +8731,10 @@ index 00000000..5cf0a91e
 +#endif  // V8_OBJECTS_JS_REGION_INL_H_
 diff --git a/src/objects/js-region.cc b/src/objects/js-region.cc
 new file mode 100644
-index 00000000..8e6a58fb
+index 00000000..a1e99c79
 --- /dev/null
 +++ b/src/objects/js-region.cc
-@@ -0,0 +1,4486 @@
+@@ -0,0 +1,4520 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -8469,8 +8996,10 @@ index 00000000..8e6a58fb
 +    GlobalHandles::MakeWeak(&view->location);
 +    base::MutexGuard guard(Mutex());
 +    std::vector<std::unique_ptr<TrackedView>>& views = (*All())[isolate];
-+    std::erase_if(views, [](const auto& v) { return v->location == nullptr; });
++    Count(-static_cast<intptr_t>(std::erase_if(
++        views, [](const auto& v) { return v->location == nullptr; })));
 +    views.push_back(std::move(view));
++    Count(1);
 +  }
 +
 +  // Borrows of frozen regions held by each isolate, by region id.
@@ -8492,16 +9021,22 @@ index 00000000..8e6a58fb
 +  // Removes and returns the live views of `region` (all regions if -1).
 +  static std::vector<Address*> Take(Isolate* isolate, int region) {
 +    std::vector<Address*> taken;
++    // An isolate tracks and takes its views on its own thread, so if no
++    // isolate has any, this one sees that it has none.
++    if (region != -1 && tracked_.load(std::memory_order_relaxed) == 0) {
++      return taken;
++    }
 +    base::MutexGuard guard(Mutex());
 +    auto it = All()->find(isolate);
 +    if (it == All()->end()) return taken;
-+    std::erase_if(it->second, [&](const auto& v) {
++    Count(-static_cast<intptr_t>(std::erase_if(it->second, [&](const auto& v) {
 +      if (v->location == nullptr) return true;
 +      if (region != -1 && v->region != region) return false;
 +      taken.push_back(v->location);
 +      return true;
-+    });
++    })));
 +    if (region == -1) {
++      Count(-static_cast<intptr_t>(it->second.size()));
 +      All()->erase(it);
 +      Borrows()->erase(isolate);
 +    }
@@ -8513,6 +9048,12 @@ index 00000000..8e6a58fb
 +    static base::LeakyObject<base::Mutex> mutex;
 +    return mutex.get();
 +  }
++  // Under the mutex: the number of entries in All().
++  static void Count(intptr_t delta) {
++    tracked_.store(tracked_.load(std::memory_order_relaxed) + delta,
++                   std::memory_order_relaxed);
++  }
++  static inline std::atomic<intptr_t> tracked_{0};
 +  static std::unordered_map<Isolate*, std::vector<std::unique_ptr<TrackedView>>>*
 +  All() {
 +    static base::LeakyObject<std::unordered_map<
@@ -10506,6 +11047,7 @@ index 00000000..8e6a58fb
 +
 +  MaybeDirectHandle<Object> Copy(DirectHandle<Object> value) {
 +    if (IsSmi(*value)) return value;
++    if (!IsJSReceiver(*value)) return SharePrimitive(value);
 +    if (IsJSRegionObject(*value)) {
 +      if (Cast<JSRegionObject>(*value)->region_id() == region_) return value;
 +      isolate_->Throw(*OutsideReferenceError(isolate_, region_));
@@ -10536,15 +11078,8 @@ index 00000000..8e6a58fb
 +      THROW_NEW_ERROR(isolate_,
 +                      NewTypeError(MessageTemplate::kRegionPlainFunction));
 +    }
-+    if (IsJSReceiver(*value)) {
-+      THROW_NEW_ERROR(isolate_,
-+                      NewTypeError(MessageTemplate::kRegionCannotMove, value));
-+    }
-+    DirectHandle<Object> shared;
-+    ASSIGN_RETURN_ON_EXCEPTION(
-+        isolate_, shared, JSRegionObject::ShareValue(isolate_, region_, value));
-+    if (IsString(*shared)) bytes_ += Cast<String>(*shared)->Size();
-+    return shared;
++    THROW_NEW_ERROR(isolate_,
++                    NewTypeError(MessageTemplate::kRegionCannotMove, value));
 +  }
 +
 +  size_t bytes() const { return bytes_; }
@@ -10558,6 +11093,14 @@ index 00000000..8e6a58fb
 +  }
 +
 + private:
++  MaybeDirectHandle<Object> SharePrimitive(DirectHandle<Object> value) {
++    DirectHandle<Object> shared;
++    ASSIGN_RETURN_ON_EXCEPTION(
++        isolate_, shared, JSRegionObject::ShareValue(isolate_, region_, value));
++    if (IsString(*shared)) bytes_ += Cast<String>(*shared)->Size();
++    return shared;
++  }
++
 +  bool IsTransferred(DirectHandle<JSArrayBuffer> buffer) const {
 +    if (transfer_all_) return buffer->is_detachable();
 +    if (transfer_ == nullptr) return false;
@@ -12133,6 +12676,10 @@ index 00000000..8e6a58fb
 +void RegionAllocator::Park(Isolate* isolate) {
 +  int region = static_cast<int>(isolate->region_allocation_region());
 +  if (region < 0) return;
++  if (size_t bytes = isolate->region_allocation_unaccounted()) {
++    RegionRegistry::AddBytes(region, bytes);
++    isolate->set_region_allocation_unaccounted(0);
++  }
 +  LinearAllocationArea* area = isolate->region_allocation_info();
 +  Address top = area->top();
 +  Address limit = area->limit();
@@ -12236,18 +12783,32 @@ index 00000000..8e6a58fb
 +  std::unordered_set<Address> common;
 +  std::vector<Tagged<HeapObject>> worklist;
 +  bool supported = true;
++  // Most pointers go to the page of the object or to what the previous
++  // object of the same shape points to outside: its map, keys and elements.
++  const MemoryChunk* inside = nullptr;
++  Address seen[4] = {kNullAddress, kNullAddress, kNullAddress, kNullAddress};
++  size_t next_seen = 0;
 +  auto visit = [&](Tagged<HeapObject> target) {
 +    if (HeapLayout::InReadOnlySpace(target)) return;
 +    const MemoryChunk* chunk = MemoryChunk::FromHeapObject(target);
-+    if (sealed.pages.contains(chunk->address())) return;
++    if (chunk == inside) return;
++    if (sealed.pages.contains(chunk->address())) {
++      inside = chunk;
++      return;
++    }
++    Address address = target.address();
++    for (Address previous : seen) {
++      if (address == previous) return;
++    }
++    seen[next_seen++ % std::size(seen)] = address;
 +    if (!HeapLayout::InWritableSharedSpace(target)) {
 +      supported = false;
 +      return;
 +    }
 +    if (RegionRegistry::RegionOf(isolate, target) == region) {
-+      if (own.insert(target.address()).second) worklist.push_back(target);
++      if (own.insert(address).second) worklist.push_back(target);
 +    } else {
-+      common.insert(target.address());
++      common.insert(address);
 +    }
 +  };
 +  for (NormalPage* page : pages) {
@@ -14188,10 +14749,10 @@ index a851946a..0058f7be 100644
    T(kIllegal, "ILLEGAL", 0)                                                   \
 diff --git a/src/regions/regions-channel.cc b/src/regions/regions-channel.cc
 new file mode 100644
-index 00000000..600b0efe
+index 00000000..dc8ab538
 --- /dev/null
 +++ b/src/regions/regions-channel.cc
-@@ -0,0 +1,1881 @@
+@@ -0,0 +1,1933 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -14268,6 +14829,8 @@ index 00000000..600b0efe
 +  // Receive: which of the channels completed it, and whether it was closed.
 +  int index = -1;
 +  bool closed = false;
++  // Receive: for select(), whose result says which channel it was.
++  bool select = false;
 +  std::unique_ptr<ChannelValue> data;
 +  // The channel `data` came from, to give it back if nobody picks it up.
 +  std::shared_ptr<ChannelState> source;
@@ -14322,7 +14885,9 @@ index 00000000..600b0efe
 +  std::vector<Isolate*> readers;
 +  // Set when a writer was aborted, failed or went away while holding the
 +  // lock, with where its guard was released; cleared by clearPoison().
-+  bool poisoned = false;
++  // Changed under the channels mutex; atomic so that taking up a grant can
++  // see that the lock is not poisoned without the mutex.
++  std::atomic<bool> poisoned{false};
 +  std::string poisoned_at;
 +  // Acquires waiting in arrival order; cancelled ones are skipped.
 +  std::deque<std::shared_ptr<ChannelWaiter>> queue;
@@ -14907,7 +15472,8 @@ index 00000000..600b0efe
 +  LockData* lock = state->lock.get();
 +  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
 +  std::string poisoned_at;
-+  {
++  // The grant was given under the channels mutex after any poisoning.
++  if (lock->poisoned.load(std::memory_order_relaxed)) {
 +    base::MutexGuard guard(channels_mutex.Pointer());
 +    if (lock->poisoned) {
 +      poisoned_at = lock->poisoned_at;
@@ -14961,18 +15527,22 @@ index 00000000..600b0efe
 +  UngrantLocked(state, isolate, write);
 +}
 +
-+// {value, done, index} for a completed receive.
++// The value of a completed receive; undefined if the channel was closed.
++MaybeLocal<Value> ReceivedValue(Isolate* isolate,
++                                std::unique_ptr<ChannelValue> data) {
++  if (!data) return Undefined(isolate);
++  return data->native ? Ports::UnmarshalValue(isolate, data->native.get())
++                      : DeserializeValue(isolate, std::move(data->serialized));
++}
++
++// {value, done} for a completed receive, and the index of the channel for
++// select().
 +MaybeLocal<Object> MakeResult(Isolate* isolate, Local<Context> context,
 +                              int index, bool closed,
-+                              std::unique_ptr<ChannelValue> data) {
-+  Local<Value> value = Undefined(isolate);
-+  if (data) {
-+    MaybeLocal<Value> maybe =
-+        data->native ? Ports::UnmarshalValue(isolate, data->native.get())
-+                     : DeserializeValue(isolate,
-+                                               std::move(data->serialized));
-+    if (!maybe.ToLocal(&value)) return {};
-+  }
++                              std::unique_ptr<ChannelValue> data,
++                              bool select) {
++  Local<Value> value;
++  if (!ReceivedValue(isolate, std::move(data)).ToLocal(&value)) return {};
 +  IsolateChannels& names = DataOf(isolate);
 +  if (names.value_name.IsEmpty()) {
 +    names.value_name.Reset(isolate, String::NewFromUtf8Literal(
@@ -14992,10 +15562,11 @@ index 00000000..600b0efe
 +          ->CreateDataProperty(context, names.done_name.Get(isolate),
 +                               Boolean::New(isolate, closed))
 +          .IsNothing() ||
-+      result
-+          ->CreateDataProperty(context, names.index_name.Get(isolate),
-+                               Integer::New(isolate, index))
-+          .IsNothing()) {
++      (select &&
++       result
++           ->CreateDataProperty(context, names.index_name.Get(isolate),
++                                Integer::New(isolate, index))
++           .IsNothing())) {
 +    return {};
 +  }
 +  return result;
@@ -15118,7 +15689,7 @@ index 00000000..600b0efe
 +  TryCatch try_catch(isolate_);
 +  Local<Object> result;
 +  if (MakeResult(isolate_, context, waiter->index, waiter->closed,
-+                 std::move(received))
++                 std::move(received), waiter->select)
 +          .ToLocal(&result)) {
 +    USE(resolver->Resolve(context, result));
 +  } else if (try_catch.HasCaught() && !try_catch.HasTerminated()) {
@@ -15169,18 +15740,31 @@ index 00000000..600b0efe
 +         std::make_shared<ChannelState>(static_cast<size_t>(capacity)));
 +}
 +
-+std::shared_ptr<ChannelState> ThisState(const FunctionCallbackInfo<Value>& info) {
-+  std::shared_ptr<ChannelState> state = StateOf(info.GetIsolate(), info.This());
-+  if (!state) ThrowTypeError(info.GetIsolate(), "this is not a Channel");
-+  return state;
++// The state of the receiver, or null after throwing. It lives as long as the
++// receiver, which the call keeps alive.
++const std::shared_ptr<ChannelState>* ThisState(
++    const FunctionCallbackInfo<Value>& info) {
++  // The signature of the methods makes the receiver an instance of the
++  // Channel template; its field is not set if the constructor failed.
++  Local<Data> field = info.This()->GetInternalField(0);
++  if (field->IsValue() && field.As<Value>()->IsExternal()) {
++    const std::shared_ptr<ChannelState>& state =
++        static_cast<ChannelHandle*>(
++            field.As<Value>().As<External>()->Value(kChannelTag))
++            ->state;
++    if (state) return &state;
++  }
++  ThrowTypeError(info.GetIsolate(), "this is not a Channel");
++  return nullptr;
 +}
 +
 +// __send(value, transfer, blocking): resolves (or returns) once the value is
 +// in the buffer or taken by a receiver.
 +void ChannelSend(const FunctionCallbackInfo<Value>& info) {
 +  Isolate* isolate = info.GetIsolate();
-+  std::shared_ptr<ChannelState> state = ThisState(info);
-+  if (!state) return;
++  const std::shared_ptr<ChannelState>* channel_state = ThisState(info);
++  if (!channel_state) return;
++  const std::shared_ptr<ChannelState>& state = *channel_state;
 +  bool blocking = info[2]->IsTrue();
 +  double task = CurrentTask(isolate);
 +  if (ThrowIfAborted(isolate, task)) return;
@@ -15244,7 +15828,7 @@ index 00000000..600b0efe
 +// Receives from the first of `states` that has a value or is closed.
 +void Receive(const FunctionCallbackInfo<Value>& info,
 +             const std::shared_ptr<ChannelState>* states, size_t count,
-+             bool blocking) {
++             bool blocking, bool select) {
 +  Isolate* isolate = info.GetIsolate();
 +  Local<Context> context = isolate->GetCurrentContext();
 +  static thread_local uint32_t rotation = 0;
@@ -15274,6 +15858,7 @@ index 00000000..600b0efe
 +      waiter = std::make_shared<ChannelWaiter>(ChannelWaiter::Kind::kReceive,
 +                                               isolate, blocking, id);
 +      waiter->task = task;
++      waiter->select = select;
 +      for (size_t i = 0; i < count; i++) {
 +        states[i]->receivers.push_back({waiter, static_cast<int>(i)});
 +        waiter->channels.push_back(states[i]);
@@ -15295,8 +15880,18 @@ index 00000000..600b0efe
 +      return;
 +    }
 +  }
++  if (blocking && !select) {
++    // recvSync() makes the result: it gets the value, or for a closed
++    // channel the marker it passed.
++    Local<Value> value = info[1];
++    if (!closed && !ReceivedValue(isolate, std::move(data)).ToLocal(&value)) {
++      return;
++    }
++    info.GetReturnValue().Set(value);
++    return;
++  }
 +  Local<Object> result;
-+  if (!MakeResult(isolate, context, index, closed, std::move(data))
++  if (!MakeResult(isolate, context, index, closed, std::move(data), select)
 +           .ToLocal(&result)) {
 +    return;
 +  }
@@ -15310,11 +15905,13 @@ index 00000000..600b0efe
 +  info.GetReturnValue().Set(resolver->GetPromise());
 +}
 +
-+// __recv(blocking)
++// __recv(blocking, closed): recvSync() gets the value, or `closed` if the
++// channel is closed; recv() a promise of {value, done}.
 +void ChannelRecv(const FunctionCallbackInfo<Value>& info) {
-+  std::shared_ptr<ChannelState> state = ThisState(info);
-+  if (!state) return;
-+  Receive(info, &state, 1, info[0]->IsTrue());
++  const std::shared_ptr<ChannelState>* channel_state = ThisState(info);
++  if (!channel_state) return;
++  const std::shared_ptr<ChannelState>& state = *channel_state;
++  Receive(info, &state, 1, info[0]->IsTrue(), false);
 +}
 +
 +// Channel.__select(channels, blocking)
@@ -15337,12 +15934,13 @@ index 00000000..600b0efe
 +    }
 +    states.push_back(std::move(state));
 +  }
-+  Receive(info, states.data(), states.size(), info[1]->IsTrue());
++  Receive(info, states.data(), states.size(), info[1]->IsTrue(), true);
 +}
 +
 +void ChannelClose(const FunctionCallbackInfo<Value>& info) {
-+  std::shared_ptr<ChannelState> state = ThisState(info);
-+  if (!state) return;
++  const std::shared_ptr<ChannelState>* channel_state = ThisState(info);
++  if (!channel_state) return;
++  const std::shared_ptr<ChannelState>& state = *channel_state;
 +  bool was_closed;
 +  {
 +    base::MutexGuard guard(channels_mutex.Pointer());
@@ -15367,14 +15965,16 @@ index 00000000..600b0efe
 +}
 +
 +void ChannelCapacity(const FunctionCallbackInfo<Value>& info) {
-+  std::shared_ptr<ChannelState> state = ThisState(info);
-+  if (!state) return;
++  const std::shared_ptr<ChannelState>* channel_state = ThisState(info);
++  if (!channel_state) return;
++  const std::shared_ptr<ChannelState>& state = *channel_state;
 +  info.GetReturnValue().Set(static_cast<double>(state->capacity));
 +}
 +
 +void ChannelSize(const FunctionCallbackInfo<Value>& info) {
-+  std::shared_ptr<ChannelState> state = ThisState(info);
-+  if (!state) return;
++  const std::shared_ptr<ChannelState>* channel_state = ThisState(info);
++  if (!channel_state) return;
++  const std::shared_ptr<ChannelState>& state = *channel_state;
 +  size_t size;
 +  {
 +    base::MutexGuard guard(channels_mutex.Pointer());
@@ -15384,8 +15984,9 @@ index 00000000..600b0efe
 +}
 +
 +void ChannelClosed(const FunctionCallbackInfo<Value>& info) {
-+  std::shared_ptr<ChannelState> state = ThisState(info);
-+  if (!state) return;
++  const std::shared_ptr<ChannelState>* channel_state = ThisState(info);
++  if (!channel_state) return;
++  const std::shared_ptr<ChannelState>& state = *channel_state;
 +  bool closed;
 +  {
 +    base::MutexGuard guard(channels_mutex.Pointer());
@@ -15394,14 +15995,22 @@ index 00000000..600b0efe
 +  info.GetReturnValue().Set(closed);
 +}
 +
-+std::shared_ptr<ChannelState> ThisLock(const FunctionCallbackInfo<Value>& info) {
-+  std::shared_ptr<ChannelState> state =
-+      Channels::FromValue(info.GetIsolate(), info.This());
-+  if (!state || !state->lock) {
-+    ThrowTypeError(info.GetIsolate(), "this is not an RwLock");
-+    return nullptr;
++// The state of the receiver, or null after throwing. It lives as long as the
++// receiver, which the call keeps alive.
++const std::shared_ptr<ChannelState>* ThisLock(
++    const FunctionCallbackInfo<Value>& info) {
++  // The signature of the methods makes the receiver an instance of the
++  // RwLock template; its field is not set if the constructor failed.
++  Local<Data> field = info.This()->GetInternalField(0);
++  if (field->IsValue() && field.As<Value>()->IsExternal()) {
++    const std::shared_ptr<ChannelState>& state =
++        static_cast<ChannelHandle*>(
++            field.As<Value>().As<External>()->Value(kChannelTag))
++            ->state;
++    if (state && state->lock) return &state;
 +  }
-+  return state;
++  ThrowTypeError(info.GetIsolate(), "this is not an RwLock");
++  return nullptr;
 +}
 +
 +// new RwLock(value): the lock takes the region of a region object owned by
@@ -15465,8 +16074,9 @@ index 00000000..600b0efe
 +// is made by the prelude.
 +void LockAcquire(const FunctionCallbackInfo<Value>& info) {
 +  Isolate* isolate = info.GetIsolate();
-+  std::shared_ptr<ChannelState> state = ThisLock(info);
-+  if (!state) return;
++  const std::shared_ptr<ChannelState>* lock_state = ThisLock(info);
++  if (!lock_state) return;
++  const std::shared_ptr<ChannelState>& state = *lock_state;
 +  bool write = info[0]->IsTrue();
 +  int mode = info[1]->Int32Value(isolate->GetCurrentContext()).FromMaybe(0);
 +  bool blocking = mode == 1;
@@ -15516,8 +16126,9 @@ index 00000000..600b0efe
 +// __release(write): gives up one guard of this thread.
 +void LockRelease(const FunctionCallbackInfo<Value>& info) {
 +  Isolate* isolate = info.GetIsolate();
-+  std::shared_ptr<ChannelState> state = ThisLock(info);
-+  if (!state) return;
++  const std::shared_ptr<ChannelState>* lock_state = ThisLock(info);
++  if (!lock_state) return;
++  const std::shared_ptr<ChannelState>& state = *lock_state;
 +  bool write = info[0]->IsTrue();
 +  double task = CurrentTask(isolate);
 +  auto& held = DataOf(isolate).held;
@@ -15599,16 +16210,18 @@ index 00000000..600b0efe
 +
 +// lock.poisoned: whether a writer was aborted while holding the lock.
 +void LockPoisoned(const FunctionCallbackInfo<Value>& info) {
-+  std::shared_ptr<ChannelState> state = ThisLock(info);
-+  if (!state) return;
++  const std::shared_ptr<ChannelState>* lock_state = ThisLock(info);
++  if (!lock_state) return;
++  const std::shared_ptr<ChannelState>& state = *lock_state;
 +  base::MutexGuard guard(channels_mutex.Pointer());
-+  info.GetReturnValue().Set(state->lock->poisoned);
++  info.GetReturnValue().Set(state->lock->poisoned.load());
 +}
 +
 +// lock.clearPoison(): the value was checked; guards can be taken again.
 +void LockClearPoison(const FunctionCallbackInfo<Value>& info) {
-+  std::shared_ptr<ChannelState> state = ThisLock(info);
-+  if (!state) return;
++  const std::shared_ptr<ChannelState>* lock_state = ThisLock(info);
++  if (!lock_state) return;
++  const std::shared_ptr<ChannelState>& state = *lock_state;
 +  base::MutexGuard guard(channels_mutex.Pointer());
 +  state->lock->poisoned = false;
 +  state->lock->poisoned_at.clear();
@@ -19020,10 +19633,10 @@ index 00000000..5ba3b2b2
 +}  // namespace v8::regions
 diff --git a/src/regions/regions-port.h b/src/regions/regions-port.h
 new file mode 100644
-index 00000000..3138d985
+index 00000000..1450ef70
 --- /dev/null
 +++ b/src/regions/regions-port.h
-@@ -0,0 +1,90 @@
+@@ -0,0 +1,92 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -19037,6 +19650,7 @@ index 00000000..3138d985
 +
 +#include "include/v8-local-handle.h"
 +#include "include/v8-template.h"
++#include "src/base/small-vector.h"
 +#include "src/regions/regions-serializer.h"
 +#include "src/handles/shared-object-conveyor-handles.h"
 +#include "src/objects/js-region.h"
@@ -19073,7 +19687,8 @@ index 00000000..3138d985
 +    }
 +  }
 +
-+  std::vector<Slot> slots;
++  // Most messages are one value: its slot needs no allocation of its own.
++  base::SmallVector<Slot, 1> slots;
 +  std::vector<std::u16string> strings;
 +  std::vector<std::shared_ptr<ChannelState>> channels;
 +  std::unique_ptr<i::SharedObjectConveyorHandles> shared;
@@ -20254,10 +20869,10 @@ index 00000000..f0e14773
 +#endif  // V8_REGIONS_REGIONS_SERIALIZER_H_
 diff --git a/src/regions/regions-spawn.cc b/src/regions/regions-spawn.cc
 new file mode 100644
-index 00000000..88f7f3d5
+index 00000000..ed121cc5
 --- /dev/null
 +++ b/src/regions/regions-spawn.cc
-@@ -0,0 +1,1221 @@
+@@ -0,0 +1,1224 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -21351,7 +21966,8 @@ index 00000000..88f7f3d5
 +      }
 +      return transfer;
 +    };
-+    const entry = ({ value, done }) => ({ value, done });
++    // What recvSync() gets for a closed channel; nothing else can be it.
++    const closed = {};
 +    const method = (value) =>
 +        ({ value, writable: true, configurable: true, enumerable: false });
 +
@@ -21367,10 +21983,12 @@ index 00000000..88f7f3d5
 +      // Resolves to { value, done }; done is true once the channel is closed
 +      // and drained.
 +      recv: method(function recv() {
-+        return nativeRecv.call(this, false).then(entry);
++        return nativeRecv.call(this, false);
 +      }),
 +      recvSync: method(function recvSync() {
-+        return entry(nativeRecv.call(this, true));
++        const value = nativeRecv.call(this, true, closed);
++        return value === closed ? { value: undefined, done: true }
++                                : { value, done: false };
 +      }),
 +      [Symbol.asyncIterator]: method(async function* values() {
 +        for (;;) {

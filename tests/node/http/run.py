@@ -20,6 +20,10 @@
 # the node binary, are counted once, not in every process. A variant name with
 # a +regions suffix (fastify+regions) runs with --harmony-regions, which the
 # spawn() variants always need.
+#
+# The variants `go` and `rust` run the same routes in go-server (net/http) and
+# rust-server (axum on tokio), built beforehand with `go build` and `cargo
+# build --release` in their directories.
 import json
 import os
 import re
@@ -45,6 +49,10 @@ RATES = dict(item.split('=') for item in os.environ.get(
 RATE_DURATION = os.environ.get('RATE_DURATION', '30s')
 VARIANTS = ['fastify', 'fastify-cluster', 'fastify-piscina', 'fastify-spawn', 'rhttp']
 NEED_REGIONS = {'fastify-spawn', 'rhttp'}
+NATIVE = {
+    'go': os.path.join(HERE, 'go-server', 'go-server'),
+    'rust': os.path.join(HERE, 'rust-server', 'target', 'release', 'rust-server'),
+}
 TICKS = os.sysconf('SC_CLK_TCK')
 
 
@@ -131,9 +139,12 @@ def wrk2(route):
 def run(variant):
     name, _, suffix = variant.partition('+')
     flags = ['--harmony-regions'] if name in NEED_REGIONS or suffix == 'regions' else []
+    if name in NATIVE:
+        command = [NATIVE[name], THREADS, PORT]
+    else:
+        command = [NODE, *flags, os.path.join(HERE, 'server.js'), name, THREADS, PORT]
     server = subprocess.Popen(
-        ['taskset', '-c', SERVER_CPUS, NODE, *flags, os.path.join(HERE, 'server.js'),
-         name, THREADS, PORT],
+        ['taskset', '-c', SERVER_CPUS, *command],
         stdout=subprocess.PIPE, text=True, start_new_session=True)
     rows = []
     try:

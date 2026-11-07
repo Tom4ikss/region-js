@@ -35,7 +35,7 @@ async function fastify(routes) {
   app.get('/hello', async () => ({ hello: 'world' }));
   app.get('/compute', (request) => routes.compute(Number(request.query.seed)));
   app.get('/catalog', (request) => routes.catalog(Number(request.query.c)));
-  await app.listen({ port, host: '0.0.0.0' });
+  await app.listen({ port, host: '127.0.0.1' });
   return app;
 }
 
