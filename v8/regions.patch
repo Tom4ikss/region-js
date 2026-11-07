@@ -6227,6 +6227,35 @@ index 7e9ae936..36c7e1b4 100644
  
    V8_INLINE bool IsBlackAllocatedOrWritableShared() const {
      return GetFlags() & kIsBlackAllocatedOrWriteableSharedMask;
+diff --git a/src/heap/memory-reducer.cc b/src/heap/memory-reducer.cc
+index 0ca9d3d3..ad2f3e7c 100644
+--- a/src/heap/memory-reducer.cc
++++ b/src/heap/memory-reducer.cc
+@@ -66,6 +66,15 @@ void MemoryReducer::TimerTask::RunInternal() {
+       base::TimeTicks::Now(), heap->NewSpaceAllocationCounter(),
+       heap->OldGenerationAllocationCounter(), heap->EmbedderAllocationCounter(),
+       heap->ExternalAllocationCounter());
++  // A full GC of the shared space isolate is a shared GC: it stops every
++  // client isolate as well. That this isolate is idle says nothing about the
++  // clients (in Node the main thread is the shared space isolate and often
++  // idles while workers serve requests), so while clients are attached the
++  // timer does not count as idle, and the GC is left to the allocation
++  // limits. This includes the watchdog GC, which otherwise runs every
++  // kWatchdogDelayMs whether the mutator is idle or not.
++  const bool stops_clients = heap->isolate()->is_shared_space_isolate() &&
++                             heap->isolate()->global_safepoint()->HasClients();
+   const bool low_allocation_rate = heap->HasLowAllocationRate();
+   const bool optimize_for_memory = heap->ShouldOptimizeForMemoryUsage();
+   if (v8_flags.trace_memory_reducer) {
+@@ -83,7 +92,7 @@ void MemoryReducer::TimerTask::RunInternal() {
+       GetCommitedSize(heap),
+       false,
+       low_allocation_rate || optimize_for_memory,
+-      heap->incremental_marking()->IsStopped() &&
++      !stops_clients && heap->incremental_marking()->IsStopped() &&
+           heap->incremental_marking()->CanAndShouldBeStarted(),
+   };
+   memory_reducer_->NotifyTimer(event);
 diff --git a/src/heap/mutable-page.h b/src/heap/mutable-page.h
 index b5280854..de1826ac 100644
 --- a/src/heap/mutable-page.h
@@ -6424,6 +6453,51 @@ index cc81fe9c..d7618aaf 100644
  };
  
  // -----------------------------------------------------------------------------
+diff --git a/src/heap/safepoint.cc b/src/heap/safepoint.cc
+index a3c2c267..2d426dec 100644
+--- a/src/heap/safepoint.cc
++++ b/src/heap/safepoint.cc
+@@ -356,6 +356,7 @@ void GlobalSafepoint::AppendClient(Isolate* client) {
+   client->global_safepoint_next_client_isolate_ = clients_head_;
+ 
+   clients_head_ = client;
++  clients_count_.fetch_add(1, std::memory_order_relaxed);
+ }
+ 
+ void GlobalSafepoint::RemoveClient(Isolate* client) {
+@@ -376,6 +377,7 @@ void GlobalSafepoint::RemoveClient(Isolate* client) {
+     DCHECK_EQ(clients_head_, client);
+     clients_head_ = client->global_safepoint_next_client_isolate_;
+   }
++  clients_count_.fetch_sub(1, std::memory_order_relaxed);
+ }
+ 
+ void GlobalSafepoint::AssertNoClientsOnTearDown() {
+diff --git a/src/heap/safepoint.h b/src/heap/safepoint.h
+index 0e40a79e..02e6b2cc 100644
+--- a/src/heap/safepoint.h
++++ b/src/heap/safepoint.h
+@@ -191,6 +191,12 @@ class GlobalSafepoint final {
+ 
+   V8_EXPORT_PRIVATE Isolate* shared_space_isolate() const;
+ 
++  // Whether any client isolate is attached. Reads without the clients mutex;
++  // the answer may be stale by the time the caller acts on it.
++  bool HasClients() const {
++    return clients_count_.load(std::memory_order_relaxed) > 0;
++  }
++
+   template <typename Callback>
+   void IterateClientIsolates(Callback callback) {
+     AssertActive();
+@@ -225,6 +231,7 @@ class GlobalSafepoint final {
+   // GlobalSafepointScopes.
+   base::RecursiveMutex clients_mutex_;
+   Isolate* clients_head_ = nullptr;
++  std::atomic<int> clients_count_{0};
+   int active_safepoint_scopes_ = 0;
+ 
+   friend class GlobalSafepointScope;
 diff --git a/src/heap/sweeper.cc b/src/heap/sweeper.cc
 index 4ea4c9c3..ab21ddf4 100644
 --- a/src/heap/sweeper.cc
