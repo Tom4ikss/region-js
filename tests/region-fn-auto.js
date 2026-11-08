@@ -3,8 +3,8 @@
 // In 'use region' code, a function without a closure becomes a function of
 // Region.fn() the first time an object of a region is to hold it: the
 // function itself, so this thread reads back the same function, and other
-// threads compile its source for themselves. A function with a closure
-// cannot be held, and the error says why.
+// threads compile its source for themselves. A function that needs its
+// closure cannot be held, and the error says why.
 const check = (name, ok) => {
   print(name + ':', ok);
   if (!ok) throw new Error('failed: ' + name);
@@ -46,7 +46,7 @@ const row = region.run(() => makeRow(5));
 check('arrow in a function', isRegion(row) && row.twice(4) === 8);
 
 expectError('closure', () => region.run(() => ({ f: counts })));
-expectError('another function', () => region.run(() => ({ f: callsScale })));
+check('another function', region.run(() => ({ f: callsScale })).f(2) === 6);
 expectError('eval', () => region.run(() => ({ f: usesEval })));
 expectError('method', () => region.run(() => ({ f: withMethod.m })));
 expectError('not use region code', () => region.run(() => ({ f: notRegionCode })));

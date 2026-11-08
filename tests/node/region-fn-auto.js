@@ -10,6 +10,8 @@ function area() { return this.w * this.h; }
 function fact(n) { return n <= 1 ? 1 : n * fact(n - 1); }
 const double = (x) => x * 2;
 function callsFact(n) { return fact(n); }
+let counter = 0;
+function counts() { return ++counter; }
 
 async function main() {
   const region = new Region();
@@ -18,13 +20,16 @@ async function main() {
   assert.strictEqual(shapes[0].area, area);
   assert.strictEqual(shapes[1].f, fact);
   assert.strictEqual(shapes[1].area(), 20);
-  assert.throws(() => region.run(() => ({ f: callsFact })), /cannot use fact of its closure/);
+  const calls = region.run(() => ({ f: callsFact }));
+  assert.strictEqual(calls.f, callsFact);
+  assert.throws(() => region.run(() => ({ f: counts })), /assigns to counter/);
   assert.throws(() => region.run(() => ({ f: require })), /functions of 'use region' code/);
 
   const total = await spawn((list) => list.reduce((sum, s) => sum + s.area(), 0), shapes);
   assert.strictEqual(total, 26);
   const fromTask = await spawn((list) => [list[1].f(5), list[0].area === list[1].area], shapes);
   assert.deepStrictEqual([...fromTask], [120, true]);
+  assert.strictEqual(await spawn((c) => c.f(6), calls), 720);
 
   const all = await Promise.all(Array.from({ length: 32 }, (_, i) => {
     const r = new Region();

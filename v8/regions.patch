@@ -5129,7 +5129,7 @@ index b8e55445..c8b59d07 100644
    V(StoreToConstant, "Storing to a constant field")                            \
    V(StringTooLarge, "Result string larger than String::kMaxLength")            \
 diff --git a/src/diagnostics/objects-debug.cc b/src/diagnostics/objects-debug.cc
-index 48e1ddbc..f39495ef 100644
+index 48e1ddbc..b392664e 100644
 --- a/src/diagnostics/objects-debug.cc
 +++ b/src/diagnostics/objects-debug.cc
 @@ -91,6 +91,7 @@
@@ -5176,9 +5176,9 @@ index 48e1ddbc..f39495ef 100644
 +  CHECK_EQ(keys(), ReadOnlyRoots(isolate).empty_fixed_array());
 +  CHECK_EQ(values(), ReadOnlyRoots(isolate).empty_fixed_array());
 +  CHECK_LE(0, function_id());
-+  CHECK(IsString(source()));
-+  CHECK(HeapLayout::InAnySharedSpace(source()));
-+  CHECK(IsString(script_name()) || IsUndefined(script_name()));
++  CHECK(IsFixedArray(descriptor()));
++  CHECK(HeapLayout::InAnySharedSpace(descriptor()));
++  CHECK_EQ(Smi::FromInt(function_id()), descriptor()->get(0));
 +}
 +
 +void JSRegionClass::JSRegionClassVerify(Isolate* isolate) {
@@ -5234,7 +5234,7 @@ index 48e1ddbc..f39495ef 100644
      Isolate* isolate) {
    JSModuleNamespaceVerify(isolate);
 diff --git a/src/diagnostics/objects-printer.cc b/src/diagnostics/objects-printer.cc
-index 9facec51..b421b2af 100644
+index 9facec51..c8be1a89 100644
 --- a/src/diagnostics/objects-printer.cc
 +++ b/src/diagnostics/objects-printer.cc
 @@ -31,6 +31,7 @@
@@ -5245,7 +5245,7 @@ index 9facec51..b421b2af 100644
  #include "src/objects/shared-function-info-inl.h"
  #include "src/objects/struct.h"
  #include "src/regexp/regexp.h"
-@@ -3049,6 +3050,54 @@ void JSModuleNamespace::JSModuleNamespacePrint(std::ostream& os) {
+@@ -3049,6 +3050,52 @@ void JSModuleNamespace::JSModuleNamespacePrint(std::ostream& os) {
    JSObjectPrintBody(os, this);
  }
  
@@ -5261,9 +5261,7 @@ index 9facec51..b421b2af 100644
 +  JSObjectPrintHeader(os, this, "JSRegionFunction");
 +  os << "\n - region: " << region_id();
 +  os << "\n - function id: " << function_id();
-+  os << "\n - script name: " << Brief(script_name());
-+  os << "\n - line: " << line() << ", column: " << column();
-+  os << "\n - region code: " << region_code();
++  os << "\n - descriptor: " << Brief(descriptor());
 +  JSObjectPrintBody(os, this);
 +}
 +
@@ -9331,10 +9329,10 @@ index 9c6f4043..0e1c4b10 100644
                                                  DirectHandle<Object> reactions,
 diff --git a/src/objects/js-region-inl.h b/src/objects/js-region-inl.h
 new file mode 100644
-index 00000000..ec28ebeb
+index 00000000..8cce1ff8
 --- /dev/null
 +++ b/src/objects/js-region-inl.h
-@@ -0,0 +1,175 @@
+@@ -0,0 +1,164 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -9406,25 +9404,14 @@ index 00000000..ec28ebeb
 +int JSRegionFunction::function_id() const {
 +  return function_id_.load().value();
 +}
-+Tagged<String> JSRegionFunction::source() const { return source_.load(); }
-+Tagged<Union<String, Undefined>> JSRegionFunction::script_name() const {
-+  return script_name_.load();
-+}
-+int JSRegionFunction::line() const { return line_.load().value(); }
-+int JSRegionFunction::column() const { return column_.load().value(); }
-+bool JSRegionFunction::region_code() const {
-+  return region_code_.load().value() != 0;
++Tagged<FixedArray> JSRegionFunction::descriptor() const {
++  return descriptor_.load();
 +}
 +
-+void JSRegionFunction::Initialize(int function_id, Tagged<String> source,
-+                                  Tagged<Union<String, Undefined>> script_name,
-+                                  int line, int column, bool region_code) {
++void JSRegionFunction::Initialize(int function_id,
++                                  Tagged<FixedArray> descriptor) {
 +  function_id_.store(this, Smi::FromInt(function_id));
-+  source_.store(this, source);
-+  script_name_.store(this, script_name);
-+  line_.store(this, Smi::FromInt(line));
-+  column_.store(this, Smi::FromInt(column));
-+  region_code_.store(this, Smi::FromInt(region_code ? 1 : 0));
++  descriptor_.store(this, descriptor);
 +}
 +
 +DEF_CAST_TRAITS(JSRegionClass)
@@ -9512,10 +9499,10 @@ index 00000000..ec28ebeb
 +#endif  // V8_OBJECTS_JS_REGION_INL_H_
 diff --git a/src/objects/js-region.cc b/src/objects/js-region.cc
 new file mode 100644
-index 00000000..efaf246d
+index 00000000..7d9beaf3
 --- /dev/null
 +++ b/src/objects/js-region.cc
-@@ -0,0 +1,5281 @@
+@@ -0,0 +1,5416 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -11427,9 +11414,14 @@ index 00000000..efaf246d
 +// reading the same id again gives the same function: `a.f === b.f`.
 +class RegionFunctions {
 + public:
-+  // What such a JSFunction holds under the private Symbol() of its isolate:
-+  // [id, source, script name, line, column, region code], the strings shared
-+  // outside of regions.
++  // What a function is, in a FixedArray shared outside of regions, which
++  // such a JSFunction holds under the private Symbol() of its isolate and its
++  // holders refer to: [id, source, script name, line, column, region code,
++  // captures]. The strings are shared, `region code` is 1 for the source of
++  // 'use region' code, and `captures` are the names and values the source
++  // refers to, interleaved: shared primitives, holders of classes and
++  // descriptors of other such functions. Set once, before any region holds
++  // the function.
 +  enum {
 +    kId,
 +    kSource,
@@ -11437,6 +11429,7 @@ index 00000000..efaf246d
 +    kLine,
 +    kColumn,
 +    kRegionCode,
++    kCaptures,
 +    kDescriptorLength
 +  };
 +
@@ -11460,16 +11453,7 @@ index 00000000..efaf246d
 +
 +  static DirectHandle<FixedArray> DescriptorOf(
 +      Isolate* isolate, DirectHandle<JSRegionFunction> holder) {
-+    DirectHandle<FixedArray> descriptor =
-+        isolate->factory()->NewFixedArray(kDescriptorLength);
-+    DisallowGarbageCollection no_gc;
-+    descriptor->set(kId, Smi::FromInt(holder->function_id()));
-+    descriptor->set(kSource, holder->source());
-+    descriptor->set(kScriptName, holder->script_name());
-+    descriptor->set(kLine, Smi::FromInt(holder->line()));
-+    descriptor->set(kColumn, Smi::FromInt(holder->column()));
-+    descriptor->set(kRegionCode, Smi::FromInt(holder->region_code() ? 1 : 0));
-+    return descriptor;
++    return direct_handle(holder->descriptor(), isolate);
 +  }
 +
 +  // This isolate's function for `id`, if JS still refers to it.
@@ -11482,59 +11466,20 @@ index 00000000..efaf246d
 +  }
 +
 +  // This isolate's function for `descriptor`, compiled now if needed.
-+  // `own`, if given, is that function already, the one the source is of.
 +  static MaybeDirectHandle<JSFunction> Function(
-+      Isolate* isolate, DirectHandle<FixedArray> descriptor,
-+      MaybeDirectHandle<JSFunction> own = {}) {
-+    int id = Smi::ToInt(descriptor->get(kId));
-+    DirectHandle<JSFunction> known;
-+    if (Find(isolate, id).ToHandle(&known)) return known;
-+    if (own.ToHandle(&known)) return Register(isolate, id, descriptor, known);
++      Isolate* isolate, DirectHandle<FixedArray> descriptor);
 +
-+    Factory* factory = isolate->factory();
-+    // As an expression, the way Function.prototype.toString() gave it, and
-+    // as 'use region' code if it was written as such.
-+    Handle<String> source(Cast<String>(descriptor->get(kSource)), isolate);
-+    bool region_code = Smi::ToInt(descriptor->get(kRegionCode)) != 0;
-+    int line = Smi::ToInt(descriptor->get(kLine));
-+    int column = Smi::ToInt(descriptor->get(kColumn));
-+    // The directive goes on a line of its own, if there is one before.
-+    bool own_line = region_code && line > 0;
-+    const char* prefix_text = !region_code ? "("
-+                              : own_line   ? "'use region';\n("
-+                                           : "'use region';(";
-+    Handle<String> prefix = factory->NewStringFromAsciiChecked(prefix_text);
-+    int prefix_columns = own_line ? 1 : static_cast<int>(prefix->length());
-+    Handle<String> wrapped;
-+    ASSIGN_RETURN_ON_EXCEPTION(isolate, wrapped,
-+                               factory->NewConsString(prefix, source));
-+    ASSIGN_RETURN_ON_EXCEPTION(
-+        isolate, wrapped,
-+        factory->NewConsString(wrapped, factory->NewStringFromAsciiChecked("\n)")));
-+    // Lines and columns of the file the function was written in, for stack
-+    // traces; the prefix shifts the first line.
-+    ScriptDetails details(handle(descriptor->get(kScriptName), isolate),
-+                          ScriptOriginOptions(false, false));
-+    details.line_offset = own_line ? line - 1 : line;
-+    details.column_offset = std::max(0, column - prefix_columns);
-+    ScriptCompiler::CompilationDetails compilation_details;
-+    DirectHandle<SharedFunctionInfo> shared;
-+    ASSIGN_RETURN_ON_EXCEPTION(
-+        isolate, shared,
-+        Compiler::GetSharedFunctionInfoForScript(
-+            isolate, wrapped, details, ScriptCompiler::kNoCompileOptions,
-+            ScriptCompiler::kNoCacheNoReason, NOT_NATIVES_CODE,
-+            &compilation_details));
-+    DirectHandle<JSFunction> script =
-+        Factory::JSFunctionBuilder{isolate, shared, isolate->native_context()}
-+            .Build();
-+    DirectHandle<Object> result;
-+    ASSIGN_RETURN_ON_EXCEPTION(
-+        isolate, result,
-+        Execution::CallScript(isolate, script, isolate->global_proxy(),
-+                              isolate->factory()->empty_fixed_array()));
-+    CHECK(IsJSFunction(*result));
-+    return Register(isolate, id, descriptor, Cast<JSFunction>(result));
++  // Makes `function` this isolate's function for `descriptor`.
++  static DirectHandle<JSFunction> Register(Isolate* isolate,
++                                           DirectHandle<FixedArray> descriptor,
++                                           DirectHandle<JSFunction> function) {
++    JSObject::AddProperty(isolate, function, Symbol(isolate), descriptor,
++                          DONT_ENUM);
++    Address*& location = Of(isolate).functions[Smi::ToInt(descriptor->get(kId))];
++    DCHECK_NULL(location);
++    location = isolate->global_handles()->Create(*function).location();
++    GlobalHandles::MakeWeak(&location);
++    return function;
 +  }
 +
 +  // A holder of the function in `region`, which this isolate owns.
@@ -11560,14 +11505,8 @@ index 00000000..efaf246d
 +    holder->set_keys(empty);
 +    holder->set_values(empty);
 +    holder->set_array_length(0);
-+    Tagged<Object> name = descriptor->get(kScriptName);
-+    holder->Initialize(
-+        Smi::ToInt(descriptor->get(kId)), Cast<String>(descriptor->get(kSource)),
-+        IsString(name) ? Tagged<Union<String, Undefined>>(Cast<String>(name))
-+                       : Tagged<Union<String, Undefined>>(
-+                             ReadOnlyRoots(isolate).undefined_value()),
-+        Smi::ToInt(descriptor->get(kLine)), Smi::ToInt(descriptor->get(kColumn)),
-+        Smi::ToInt(descriptor->get(kRegionCode)) != 0);
++    DCHECK(HeapLayout::InAnySharedSpace(*descriptor));
++    holder->Initialize(Smi::ToInt(descriptor->get(kId)), *descriptor);
 +    return holder;
 +  }
 +
@@ -11587,17 +11526,13 @@ index 00000000..efaf246d
 +  }
 +
 + private:
-+  // Makes `function` this isolate's function for `id`.
-+  static DirectHandle<JSFunction> Register(Isolate* isolate, int id,
-+                                           DirectHandle<FixedArray> descriptor,
-+                                           DirectHandle<JSFunction> function) {
-+    JSObject::AddProperty(isolate, function, Symbol(isolate), descriptor,
-+                          DONT_ENUM);
++  // Forgets this isolate's function for `id`, one that could not get its
++  // captures.
++  static void Unregister(Isolate* isolate, int id) {
 +    Address*& location = Of(isolate).functions[id];
-+    DCHECK_NULL(location);
-+    location = isolate->global_handles()->Create(*function).location();
-+    GlobalHandles::MakeWeak(&location);
-+    return function;
++    if (location == nullptr) return;
++    GlobalHandles::Destroy(location);
++    location = nullptr;
 +  }
 +
 +  struct State {
@@ -12183,6 +12118,134 @@ index 00000000..efaf246d
 +
 +void RegionLocalRefsScanned(const std::unordered_set<int>& live) {
 +  RegionLocalRefs::Scanned(live);
++}
++
++// static
++MaybeDirectHandle<JSFunction> RegionFunctions::Function(
++    Isolate* isolate, DirectHandle<FixedArray> descriptor) {
++  int id = Smi::ToInt(descriptor->get(kId));
++  DirectHandle<JSFunction> known;
++  if (Find(isolate, id).ToHandle(&known)) return known;
++  StackLimitCheck check(isolate);
++  if (check.HasOverflowed()) {
++    isolate->StackOverflow();
++    return {};
++  }
++
++  // As an expression, the way Function.prototype.toString() gave it, and as
++  // 'use region' code if it was written as such. With captures, a function
++  // declares them, and `this.set` of the receiver it is called with sets
++  // them: once the function is known, as what it captures may capture it.
++  Factory* factory = isolate->factory();
++  DirectHandle<FixedArray> captures(Cast<FixedArray>(descriptor->get(kCaptures)),
++                                    isolate);
++  int count = static_cast<int>(captures->ulength().value()) / 2;
++  bool region_code = Smi::ToInt(descriptor->get(kRegionCode)) != 0;
++  int line = Smi::ToInt(descriptor->get(kLine));
++  int column = Smi::ToInt(descriptor->get(kColumn));
++  // The directive goes on a line of its own, if there is one before.
++  bool own_line = region_code && line > 0;
++  IncrementalStringBuilder wrapped(isolate);
++  if (region_code) {
++    if (own_line) {
++      wrapped.AppendCStringLiteral("'use region';\n");
++    } else {
++      wrapped.AppendCStringLiteral("'use region';");
++    }
++  }
++  int line_start = own_line ? wrapped.Length() : 0;
++  if (count > 0) {
++    wrapped.AppendCStringLiteral("(function(){let ");
++    for (int i = 0; i < count; i++) {
++      if (i > 0) wrapped.AppendCharacter(',');
++      wrapped.AppendString(
++          direct_handle(Cast<String>(captures->get(2 * i)), isolate));
++    }
++    wrapped.AppendCStringLiteral(";this.set=function(){");
++    for (int i = 0; i < count; i++) {
++      wrapped.AppendString(
++          direct_handle(Cast<String>(captures->get(2 * i)), isolate));
++      wrapped.AppendCStringLiteral("=arguments[");
++      wrapped.AppendCString(std::to_string(i).c_str());
++      wrapped.AppendCStringLiteral("];");
++    }
++    wrapped.AppendCStringLiteral("};return(");
++  } else {
++    wrapped.AppendCharacter('(');
++  }
++  int prefix_columns = wrapped.Length() - line_start;
++  wrapped.AppendString(
++      direct_handle(Cast<String>(descriptor->get(kSource)), isolate));
++  if (count > 0) {
++    wrapped.AppendCStringLiteral("\n)})");
++  } else {
++    wrapped.AppendCStringLiteral("\n)");
++  }
++  DirectHandle<String> source;
++  ASSIGN_RETURN_ON_EXCEPTION(isolate, source, wrapped.Finish());
++
++  // Lines and columns of the file the function was written in, for stack
++  // traces; the prefix shifts the first line.
++  ScriptDetails details(handle(descriptor->get(kScriptName), isolate),
++                        ScriptOriginOptions(false, false));
++  details.line_offset = own_line ? line - 1 : line;
++  details.column_offset = std::max(0, column - prefix_columns);
++  ScriptCompiler::CompilationDetails compilation_details;
++  DirectHandle<SharedFunctionInfo> shared;
++  ASSIGN_RETURN_ON_EXCEPTION(
++      isolate, shared,
++      Compiler::GetSharedFunctionInfoForScript(
++          isolate, handle(*source, isolate), details,
++          ScriptCompiler::kNoCompileOptions, ScriptCompiler::kNoCacheNoReason,
++          NOT_NATIVES_CODE, &compilation_details));
++  DirectHandle<JSFunction> script =
++      Factory::JSFunctionBuilder{isolate, shared, isolate->native_context()}
++          .Build();
++  DirectHandle<Object> result;
++  ASSIGN_RETURN_ON_EXCEPTION(
++      isolate, result,
++      Execution::CallScript(isolate, script, isolate->global_proxy(),
++                            factory->empty_fixed_array()));
++  CHECK(IsJSFunction(*result));
++  if (count == 0) return Register(isolate, descriptor, Cast<JSFunction>(result));
++
++  DirectHandle<JSObject> receiver =
++      factory->NewJSObject(isolate->object_function());
++  ASSIGN_RETURN_ON_EXCEPTION(
++      isolate, result,
++      Execution::Call(isolate, result, receiver, {}));
++  CHECK(IsJSFunction(*result));
++  DirectHandle<JSFunction> function = Cast<JSFunction>(result);
++  DirectHandle<Object> setter = JSReceiver::GetDataProperty(
++      isolate, receiver, factory->InternalizeUtf8String("set"));
++  CHECK(IsJSFunction(*setter));
++  Register(isolate, descriptor, function);
++
++  DirectHandleVector<Object> values(isolate);
++  bool ok = true;
++  for (int i = 0; ok && i < count; i++) {
++    Handle<Object> value(captures->get(2 * i + 1), isolate);
++    if (IsFixedArray(*value)) {
++      DirectHandle<JSFunction> captured;
++      ok = Function(isolate, Cast<FixedArray>(value)).ToHandle(&captured);
++      if (ok) values.push_back(captured);
++    } else if (IsJSRegionClass(*value)) {
++      DirectHandle<JSFunction> constructor;
++      ok = RegionClasses::Constructor(isolate, Cast<JSRegionClass>(value))
++               .ToHandle(&constructor);
++      if (ok) values.push_back(constructor);
++    } else {
++      DirectHandle<Object> local;
++      ok = JSRegionObject::ToJSValue(isolate, value).ToHandle(&local);
++      if (ok) values.push_back(local);
++    }
++  }
++  if (!ok || Execution::Call(isolate, setter, receiver, base::VectorOf(values))
++                 .is_null()) {
++    Unregister(isolate, id);
++    return {};
++  }
++  return function;
 +}
 +
 +namespace {
@@ -12978,10 +13041,9 @@ index 00000000..efaf246d
 +}
 +
 +// static
-+MaybeDirectHandle<JSFunction> JSRegionObject::NewFunction(
++MaybeDirectHandle<FixedArray> JSRegionObject::NewFunctionDescriptor(
 +    Isolate* isolate, DirectHandle<String> source,
-+    DirectHandle<Object> script_name, int line, int column, bool region_code,
-+    MaybeDirectHandle<JSFunction> own) {
++    DirectHandle<Object> script_name, int line, int column, bool region_code) {
 +  Factory* factory = isolate->factory();
 +  DirectHandle<Object> shared_source;
 +  ASSIGN_RETURN_ON_EXCEPTION(isolate, shared_source,
@@ -12991,8 +13053,9 @@ index 00000000..efaf246d
 +    ASSIGN_RETURN_ON_EXCEPTION(isolate, shared_name,
 +                               ShareValue(isolate, -1, script_name));
 +  }
-+  DirectHandle<FixedArray> descriptor =
-+      factory->NewFixedArray(RegionFunctions::kDescriptorLength);
++  DirectHandle<FixedArray> descriptor = factory->NewFixedArray(
++      RegionFunctions::kDescriptorLength, AllocationType::kSharedOld);
++  DisallowGarbageCollection no_gc;
 +  descriptor->set(RegionFunctions::kId, Smi::FromInt(RegionFunctions::NewId()));
 +  descriptor->set(RegionFunctions::kSource, *shared_source);
 +  descriptor->set(RegionFunctions::kScriptName, *shared_name);
@@ -13000,7 +13063,66 @@ index 00000000..efaf246d
 +  descriptor->set(RegionFunctions::kColumn, Smi::FromInt(column));
 +  descriptor->set(RegionFunctions::kRegionCode,
 +                  Smi::FromInt(region_code ? 1 : 0));
-+  return RegionFunctions::Function(isolate, descriptor, own);
++  descriptor->set(RegionFunctions::kCaptures,
++                  ReadOnlyRoots(isolate).empty_fixed_array());
++  return descriptor;
++}
++
++// static
++Maybe<bool> JSRegionObject::SetFunctionCaptures(
++    Isolate* isolate, DirectHandle<FixedArray> descriptor,
++    DirectHandle<FixedArray> captures) {
++  int length = static_cast<int>(captures->ulength().value());
++  if (length == 0) return Just(true);
++  DirectHandle<FixedArray> shared_captures =
++      isolate->factory()->NewFixedArray(length, AllocationType::kSharedOld);
++  for (int i = 0; i < length; i += 2) {
++    DirectHandle<Object> name;
++    ASSIGN_RETURN_ON_EXCEPTION_VALUE(
++        isolate, name,
++        ShareValue(isolate, -1, direct_handle(captures->get(i), isolate)),
++        Nothing<bool>());
++    shared_captures->set(i, *name);
++    DirectHandle<Object> value(captures->get(i + 1), isolate);
++    DirectHandle<JSRegionClass> class_holder;
++    DirectHandle<FixedArray> function_descriptor;
++    if (IsFixedArray(*value)) {
++      DCHECK(HeapLayout::InAnySharedSpace(Cast<FixedArray>(*value)));
++      shared_captures->set(i + 1, *value);
++    } else if (RegionClasses::HolderOf(isolate, value).ToHandle(&class_holder)) {
++      shared_captures->set(i + 1, *class_holder);
++    } else if (RegionFunctions::DescriptorOf(isolate, value)
++                   .ToHandle(&function_descriptor)) {
++      shared_captures->set(i + 1, *function_descriptor);
++    } else {
++      DirectHandle<Object> shared;
++      ASSIGN_RETURN_ON_EXCEPTION_VALUE(isolate, shared,
++                                       ShareValue(isolate, -1, value),
++                                       Nothing<bool>());
++      shared_captures->set(i + 1, *shared);
++    }
++  }
++  descriptor->set(RegionFunctions::kCaptures, *shared_captures);
++  return Just(true);
++}
++
++// static
++void JSRegionObject::AdoptFunction(Isolate* isolate,
++                                   DirectHandle<FixedArray> descriptor,
++                                   DirectHandle<JSFunction> function) {
++  RegionFunctions::Register(isolate, descriptor, function);
++}
++
++// static
++MaybeDirectHandle<JSFunction> JSRegionObject::FunctionOf(
++    Isolate* isolate, DirectHandle<FixedArray> descriptor) {
++  return RegionFunctions::Function(isolate, descriptor);
++}
++
++// static
++MaybeDirectHandle<FixedArray> JSRegionObject::FunctionDescriptorOf(
++    Isolate* isolate, DirectHandle<Object> value) {
++  return RegionFunctions::DescriptorOf(isolate, value);
 +}
 +
 +// static
@@ -14799,10 +14921,10 @@ index 00000000..efaf246d
 +}  // namespace v8
 diff --git a/src/objects/js-region.h b/src/objects/js-region.h
 new file mode 100644
-index 00000000..72a3867a
+index 00000000..186bd7bf
 --- /dev/null
 +++ b/src/objects/js-region.h
-@@ -0,0 +1,849 @@
+@@ -0,0 +1,855 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -15401,17 +15523,35 @@ index 00000000..72a3867a
 +
 +  // Region.fn(): a function that objects of any region can hold, made from
 +  // `source`, the text of a function that refers to nothing but its
-+  // arguments, `this` and globals. Storing it in a region object stores a
-+  // holder of its code (JSRegionFunction); every isolate that reads a holder
-+  // gets its own compiled copy of the function. `line` and `column` (0-based)
-+  // place the source in `script_name` for stack traces. `own`, if given, is
-+  // the function `source` is of: it becomes the function in this isolate,
-+  // rather than a copy compiled now. With `region_code`, every isolate
-+  // compiles `source` as 'use region' code, as it was written.
-+  static MaybeDirectHandle<JSFunction> NewFunction(
++  // arguments, `this`, globals and its captures. Storing it in a region
++  // object stores a holder of its descriptor (JSRegionFunction); every
++  // isolate that reads a holder gets its own compiled copy of the function.
++  // `line` and `column` (0-based) place the source in `script_name` for stack
++  // traces; with `region_code`, every isolate compiles `source` as 'use
++  // region' code, as it was written.
++  //
++  // NewFunctionDescriptor() makes the descriptor. SetFunctionCaptures() sets,
++  // once, what the source refers to: `captures` are names and values
++  // interleaved, the values primitives, classes of NewClass(), functions with
++  // a descriptor and descriptors themselves, for functions that capture each
++  // other. Then AdoptFunction() makes a function, the one the source is of,
++  // the function of the descriptor in this isolate, or FunctionOf() compiles
++  // it.
++  static MaybeDirectHandle<FixedArray> NewFunctionDescriptor(
 +      Isolate* isolate, DirectHandle<String> source,
 +      DirectHandle<Object> script_name, int line, int column,
-+      bool region_code, MaybeDirectHandle<JSFunction> own = {});
++      bool region_code);
++  static Maybe<bool> SetFunctionCaptures(Isolate* isolate,
++                                         DirectHandle<FixedArray> descriptor,
++                                         DirectHandle<FixedArray> captures);
++  static void AdoptFunction(Isolate* isolate,
++                            DirectHandle<FixedArray> descriptor,
++                            DirectHandle<JSFunction> function);
++  static MaybeDirectHandle<JSFunction> FunctionOf(
++      Isolate* isolate, DirectHandle<FixedArray> descriptor);
++  // The descriptor of `value` if it is such a function in this isolate.
++  static MaybeDirectHandle<FixedArray> FunctionDescriptorOf(
++      Isolate* isolate, DirectHandle<Object> value);
 +
 +  // Region.class(): a class whose instances regions can hold, made from
 +  // `source`, the text of a class that refers to nothing but globals and
@@ -15434,7 +15574,7 @@ index 00000000..72a3867a
 +      Isolate* isolate, DirectHandle<Object> new_target);
 +  // Whether `value` is a class of NewClass() in this isolate.
 +  static bool IsClass(Isolate* isolate, DirectHandle<Object> value);
-+  // Whether `value` is a function of NewFunction() in this isolate.
++  // Whether `value` is a function of a descriptor in this isolate.
 +  static bool IsSharedFunction(Isolate* isolate, DirectHandle<Object> value);
 +  // A class declared in 'use region' code becomes a class of Region.class():
 +  // `hook` makes it, set by the code that installs the Region global, which
@@ -15451,7 +15591,7 @@ index 00000000..72a3867a
 +  using ShareFunctionHook = MaybeDirectHandle<Object> (*)(
 +      Isolate* isolate, DirectHandle<JSFunction> function);
 +  static void SetShareFunctionHook(ShareFunctionHook hook);
-+  // Whether `value` is a function of NewFunction() in this isolate, made one
++  // Whether `value` is a function of a descriptor in this isolate, made one
 +  // now if it is a function of 'use region' code; Nothing, with the
 +  // exception thrown, if it cannot be one.
 +  static Maybe<bool> ToSharedFunction(Isolate* isolate,
@@ -15560,16 +15700,9 @@ index 00000000..72a3867a
 +V8_OBJECT class JSRegionFunction : public JSRegionObject {
 + public:
 +  inline int function_id() const;
-+  inline Tagged<String> source() const;
-+  inline Tagged<Union<String, Undefined>> script_name() const;
-+  inline int line() const;
-+  inline int column() const;
-+  // Whether the source is of 'use region' code, so every isolate compiles it
-+  // as such.
-+  inline bool region_code() const;
-+  inline void Initialize(int function_id, Tagged<String> source,
-+                         Tagged<Union<String, Undefined>> script_name,
-+                         int line, int column, bool region_code);
++  // What the function is, shared outside of regions: see RegionFunctions.
++  inline Tagged<FixedArray> descriptor() const;
++  inline void Initialize(int function_id, Tagged<FixedArray> descriptor);
 +
 +  DECL_PRINTER(JSRegionFunction)
 +  DECL_VERIFIER(JSRegionFunction)
@@ -15578,12 +15711,7 @@ index 00000000..72a3867a
 +
 + public:
 +  TaggedMember<Smi> function_id_;
-+  TaggedMember<String> source_;
-+  TaggedMember<Union<String, Undefined>> script_name_;
-+  // Where the source starts in its script, 0-based.
-+  TaggedMember<Smi> line_;
-+  TaggedMember<Smi> column_;
-+  TaggedMember<Smi> region_code_;
++  TaggedMember<FixedArray> descriptor_;
 +} V8_OBJECT_END;
 +
 +inline constexpr int JSRegionFunction::kHeaderSize = sizeof(JSRegionFunction);
@@ -15654,10 +15782,10 @@ index 00000000..72a3867a
 +#endif  // V8_OBJECTS_JS_REGION_H_
 diff --git a/src/objects/js-region.tq b/src/objects/js-region.tq
 new file mode 100644
-index 00000000..d814bfec
+index 00000000..79fb975b
 --- /dev/null
 +++ b/src/objects/js-region.tq
-@@ -0,0 +1,79 @@
+@@ -0,0 +1,76 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -15692,13 +15820,10 @@ index 00000000..d814bfec
 +@cppObjectLayoutDefinition
 +extern class JSRegionFunction extends JSRegionObject {
 +  function_id: Smi;
-+  // Shared strings outside of regions, like the keys of region objects.
-+  source: String;
-+  script_name: String|Undefined;
-+  line: Smi;
-+  column: Smi;
-+  // 1 if the source is of 'use region' code, 0 otherwise.
-+  region_code: Smi;
++  // What the function is, shared outside of regions and never changed once
++  // a region holds it: its source, its place, what it captures (see
++  // RegionFunctions).
++  descriptor: FixedArray;
 +}
 +
 +// A class of Region.class(): its source, which every isolate that uses the
@@ -18595,10 +18720,10 @@ index 00000000..7a176531
 +#endif  // V8_REGIONS_REGIONS_CHANNEL_H_
 diff --git a/src/regions/regions-globals.cc b/src/regions/regions-globals.cc
 new file mode 100644
-index 00000000..f4f4727e
+index 00000000..d9a208b3
 --- /dev/null
 +++ b/src/regions/regions-globals.cc
-@@ -0,0 +1,1976 @@
+@@ -0,0 +1,2083 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -19348,7 +19473,8 @@ index 00000000..f4f4727e
 +                        i::Handle<i::SharedFunctionInfo> shared,
 +                        std::set<std::string>* names,
 +                        bool* uses_dynamic_scope, bool* uses_classes,
-+                        ClassScan* scan = nullptr) {
++                        ClassScan* scan = nullptr,
++                        std::set<std::string>* written = nullptr) {
 +  if (i::IsClassConstructor(shared->kind())) {
 +    *uses_classes = true;
 +    if (scan && shared->class_scope_has_private_brand()) {
@@ -19373,12 +19499,17 @@ index 00000000..f4f4727e
 +    switch (it.current_bytecode()) {
 +      case Bytecode::kLdaGlobal:
 +      case Bytecode::kLdaGlobalInsideTypeof:
-+      case Bytecode::kStaGlobal:
-+        names->insert(
++      case Bytecode::kStaGlobal: {
++        std::string name =
 +            i::Cast<i::String>(*it.GetConstantForOperand(0, isolate))
 +                ->ToCString()
-+                .get());
++                .get();
++        if (written && it.current_bytecode() == Bytecode::kStaGlobal) {
++          written->insert(name);
++        }
++        names->insert(std::move(name));
 +        break;
++      }
 +      case Bytecode::kLdaLookupSlot:
 +      case Bytecode::kLdaLookupContextSlotNoCell:
 +      case Bytecode::kLdaLookupContextSlot:
@@ -19425,7 +19556,8 @@ index 00000000..f4f4727e
 +    if (!CollectGlobalNames(isolate,
 +                            i::handle(i::Cast<i::SharedFunctionInfo>(entry),
 +                                      isolate),
-+                            names, uses_dynamic_scope, uses_classes, scan)) {
++                            names, uses_dynamic_scope, uses_classes, scan,
++                            written)) {
 +      return false;
 +    }
 +  }
@@ -19441,7 +19573,8 @@ index 00000000..f4f4727e
 +// sent to another isolate. Sets `is_builtin` for globals every context has.
 +bool ResolveCapture(Isolate* isolate, bool in_probe, Local<Function> function,
 +                    const std::string& name, Local<Value>* value,
-+                    bool* is_builtin, std::string* error) {
++                    bool* is_builtin, std::string* error,
++                    bool* is_const = nullptr) {
 +  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
 +  i::Handle<i::Context> context(
 +      i::Cast<i::JSFunction>(*Utils::OpenDirectHandle(*function))->context(),
@@ -19456,6 +19589,7 @@ index 00000000..f4f4727e
 +      i::Context::Lookup(context, i_name, i::FOLLOW_CHAINS, &index, &attributes,
 +                         &init_flag, &mode);
 +  *is_builtin = false;
++  if (is_const) *is_const = false;
 +  if (holder.is_null() || i::IsJSGlobalObject(*holder)) {
 +    if (in_probe) {
 +      *is_builtin = true;
@@ -19482,6 +19616,7 @@ index 00000000..f4f4727e
 +    return false;
 +  }
 +  *value = Utils::ToLocal(i::Context::Get(holder_context, index, i_isolate));
++  if (is_const) *is_const = mode == i::VariableMode::kConst;
 +  return true;
 +}
 +
@@ -19569,6 +19704,7 @@ index 00000000..f4f4727e
 +      return nullptr;
 +    }
 +    std::set<std::string> names;
++    std::set<std::string> written;
 +    bool uses_dynamic_scope = false;
 +    bool uses_classes = false;
 +    bool compiled = false;
@@ -19589,12 +19725,14 @@ index 00000000..f4f4727e
 +                ->shared(),
 +            i_isolate);
 +        compiled = CollectGlobalNames(i_isolate, shared, &names,
-+                                      &uses_dynamic_scope, &uses_classes);
++                                      &uses_dynamic_scope, &uses_classes,
++                                      nullptr, &written);
 +      }
 +    }
 +    Analysis fresh{static_cast<int>(data->spawn_analyses.size()),
 +                   Global<String>(isolate, source),
 +                   {},
++                   std::move(written),
 +                   !compiled             ? Analysis::Failure::kNotCompiled
 +                   : uses_dynamic_scope  ? Analysis::Failure::kDynamicScope
 +                   : uses_classes        ? Analysis::Failure::kClasses
@@ -19663,7 +19801,7 @@ index 00000000..f4f4727e
 +    const std::string label =
 +        current.name.empty() ? "spawn() callback" : "captured function " + current.name;
 +    using Analysis = SpawnAnalysis;
-+    Analysis uncached{-1, {}, {}, Analysis::Failure::kNotCompiled, {}};
++    Analysis uncached{-1, {}, {}, {}, Analysis::Failure::kNotCompiled, {}};
 +    Analysis* analysis =
 +        AnalyzeSpawnFunction(isolate, context, current.function, &uncached);
 +    if (!analysis) return;
@@ -19787,97 +19925,191 @@ index 00000000..f4f4727e
 +
 +namespace {
 +
-+// A function of Region.fn() made from `function`. Its source is compiled
-+// again in every isolate that reads it, without the closure, so it may refer
-+// only to its arguments, `this`, globals that every isolate has and its own
-+// name. With `own`, `function` itself becomes that function in this isolate,
-+// as a function of 'use region' code does when a region object is to hold
-+// it.
++// A function of Region.fn() made from `root`. Its source is compiled again
++// in every isolate that reads it, without the closure, so it may refer only
++// to its arguments, `this`, globals that every isolate has, its own name and
++// captures read now: primitives of consts, classes of Region.class() and
++// functions of Region.fn(). Functions of 'use region' code it refers to
++// become such functions too, themselves, and so do those they refer to; they
++// may refer to each other. With `own`, `root` itself becomes that function in
++// this isolate, as a function of 'use region' code does when a region object
++// is to hold it. Nothing changes unless every function can be one.
 +MaybeLocal<Function> NewRegionFunction(Isolate* isolate, Local<Context> context,
-+                                       Local<Function> function, bool own) {
-+  const std::string subject =
-+      own ? "a function held by a region object" : "a Region.fn() function";
++                                       Local<Function> root, bool own) {
++  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
 +  auto throw_type_error = [isolate](const std::string& message) {
 +    isolate->ThrowException(Exception::TypeError(
 +        String::NewFromUtf8(isolate, message.c_str()).ToLocalChecked()));
 +  };
-+  using Analysis = SpawnAnalysis;
-+  Analysis uncached{-1, {}, {}, Analysis::Failure::kNotCompiled, {}};
-+  Analysis* analysis =
-+      AnalyzeSpawnFunction(isolate, context, function, &uncached);
-+  if (!analysis) return {};
-+  switch (analysis->failure) {
-+    case Analysis::Failure::kNone:
-+      break;
-+    case Analysis::Failure::kNotCompiled:
-+      throw_type_error(
-+          own ? "a region object can hold arrow functions, function "
-+                "expressions and function declarations, not methods"
-+              : "Region.fn() needs an arrow function or a function expression");
-+      return {};
-+    case Analysis::Failure::kDynamicScope:
-+      throw_type_error(subject + " cannot use eval or with");
-+      return {};
-+    case Analysis::Failure::kClasses:
-+      throw_type_error(subject +
-+                       " declares or is a class; classes are not supported");
-+      return {};
-+  }
-+  for (const auto& [name, in_probe] : analysis->names) {
-+    Local<Value> value;
-+    bool is_builtin;
-+    std::string error;
-+    bool resolved;
-+    {
-+      // The error below replaces the exception, if any.
-+      TryCatch try_catch(isolate);
-+      resolved = ResolveCapture(isolate, in_probe, function, name, &value,
-+                                &is_builtin, &error);
++  struct Pending {
++    Local<Function> function;
++    // The name the first function that refers to it knows it by.
++    std::string name;
++    i::DirectHandle<i::FixedArray> descriptor;
++    std::vector<std::pair<std::string, Local<Value>>> captures;
++  };
++  std::vector<Pending> pending;
++  pending.push_back({root, "", {}, {}});
++  auto index_of = [&pending](Local<Value> value) {
++    for (size_t i = 0; i < pending.size(); i++) {
++      if (pending[i].function->StrictEquals(value)) return static_cast<int>(i);
 +    }
-+    if (!resolved) {
-+      throw_type_error(error.empty() ? "cannot read " + name : error);
-+      return {};
++    return -1;
++  };
++  for (size_t index = 0; index < pending.size(); index++) {
++    Local<Function> function = pending[index].function;
++    const std::string subject =
++        index > 0 ? "function " + pending[index].name + ", which " +
++                        (own ? "a function held by a region object"
++                             : "a Region.fn() function") +
++                        " uses,"
++        : own ? "a function held by a region object"
++              : "a Region.fn() function";
++    using Analysis = SpawnAnalysis;
++    Analysis uncached{-1, {}, {}, {}, Analysis::Failure::kNotCompiled, {}};
++    Analysis* analysis =
++        AnalyzeSpawnFunction(isolate, context, function, &uncached);
++    if (!analysis) return {};
++    switch (analysis->failure) {
++      case Analysis::Failure::kNone:
++        break;
++      case Analysis::Failure::kNotCompiled:
++        throw_type_error(
++            index > 0 ? subject + " is a method; use a function expression"
++            : own     ? "a region object can hold arrow functions, function "
++                        "expressions and function declarations, not methods"
++                  : "Region.fn() needs an arrow function or a function "
++                    "expression");
++        return {};
++      case Analysis::Failure::kDynamicScope:
++        throw_type_error(subject + " cannot use eval or with");
++        return {};
++      case Analysis::Failure::kClasses:
++        throw_type_error(subject +
++                         " declares or is a class; classes are not supported");
++        return {};
 +    }
-+    if (is_builtin || value->StrictEquals(function)) continue;
-+    if (name == "this" || name == "arguments") {
++    for (const auto& [name, in_probe] : analysis->names) {
++      Local<Value> value;
++      bool is_builtin;
++      bool is_const;
++      std::string error;
++      bool resolved;
++      {
++        // The error below replaces the exception, if any.
++        TryCatch try_catch(isolate);
++        resolved = ResolveCapture(isolate, in_probe, function, name, &value,
++                                  &is_builtin, &error, &is_const);
++      }
++      if (!resolved) {
++        throw_type_error(error.empty() ? "cannot read " + name : error);
++        return {};
++      }
++      if (is_builtin || value->StrictEquals(function)) continue;
 +      i::DirectHandle<i::Object> raw = Utils::OpenDirectHandle(*value);
-+      if (name == "this" &&
-+          (i::IsJSGlobalObject(*raw) || i::IsJSGlobalProxy(*raw))) {
++      if (name == "this" || name == "arguments") {
++        if (name == "this" &&
++            (i::IsJSGlobalObject(*raw) || i::IsJSGlobalProxy(*raw))) {
++          continue;
++        }
++        throw_type_error(
++            subject + " uses " + name +
++            " of its closure; use a function expression to get the " +
++            (name == "this" ? "object it is called on"
++                            : "arguments it is called with"));
++        return {};
++      }
++      if (analysis->written.count(name)) {
++        throw_type_error(
++            subject + " assigns to " + name +
++            " of its closure: every thread would assign to a copy of its "
++            "own. Keep " + name + " in an object the function gets");
++        return {};
++      }
++      if (!value->IsObject()) {
++        if (!is_const) {
++          throw_type_error(
++              subject + " cannot use " + name +
++              " of its closure, which is not a const: every thread gets a "
++              "copy of its value now");
++          return {};
++        }
++        pending[index].captures.emplace_back(name, value);
++        continue;
++      }
++      if (i::JSRegionObject::IsClass(i_isolate, raw) ||
++          i::JSRegionObject::IsSharedFunction(i_isolate, raw)) {
++        pending[index].captures.emplace_back(name, value);
++        continue;
++      }
++      if (i::IsJSFunction(*raw) &&
++          i::Cast<i::JSFunction>(*raw)->shared()->region_literals() &&
++          !i::IsClassConstructor(i::Cast<i::JSFunction>(*raw)->shared()->kind())) {
++        if (index_of(value) < 0) {
++          pending.push_back({value.As<Function>(), name, {}, {}});
++        }
++        pending[index].captures.emplace_back(name, value);
 +        continue;
 +      }
 +      throw_type_error(
-+          subject + " uses " + name +
-+          " of its closure; use a function expression to get the " +
-+          (name == "this" ? "object it is called on" : "arguments it is called with"));
++          subject + " cannot use " + name +
++          " of its closure: every thread compiles the function again without "
++          "it. It can use primitives of consts, classes of Region.class() and "
++          "functions of Region.fn() and of 'use region' code. Pass " + name +
++          " as an argument, or keep it in the object the function is called "
++          "on");
 +      return {};
 +    }
-+    throw_type_error(
-+        subject + " cannot use " + name +
-+        " of its closure: every thread compiles the function again without "
-+        "it. Pass " + name + " as an argument, or keep it in the object the "
-+        "function is called on");
-+    return {};
++    const SourcePlace& place = analysis->place;
++    i::DirectHandle<i::Object> script_name =
++        place.line < 0
++            ? i::DirectHandle<i::Object>(i_isolate->factory()->undefined_value())
++            : i::DirectHandle<i::Object>(
++                  Utils::OpenDirectHandle(
++                      *String::NewFromUtf8(isolate, place.file.c_str())
++                           .ToLocalChecked()));
++    i::DirectHandle<i::Object> raw_function = Utils::OpenDirectHandle(*function);
++    bool region_code =
++        i::IsJSFunction(*raw_function) &&
++        i::Cast<i::JSFunction>(*raw_function)->shared()->region_literals();
++    if (!i::JSRegionObject::NewFunctionDescriptor(
++             i_isolate, Utils::OpenDirectHandle(*analysis->source.Get(isolate)),
++             script_name, std::max(place.line, 0), std::max(place.column, 0),
++             region_code)
++             .ToHandle(&pending[index].descriptor)) {
++      return {};
++    }
 +  }
-+  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
-+  const SourcePlace& place = analysis->place;
-+  i::DirectHandle<i::Object> script_name =
-+      place.line < 0
-+          ? i::DirectHandle<i::Object>(i_isolate->factory()->undefined_value())
-+          : i::DirectHandle<i::Object>(
-+                Utils::OpenDirectHandle(
-+                    *String::NewFromUtf8(isolate, place.file.c_str())
-+                         .ToLocalChecked()));
-+  i::DirectHandle<i::Object> raw = Utils::OpenDirectHandle(*function);
-+  bool region_code = i::IsJSFunction(*raw) &&
-+                     i::Cast<i::JSFunction>(*raw)->shared()->region_literals();
-+  i::MaybeDirectHandle<i::JSFunction> own_function;
-+  if (own) own_function = i::Cast<i::JSFunction>(raw);
++
++  // Every function can be one: what they capture, then the functions.
++  for (Pending& entry : pending) {
++    i::DirectHandle<i::FixedArray> captures = i_isolate->factory()->NewFixedArray(
++        static_cast<int>(2 * entry.captures.size()));
++    for (size_t i = 0; i < entry.captures.size(); i++) {
++      const auto& [name, value] = entry.captures[i];
++      captures->set(static_cast<int>(2 * i),
++                    *Utils::OpenDirectHandle(
++                        *String::NewFromUtf8(isolate, name.c_str())
++                             .ToLocalChecked()));
++      int captured = index_of(value);
++      captures->set(static_cast<int>(2 * i + 1),
++                    captured >= 0 ? i::Tagged<i::Object>(*pending[captured].descriptor)
++                                  : *Utils::OpenDirectHandle(*value));
++    }
++    if (i::JSRegionObject::SetFunctionCaptures(i_isolate, entry.descriptor,
++                                               captures)
++            .IsNothing()) {
++      return {};
++    }
++  }
++  for (size_t i = own ? 0 : 1; i < pending.size(); i++) {
++    i::JSRegionObject::AdoptFunction(
++        i_isolate, pending[i].descriptor,
++        i::Cast<i::JSFunction>(Utils::OpenDirectHandle(*pending[i].function)));
++  }
++  if (own) return root;
 +  i::DirectHandle<i::JSFunction> result;
-+  if (!i::JSRegionObject::NewFunction(
-+           i_isolate,
-+           Utils::OpenDirectHandle(*analysis->source.Get(isolate)),
-+           script_name, std::max(place.line, 0), std::max(place.column, 0),
-+           region_code, own_function)
++  if (!i::JSRegionObject::FunctionOf(i_isolate, pending[0].descriptor)
 +           .ToHandle(&result)) {
 +    return {};
 +  }
@@ -22355,10 +22587,10 @@ index 00000000..13ba2260
 +}  // namespace v8::regions
 diff --git a/src/regions/regions-runtime.h b/src/regions/regions-runtime.h
 new file mode 100644
-index 00000000..905b2277
+index 00000000..0319a0e6
 --- /dev/null
 +++ b/src/regions/regions-runtime.h
-@@ -0,0 +1,198 @@
+@@ -0,0 +1,201 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -22367,6 +22599,7 @@ index 00000000..905b2277
 +#define V8_REGIONS_REGIONS_RUNTIME_H_
 +
 +#include <map>
++#include <set>
 +#include <string>
 +#include <string_view>
 +#include <tuple>
@@ -22458,6 +22691,8 @@ index 00000000..905b2277
 +  Global<String> source;
 +  // Free names the code refers to, and whether every context has them.
 +  std::vector<std::pair<std::string, bool>> names;
++  // Those of `names` the code assigns to.
++  std::set<std::string> written;
 +  enum class Failure { kNone, kNotCompiled, kDynamicScope, kClasses };
 +  Failure failure;
 +  SourcePlace place;

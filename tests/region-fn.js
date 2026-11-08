@@ -12,8 +12,11 @@ const expectError = (name, fn) => {
 };
 
 // What a function may use.
-const limit = 10;
+let limit = 10;
 expectError('captured variable', () => Region.fn((x) => x + limit));
+const step = 3;
+print('captured const:', Region.fn((x) => x + step)(1));
+expectError('assigned capture', () => { const f = (x) => { limit = x; }; return Region.fn(f); });
 expectError('undefined global', () => Region.fn(() => noSuchGlobal));
 expectError('this of an arrow', () => ({ m() { return Region.fn(() => this.n); } }).m());
 expectError('eval', () => Region.fn(() => eval('1')));

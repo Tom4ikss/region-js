@@ -307,24 +307,30 @@ diverged from it, this section says so.
   `Array.prototype[Symbol.iterator]` is respected. On 100,000 numbers: `map` 21.5 → 1.46 ms,
   `for...of` 15.4 → 1.36, spread 17.0 → 0.28, `indexOf` 4.03 → 0.09. `tests/array-methods.js`
   compares each method with an ordinary array of the same values.
-- **`Region.fn(f)`** instead of `Shared.fn`. d8 checks the function with the `spawn` analysis: it may capture
-  only builtin globals, its own name and the global `this`; `eval`/`with`, classes and
-  methods give `TypeError`. The engine (`JSRegionObject::NewFunction`) builds a descriptor
-  `[id, source, script name, line, column, region code]` with strings shared outside regions,
-  compiles `"(" + source + ")"` (with `'use region';` before it if the function was written in
-  such code) with a line and column offset and tags the function with a private
-  symbol of its isolate (not a root: this way the read-only heap does not change). A write to a region creates
-  a `JSRegionFunction` (`JS_REGION_FUNCTION_TYPE`, a subclass of `JSRegionObject`): a copy of the
-  descriptor in the region, one per function per `run`; the same function written over the same entry
+- **`Region.fn(f)`** instead of `Shared.fn`. d8 checks the function with the `spawn` analysis: it may use
+  builtin globals, its own name, the global `this` and captures: consts with primitive values,
+  `Region.class` classes and other such functions; `eval`/`with`, assigned captures, classes and
+  methods give `TypeError`. The engine (`JSRegionObject::NewFunctionDescriptor`) builds a
+  descriptor `[id, source, script name, line, column, region code, captures]`, a `FixedArray` in
+  shared space with shared strings, never changed once a region holds the function; captured
+  functions are their descriptors there, classes their holders. An isolate compiles
+  `"(" + source + ")"` (with `'use region';` before it if the function was written in such code)
+  with a line and column offset; with captures, inside `(function(){let a,b;this.set=...;
+  return(...)})`, and calls `set` once the function is registered, so functions that capture each
+  other get each other. It tags the function with a private symbol of its isolate (not a root:
+  this way the read-only heap does not change). A write to a region creates
+  a `JSRegionFunction` (`JS_REGION_FUNCTION_TYPE`, a subclass of `JSRegionObject`): the id and a
+  reference to the descriptor, one per function per `run`; the same function written over the same entry
   is not rewritten. A read is `ToJSValue`: a function from the isolate's cache (id → weak global
   handle) or a new compilation. Fast paths (IC, CSA, iterator, Maglev, Turboshaft) see the
   range `FIRST/LAST_JS_REGION_MATERIALIZED_TYPE` and go to the runtime, as with a typed array
-  view. There is no deduplication between different writes: about 52 bytes per region.
+  view. There is no deduplication between different writes: about 36 bytes per region.
   A function of `'use region'` code (its `SharedFunctionInfo` has the `region_literals` bit) becomes
   such a function lazily, at the first write into a region (`Evacuator::Copy`, `LiteralValue`,
   `SetProperty`) or capture by a `Region.class` class: a hook set with the `Region` global runs the
-  same analysis and calls `NewFunction` with the function itself, which gets the descriptor and the
-  id instead of a fresh compilation. So the writing thread reads back the very same function.
+  same analysis over the function and the `'use region'` functions it captures, transitively, and
+  only if all of them pass, gives each a descriptor (`AdoptFunction`) instead of a fresh
+  compilation. So the writing thread reads back the very same functions.
   The analysis reads globals without running getters, because it runs in the middle of a store.
 - **`Region.class(C)`**, and every class declared in `'use region'` code. The same analysis as
   `Region.fn` finds what the class captures (primitives, `Region.fn` functions and other such
