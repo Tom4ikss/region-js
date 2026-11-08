@@ -310,15 +310,22 @@ diverged from it, this section says so.
 - **`Region.fn(f)`** instead of `Shared.fn`. d8 checks the function with the `spawn` analysis: it may capture
   only builtin globals, its own name and the global `this`; `eval`/`with`, classes and
   methods give `TypeError`. The engine (`JSRegionObject::NewFunction`) builds a descriptor
-  `[id, source, script name, line, column]` with strings shared outside regions,
-  compiles `"(" + source + ")"` with a line and column offset and tags the function with a private
+  `[id, source, script name, line, column, region code]` with strings shared outside regions,
+  compiles `"(" + source + ")"` (with `'use region';` before it if the function was written in
+  such code) with a line and column offset and tags the function with a private
   symbol of its isolate (not a root: this way the read-only heap does not change). A write to a region creates
   a `JSRegionFunction` (`JS_REGION_FUNCTION_TYPE`, a subclass of `JSRegionObject`): a copy of the
   descriptor in the region, one per function per `run`; the same function written over the same entry
   is not rewritten. A read is `ToJSValue`: a function from the isolate's cache (id → weak global
   handle) or a new compilation. Fast paths (IC, CSA, iterator, Maglev, Turboshaft) see the
   range `FIRST/LAST_JS_REGION_MATERIALIZED_TYPE` and go to the runtime, as with a typed array
-  view. There is no deduplication between different writes: about 48 bytes per region.
+  view. There is no deduplication between different writes: about 52 bytes per region.
+  A function of `'use region'` code (its `SharedFunctionInfo` has the `region_literals` bit) becomes
+  such a function lazily, at the first write into a region (`Evacuator::Copy`, `LiteralValue`,
+  `SetProperty`) or capture by a `Region.class` class: a hook set with the `Region` global runs the
+  same analysis and calls `NewFunction` with the function itself, which gets the descriptor and the
+  id instead of a fresh compilation. So the writing thread reads back the very same function.
+  The analysis reads globals without running getters, because it runs in the middle of a store.
 - **`Region.class(C)`**, and every class declared in `'use region'` code. The same analysis as
   `Region.fn` finds what the class captures (primitives, `Region.fn` functions and other such
   classes); private members, computed field names, nested classes and `eval` give `TypeError`.
@@ -367,7 +374,7 @@ diverged from it, this section says so.
 | Threads | An isolate per thread; regions are a separate shared part of the heap, modeled on shared space |
 | What is stored | Objects and arrays without prototypes, numbers, strings, typed arrays, `Region.fn` functions, `Region.localRef` handles, instances of `Region.class` classes |
 | Prototypes | No own prototype; the prototype is the `Array.prototype` / `Object.prototype` of the isolate that reads, or the prototype of its class |
-| Functions | `Region.fn`: no closures, only builtin globals; each isolate compiles the source itself |
+| Functions | `Region.fn` and functions of `'use region'` code: no closures, only builtin globals; each isolate compiles the source itself |
 | Getting into a region | `#{}` / `#[]` literals and `'use region'` allocate directly in the region; `region.run(fn)` copies a ready graph |
 | Object shape | One shared Map per set of keys in shared space, not a per-region one; the shape is fixed, there are no transitions |
 | Access | One owner or many readers (shared borrow) |

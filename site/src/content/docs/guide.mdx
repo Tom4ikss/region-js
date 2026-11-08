@@ -119,7 +119,9 @@ Since the closure does not move with the function, it can use only its own argum
 
 <Example file="48-region-fn.js" />
 
-Every region the function gets into keeps its own small record of it, about 48 bytes. No matter how many objects of one `run` refer to the function, there is one record; writing the same function into a field again creates nothing.
+Every region the function gets into keeps its own small record of it, about 52 bytes. No matter how many objects of one `run` refer to the function, there is one record; writing the same function into a field again creates nothing.
+
+In a file or function with `'use region'`, `Region.fn` is not needed: a function there becomes such a function by itself, the first time an object of a region is to hold it, and stays the same function, so `region.run(() => ({ area })).area === area`. The rules are the same, checked at that moment: a function that uses a variable of its closure, another function of the file included, gives a `TypeError` that names the variable. Object methods (`{ m() {} }`) cannot be held; write `m: function () {}`. Classes of such code can use these functions too.
 
 ## A reference to an object of your own thread: `Region.localRef` {/* #local-ref */}
 
